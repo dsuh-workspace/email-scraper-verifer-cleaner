@@ -1,0 +1,27 @@
+# Python Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments and Secrets
+.env
+.env.*
+
+# Local Database files
+*.db
+*.sqlite
+database/hvac_leads.db
+
+# Scraper Executable Binary
+app/scraper/google-maps-scraper.exe
+
+# Output data exports
+data/leads_export.csv
+data/temp-*/
+temp-*/
