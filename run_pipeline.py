@@ -2,7 +2,6 @@ import sys
 from app.scraper.run_scraper import execute_scrape_and_ingest
 from app.pipeline.process_leads import process_and_deduplicate_leads
 from app.pipeline.extract_emails import harvest_emails_from_websites
-from app.pipeline.verify_emails import verify_contacts_emails
 from app.pipeline.export_sheets import export_new_leads
 
 def run_end_to_end_pipeline(query: str, location: str, lat: float, lon: float, depth: int = 1):
@@ -11,8 +10,7 @@ def run_end_to_end_pipeline(query: str, location: str, lat: float, lon: float, d
     1. Scrapes Google Maps listings & stores raw results.
     2. Cleans & normalizes raw data, moving unique businesses/contacts to tables.
     3. Crawls websites to extract direct email addresses.
-    4. Verifies emails via Reacher API (or mock).
-    5. Exports newly verified leads to Google Sheets (or CSV).
+    4. Exports newly found leads to Google Sheets (or CSV).
     """
     print("=" * 60)
     print("STARTING END-TO-END LEAD GENERATION PIPELINE")
@@ -31,11 +29,7 @@ def run_end_to_end_pipeline(query: str, location: str, lat: float, lon: float, d
         harvest_emails_from_websites()
         print("-" * 60)
         
-        # Step 4: Email Verification
-        verify_contacts_emails()
-        print("-" * 60)
-        
-        # Step 5: Exporting Leads
+        # Step 4: Exporting Leads
         export_new_leads()
         print("=" * 60)
         print("PIPELINE EXECUTED SUCCESSFULLY")

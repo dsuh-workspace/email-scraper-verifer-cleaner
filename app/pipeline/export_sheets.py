@@ -117,28 +117,27 @@ def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
 
 def export_new_leads():
     """
-    Finds verified contacts that haven't been exported yet,
+    Finds contacts that haven't been exported yet,
     exports them to Sheets (or fallback CSV), and logs the export history.
     """
     session = Session()
     destination = SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else "local_csv_leads"
     
     try:
-        # Query verified contacts that don't have an export history entry for this destination
+        # Query contacts that don't have an export history entry for this destination
         new_leads = session.query(Contact, Business).join(
             Business, Contact.business_id == Business.id
         ).filter(
-            Contact.lead_status == "Verified",
             ~Contact.id.in_(
                 session.query(ExportHistory.contact_id).filter(ExportHistory.destination == destination)
             )
         ).all()
         
         if not new_leads:
-            print("No new verified leads to export.")
+            print("No new leads to export.")
             return
 
-        print(f"Found {len(new_leads)} new verified leads to export.")
+        print(f"Found {len(new_leads)} new leads to export.")
         
         # Try to write to Google Sheets first
         success = append_leads_to_google_sheets(new_leads)
