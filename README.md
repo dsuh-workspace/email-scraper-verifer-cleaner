@@ -81,10 +81,8 @@ To change search targets, modify the main execution block in [run_pipeline.py](f
 if __name__ == "__main__":
     run_end_to_end_pipeline(
         query="Plumbing",             # The target industry keyword
-        location="Plano, TX",         # The geographic target
-        lat=33.0198,                  # Target latitude (for Maps fast-mode)
-        lon=-96.6989,                 # Target longitude (for Maps fast-mode)
-        depth=1                       # Scroll depth (1-10)
+        location="San Francisco, CA", # The geographic target (automatically geocoded)
+        min_contacts=500              # Scrapes with increasing depth until this contact threshold is met
     )
 ```
 
