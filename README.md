@@ -17,8 +17,6 @@ Cleaning, Normalization & Deduplication (Base Domain & Name/Phone Matching)
             ↓
 Email Harvesting (Website Crawling & Regex Extraction)
             ↓
-Email Verification (BillionVerify API)
-            ↓
 Google Sheets & CSV Export (Export history logging to prevent spamming)
 ```
 
@@ -61,9 +59,6 @@ Create a `.env` file in the project root directory:
 ```env
 DATABASE_URL=sqlite:///hvac_leads.db
 
-# BillionVerify Email Verification: set to 'mock' for local simulation, or use your real BillionVerify API credentials
-BILLIONVERIFY_API_KEY=mock
-# BILLIONVERIFY_API_URL=https://api.billionverify.com/v1/verify/single
 
 # Google Sheets Export: set to 'mock' to fall back to local CSV export
 SPREADSHEET_ID=mock
@@ -106,7 +101,6 @@ if __name__ == "__main__":
 │   │   ├── export_sheets.py   # Google Sheets & local CSV exporter
 │   │   ├── extract_emails.py  # Website crawler for email harvesting
 │   │   ├── process_leads.py   # Cleaning, normalization, and deduplication
-│   │   └── verify_emails.py   # BillionVerify API email verification worker
 │   └── scraper/
 │       ├── google-maps-scraper.exe  # Compiled scraper CLI binary
 │       └── run_scraper.py     # Python subprocess wrapper & raw DB loader
