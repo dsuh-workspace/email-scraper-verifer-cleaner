@@ -9,7 +9,30 @@ from app.db.create_tables import ScrapeRun, RawLead
 
 Session = sessionmaker(bind=engine)
 
-def execute_scrape_and_ingest(query: str, location: str, lat: float, lon: float, depth: int = 1):
+def geocode_location(location: str):
+    """
+    Geocodes a location string using Nominatim OpenStreetMap API.
+    Returns (lat, lon) or (None, None) if not found or on error.
+    """
+    import requests
+    headers = {
+        "User-Agent": "hvac-lead-engine-scraper/1.0"
+    }
+    url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(location)}&format=json&limit=1"
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                lat = float(data[0]["lat"])
+                lon = float(data[0]["lon"])
+                print(f"Geocoded '{location}' to ({lat}, {lon})")
+                return lat, lon
+    except Exception as e:
+        print(f"[Warning] Geocoding failed for '{location}': {e}")
+    return None, None
+
+def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon: float = None, depth: int = 1):
     """
     Runs the google-maps-scraper executable for a query at the specified coordinates,
     then parses the resulting JSON and ingests it into the SQLite database.
@@ -28,6 +51,12 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float, lon: float,
     session.commit()
     scrape_run_id = db_run.id
     print(f"[{datetime.now()}] Started Scrape Run #{scrape_run_id} for '{query}' in '{location}'...")
+
+    # Geocode if lat/lon are not provided
+    if lat is None or lon is None:
+        geocoded_lat, geocoded_lon = geocode_location(location)
+        if geocoded_lat is not None and geocoded_lon is not None:
+            lat, lon = geocoded_lat, geocoded_lon
 
     # 2. Set up temporary files for query and results
     # Use temporary files so we don't pollute the workspace
@@ -54,9 +83,11 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float, lon: float,
             "-depth", str(depth),
             "-pages-per-browser", "2",
             "-fast-mode",
-            "-email",
-            "-geo", f"{lat},{lon}"
+            "-email"
         ]
+        
+        if lat is not None and lon is not None:
+            cmd.extend(["-geo", f"{lat},{lon}"])
         
         print(f"Executing: {' '.join(cmd)}")
         
