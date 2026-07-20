@@ -122,6 +122,47 @@ python run_pipeline.py \
   --max-depth 9
 ```
 
+`run_pipeline.py` keeps legacy semantics: `--min-contacts` is total DB
+contacts, not new contacts from current run.
+
+### Batch zip-file mode
+
+Use `run_zip_batch.py` when you want one CSV of zips/locations and a per-zip
+success target.
+
+```bash
+python run_zip_batch.py \
+  --query "Plumbing" \
+  --zip-file san_jose_zips.csv \
+  --target-new-exportable 20 \
+  --max-depth 9
+```
+
+CSV formats supported:
+
+```csv
+zip
+95112
+95123
+```
+
+```csv
+zip,city,state
+95112,San Jose,CA
+95123,San Jose,CA
+```
+
+```csv
+location
+San Jose, CA 95112
+San Jose, CA 95123
+```
+
+Batch semantics:
+- `--target-new-exportable` = new contacts from this zip not yet exported
+- stops each zip on target reached, `--max-depth`, or stale iterations
+- exports once at batch end
+
 The scraper depth starts at 1 and grows by 2 each iteration up to
 `--max-depth`. The location is geocoded **once** at pipeline start and passed
 into every subsequent scrape iteration — Nominatim ToS friendly.
