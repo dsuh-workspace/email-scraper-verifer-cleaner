@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact, Business, ExportHistory
 
-from app.logging_config import get_logger
+from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -138,8 +138,12 @@ def export_new_leads(destination: str | None = None):
         new_leads = session.query(Contact, Business).join(
             Business, Contact.business_id == Business.id
         ).filter(
+            Contact.email.isnot(None),
             ~Contact.id.in_(
-                session.query(ExportHistory.contact_id).filter(ExportHistory.destination == destination)
+                session.query(ExportHistory.contact_id).filter(
+                    ExportHistory.destination == destination,
+                    ExportHistory.contact_id.isnot(None),
+                )
             )
         ).all()
         
@@ -175,4 +179,5 @@ def export_new_leads(destination: str | None = None):
         session.close()
 
 if __name__ == "__main__":
+    setup_logging()
     export_new_leads()

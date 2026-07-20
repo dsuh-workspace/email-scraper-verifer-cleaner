@@ -22,8 +22,6 @@ _CONFIGURED = False
 def setup_logging(level: str | None = None) -> None:
     """Idempotent root-logger configuration. Call at process start."""
     global _CONFIGURED
-    if _CONFIGURED:
-        return
 
     resolved_level = (level or os.getenv("LOG_LEVEL", "INFO")).upper()
     numeric_level = getattr(logging, resolved_level, logging.INFO)

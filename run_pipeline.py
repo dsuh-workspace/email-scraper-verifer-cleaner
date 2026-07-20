@@ -54,9 +54,11 @@ def get_exportable_contact_count(destination: str = LEGACY_EXPORT_DESTINATION) -
     session = Session()
     try:
         return session.query(Contact).filter(
+            Contact.email.isnot(None),
             ~Contact.id.in_(
                 session.query(ExportHistory.contact_id).filter(
-                    ExportHistory.destination == destination
+                    ExportHistory.destination == destination,
+                    ExportHistory.contact_id.isnot(None),
                 )
             )
         ).count()

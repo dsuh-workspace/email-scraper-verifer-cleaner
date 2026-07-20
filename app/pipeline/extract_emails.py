@@ -244,6 +244,9 @@ def _persist_emails_for_business(session, biz: Business, emails: List[str]) -> i
 
     if added:
         for placeholder in placeholders:
+            session.query(ExportHistory).filter(
+                ExportHistory.contact_id == placeholder.id
+            ).delete(synchronize_session=False)
             session.delete(placeholder)
 
     return added

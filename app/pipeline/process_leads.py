@@ -30,7 +30,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import RawLead, Business, Contact
 
-from app.logging_config import get_logger
+from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -241,4 +241,5 @@ def process_and_deduplicate_leads() -> None:
 
 
 if __name__ == "__main__":
+    setup_logging()
     process_and_deduplicate_leads()

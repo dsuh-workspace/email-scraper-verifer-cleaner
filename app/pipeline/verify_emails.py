@@ -27,7 +27,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact, EmailVerification
 
-from app.logging_config import get_logger
+from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -179,4 +179,5 @@ def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
 
 
 if __name__ == "__main__":
+    setup_logging()
     verify_contacts_emails()

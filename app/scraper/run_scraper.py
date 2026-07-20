@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import ScrapeRun, RawLead
 
-from app.logging_config import get_logger
+from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -257,6 +257,7 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
         session.close()
 
 if __name__ == "__main__":
+    setup_logging()
     # Test Run: Scrape plumbing leads in Plano, TX
     # Plano, TX coordinates: 33.0198, -96.6989
     try:
