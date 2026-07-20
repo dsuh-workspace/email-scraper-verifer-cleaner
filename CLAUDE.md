@@ -129,6 +129,19 @@ CREATE UNIQUE INDEX ix_businesses_domain ON businesses(domain);
 
 -- Add (business_id, email) composite unique on contacts
 CREATE UNIQUE INDEX uq_contact_biz_email ON contacts(business_id, email);
+
+-- For newer export_history rows, add timestamp + disallow NULL contact_id
+ALTER TABLE export_history ADD COLUMN exported_at TIMESTAMP;
+UPDATE export_history SET exported_at = CURRENT_TIMESTAMP WHERE exported_at IS NULL;
+```
+
+Manual follow-up for existing DBs:
+
+```sql
+-- Inspect legacy bad domains from old case-sensitive scheme handling
+SELECT id, business_name, domain
+FROM businesses
+WHERE domain = 'http:' OR domain LIKE 'http:%';
 ```
 
 Or nuke `database/hvac_leads.db` and re-run — `init_db()` builds
@@ -159,3 +172,34 @@ everything.
    process / harvest loop or before export. If we want inline
    verification later, decide when it should run (each iteration vs once
    at end) and whether cost / latency is acceptable.
+
+---
+
+## Batch ZIP yield / count semantics
+
+San Jose ZIP sweeps on 2026-07-20 showed strong diminishing returns after
+first few ZIPs. `95110` produced `new_exportable=22`, `95111` produced
+`16`, then many later ZIPs produced `0-6` and several stopped early on
+stale iterations (`95113`, `95120`, `95122`, `95123`, `95128`, `95130`).
+Repeated `Added 0 new businesses`, `Added 0 new contacts`, and
+`Harvested 0 unique email contacts` lines are normal signal that nearby
+ZIPs are overlapping same market, not necessarily pipeline failure.
+
+For batch evaluation, prefer `new_exportable_contacts` over
+`total_contacts`. In `run_pipeline.py`, `get_contact_count()` returns
+cumulative DB-wide contact count, while `get_exportable_contact_count()`
+counts contacts not yet exported for destination and
+`new_exportable_contacts` is computed as current exportable minus baseline
+for that location run.
+
+Important consequence: `total_contacts` and legacy `--min-contacts`
+semantics are cumulative across existing DB state, not "new this ZIP" or
+"new this run" counts. `new exportable` also does **not** mean "new valid
+emails" or "new verified emails". `export_sheets.py` exports any contact
+missing `export_history` for destination, including phone-only placeholder
+contacts with blank email if they still exist.
+
+Current data-quality caveat: harvested data can include suspicious junk
+emails (`example@mysite.com`, `info@mysite.com`,
+`wilvercasti@gami.com`). Spot-check exported CSV/Sheets before outreach or
+verification, especially after broad ZIP sweeps.

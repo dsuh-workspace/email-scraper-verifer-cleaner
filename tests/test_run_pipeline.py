@@ -374,11 +374,59 @@ class TestZipBatchMain:
             ),
         )
 
+        init_db_calls = []
+        monkeypatch.setattr(run_zip_batch, "init_db", lambda: init_db_calls.append(True))
+
         exported = []
         monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda: exported.append(True))
 
         run_zip_batch.main()
 
+        assert init_db_calls == [True]
         assert [call["location"] for call in calls] == ["95112", "95123"]
         assert all(call["target_new_exportable"] == 7 for call in calls)
+        assert exported == [True]
+
+    def test_continues_after_location_failure(self, monkeypatch, tmp_path, modules):
+        run_pipeline, run_zip_batch = modules
+
+        path = tmp_path / "zips.csv"
+        path.write_text("zip\n95112\n95123\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_zip_batch.py",
+                "--query",
+                "Plumbing",
+                "--zip-file",
+                str(path),
+            ],
+        )
+
+        seen = []
+
+        def fake_run_location_pipeline(**kwargs):
+            seen.append(kwargs["location"])
+            if kwargs["location"] == "95112":
+                raise RuntimeError("boom")
+            return run_pipeline.LocationRunMetrics(
+                depths_run=(1,),
+                final_depth=1,
+                total_contacts=10,
+                exportable_contacts=10,
+                baseline_exportable_contacts=3,
+                new_exportable_contacts=7,
+                stale_iterations=0,
+            )
+
+        monkeypatch.setattr(run_zip_batch, "run_location_pipeline", fake_run_location_pipeline)
+
+        exported = []
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda: exported.append(True))
+
+        run_zip_batch.main()
+
+        assert seen == ["95112", "95123"]
         assert exported == [True]

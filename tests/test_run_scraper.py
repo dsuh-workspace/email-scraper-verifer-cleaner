@@ -40,7 +40,7 @@ class TestScraperProxyArgs:
             "http://proxy1.example.com:8080,,http://proxy2.example.com:8081",
         )
 
-        with pytest.raises(ValueError, match="Proxy URL cannot be empty"):
+        with pytest.raises(ValueError, match="empty entry"):
             _scraper_proxy_args()
 
     def test_rejects_unsupported_scheme(self, monkeypatch):
