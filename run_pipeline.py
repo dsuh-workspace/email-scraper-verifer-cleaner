@@ -30,7 +30,7 @@ LEGACY_EXPORT_DESTINATION = "local_csv_leads"
 
 @dataclass(frozen=True)
 class LocationRunMetrics:
-    depths_run: list[int]
+    depths_run: tuple[int, ...]
     final_depth: int
     total_contacts: int
     exportable_contacts: int
@@ -147,7 +147,7 @@ def run_location_pipeline(
                     location,
                 )
                 return LocationRunMetrics(
-                    depths_run=depths_run,
+                    depths_run=tuple(depths_run),
                     final_depth=depth,
                     total_contacts=total_contacts,
                     exportable_contacts=exportable_contacts,

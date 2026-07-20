@@ -14,6 +14,7 @@ load_dotenv()
 
 Session = sessionmaker(bind=engine)
 
+LEGACY_EXPORT_DESTINATION = "local_csv_leads"
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "mock")
 CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE", "credentials.json")
 
@@ -122,13 +123,15 @@ def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
         logger.error(f"Failed to write to local CSV: {e}")
         return False
 
-def export_new_leads():
+def export_new_leads(destination: str | None = None):
     """
     Finds contacts that haven't been exported yet,
     exports them to Sheets (or fallback CSV), and logs the export history.
     """
     session = Session()
-    destination = SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else "local_csv_leads"
+    destination = destination or (
+        SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else LEGACY_EXPORT_DESTINATION
+    )
     
     try:
         # Query contacts that don't have an export history entry for this destination

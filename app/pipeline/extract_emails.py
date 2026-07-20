@@ -65,7 +65,7 @@ CONTACT_PATHS = ("", "/contact", "/contact-us", "/about", "/about-us", "/team")
 REQUEST_TIMEOUT_SEC = 7
 MAX_WORKERS = 10
 PER_HOST_DELAY_SEC = 0.75  # gap between requests hitting the same host
-ALLOWED_PROXY_SCHEMES = {"http", "https"}
+ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 
 _HEADERS = {
     "User-Agent": (
@@ -108,7 +108,7 @@ def extract_emails_from_html(html_text: str) -> List[str]:
 
 def _normalize_url(url: str) -> str:
     url = url.strip()
-    if not url.startswith(("http://", "https://")):
+    if not re.match(r'^https?://', url, re.IGNORECASE):
         url = "http://" + url
     return url
 
@@ -192,21 +192,20 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
                     target, headers=_HEADERS, timeout=REQUEST_TIMEOUT_SEC,
                     allow_redirects=True, proxies=proxies,
                 )
+                if resp.status_code != 200 or not resp.text:
+                    continue
+
+                emails = extract_emails_from_html(resp.text)
+                if emails:
+                    found.update(emails)
+                    # Homepage often has one address; contact pages usually
+                    # have all of them. Keep going until we've tried /contact.
+                    if path in ("/contact", "/contact-us"):
+                        break
             except requests.RequestException:
                 continue
-
-            if resp.status_code != 200 or not resp.text:
-                continue
-
-            emails = extract_emails_from_html(resp.text)
-            if emails:
-                found.update(emails)
-                # Homepage often has one address; contact pages usually
-                # have all of them. Keep going until we've tried /contact.
-                if path in ("/contact", "/contact-us"):
-                    break
-
-            time.sleep(PER_HOST_DELAY_SEC)
+            finally:
+                time.sleep(PER_HOST_DELAY_SEC)
 
     return sorted(found)
 
@@ -256,10 +255,10 @@ def harvest_emails_from_websites() -> None:
     Persists results in the main thread — SQLAlchemy sessions are not thread-safe.
     """
     session = Session()
-    crawler_proxies = _build_crawler_proxies()
-    if crawler_proxies:
-        logger.info("Crawler proxies enabled for %s.", ", ".join(sorted(crawler_proxies)))
     try:
+        crawler_proxies = _build_crawler_proxies()
+        if crawler_proxies:
+            logger.info("Crawler proxies enabled for %s.", ", ".join(sorted(crawler_proxies)))
         # Preload the set of business_ids that already have at least one
         # email contact — single SELECT vs one-per-business.
         already_contacted = {

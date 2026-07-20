@@ -135,7 +135,7 @@ class ExportHistory(Base):
 
     id = Column(Integer, primary_key=True)
     contact_id = Column(
-        Integer, ForeignKey("contacts.id"), index=True,
+        Integer, ForeignKey("contacts.id", ondelete="CASCADE"), index=True,
     )
     destination = Column(Text, index=True)
 

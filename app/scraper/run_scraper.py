@@ -74,6 +74,11 @@ def _scraper_proxy_args() -> list[str]:
     if not proxy_values:
         return []
 
+    if any(not proxy_url.strip() for proxy_url in proxy_values):
+        raise ValueError(
+            "SCRAPER_PROXIES contains an empty entry. Remove trailing or double commas."
+        )
+
     proxies = []
     for proxy_url in proxy_values:
         proxies.append(_validate_proxy_url(proxy_url, allow_socks=True))
