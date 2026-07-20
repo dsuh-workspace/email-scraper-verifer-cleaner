@@ -1,9 +1,13 @@
 """
-Unit tests for app.pipeline.extract_emails.extract_emails_from_html —
-the pure HTML → email-list function.
+Unit tests for app.pipeline.extract_emails helpers.
 """
 
-from app.pipeline.extract_emails import extract_emails_from_html
+import pytest
+
+from app.pipeline.extract_emails import (
+    _build_crawler_proxies,
+    extract_emails_from_html,
+)
 
 
 class TestExtractEmailsFromHtml:
@@ -56,3 +60,59 @@ class TestExtractEmailsFromHtml:
         assert extract_emails_from_html(html) == [
             "alpha@acme.com", "beta@acme.com", "zeta@acme.com",
         ]
+
+
+@pytest.fixture(autouse=True)
+def _clear_crawler_proxy_env(monkeypatch):
+    monkeypatch.delenv("CRAWLER_PROXY", raising=False)
+    monkeypatch.delenv("CRAWLER_HTTP_PROXY", raising=False)
+    monkeypatch.delenv("CRAWLER_HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("CRAWLER_PROXY_FILE", raising=False)
+
+
+class TestBuildCrawlerProxies:
+    def test_returns_none_when_unset(self):
+        assert _build_crawler_proxies() is None
+
+    def test_uses_fallback_for_both_schemes(self, monkeypatch):
+        monkeypatch.setenv("CRAWLER_PROXY", "http://proxy.example.com:8080")
+
+        assert _build_crawler_proxies() == {
+            "http": "http://proxy.example.com:8080",
+            "https": "http://proxy.example.com:8080",
+        }
+
+    def test_prefers_split_values(self, monkeypatch):
+        monkeypatch.setenv("CRAWLER_PROXY", "http://fallback.example.com:8080")
+        monkeypatch.setenv("CRAWLER_HTTP_PROXY", "http://http.example.com:8081")
+        monkeypatch.setenv("CRAWLER_HTTPS_PROXY", "https://https.example.com:8443")
+
+        assert _build_crawler_proxies() == {
+            "http": "http://http.example.com:8081",
+            "https": "https://https.example.com:8443",
+        }
+
+    def test_rejects_invalid_scheme(self, monkeypatch):
+        monkeypatch.setenv("CRAWLER_PROXY", "socks5://proxy.example.com:1080")
+        monkeypatch.delenv("CRAWLER_HTTP_PROXY", raising=False)
+        monkeypatch.delenv("CRAWLER_HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("CRAWLER_PROXY_FILE", raising=False)
+
+        with pytest.raises(ValueError, match="Unsupported crawler proxy scheme"):
+            _build_crawler_proxies()
+
+    def test_uses_first_proxy_from_file(self, monkeypatch, tmp_path):
+        proxy_file = tmp_path / "proxies.txt"
+        proxy_file.write_text(
+            "# comment\nhttp://proxy1.example.com:8080\nhttp://proxy2.example.com:8081\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("CRAWLER_PROXY", raising=False)
+        monkeypatch.delenv("CRAWLER_HTTP_PROXY", raising=False)
+        monkeypatch.delenv("CRAWLER_HTTPS_PROXY", raising=False)
+        monkeypatch.setenv("CRAWLER_PROXY_FILE", str(proxy_file))
+
+        assert _build_crawler_proxies() == {
+            "http": "http://proxy1.example.com:8080",
+            "https": "http://proxy1.example.com:8080",
+        }

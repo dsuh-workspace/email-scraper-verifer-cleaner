@@ -19,12 +19,13 @@ Design notes
   business go through this lock in sequence.
 """
 
+import os
 import re
 import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Set
+from typing import List, Optional, Set
 
 import requests
 from sqlalchemy.orm import sessionmaker
@@ -64,6 +65,7 @@ CONTACT_PATHS = ("", "/contact", "/contact-us", "/about", "/about-us", "/team")
 REQUEST_TIMEOUT_SEC = 7
 MAX_WORKERS = 10
 PER_HOST_DELAY_SEC = 0.75  # gap between requests hitting the same host
+ALLOWED_PROXY_SCHEMES = {"http", "https"}
 
 _HEADERS = {
     "User-Agent": (
@@ -111,7 +113,63 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def _crawl_business(url: str) -> List[str]:
+def _validate_proxy_url(proxy_url: str) -> str:
+    proxy_url = proxy_url.strip()
+    if not proxy_url:
+        raise ValueError("Crawler proxy URL cannot be empty.")
+
+    parsed = urllib.parse.urlparse(proxy_url)
+    if parsed.scheme not in ALLOWED_PROXY_SCHEMES:
+        allowed = ", ".join(sorted(ALLOWED_PROXY_SCHEMES))
+        raise ValueError(f"Unsupported crawler proxy scheme {parsed.scheme!r}. Allowed: {allowed}")
+    if not parsed.hostname or not parsed.port:
+        raise ValueError(f"Crawler proxy URL must include host and port: {proxy_url!r}")
+
+    return proxy_url
+
+
+def _load_proxy_file(file_path: str) -> List[str]:
+    proxies = []
+    with open(file_path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            proxies.append(line)
+    return proxies
+
+
+def _build_crawler_proxies() -> Optional[dict[str, str]]:
+    http_proxy = os.getenv("CRAWLER_HTTP_PROXY", "").strip()
+    https_proxy = os.getenv("CRAWLER_HTTPS_PROXY", "").strip()
+    fallback_proxy = os.getenv("CRAWLER_PROXY", "").strip()
+    proxy_file = os.getenv("CRAWLER_PROXY_FILE", "").strip()
+
+    file_proxy = None
+    if proxy_file:
+        file_proxies = _load_proxy_file(proxy_file)
+        if file_proxies:
+            file_proxy = _validate_proxy_url(file_proxies[0])
+
+    proxies = {}
+    if http_proxy:
+        proxies["http"] = _validate_proxy_url(http_proxy)
+    elif fallback_proxy:
+        proxies["http"] = _validate_proxy_url(fallback_proxy)
+    elif file_proxy:
+        proxies["http"] = file_proxy
+
+    if https_proxy:
+        proxies["https"] = _validate_proxy_url(https_proxy)
+    elif fallback_proxy:
+        proxies["https"] = _validate_proxy_url(fallback_proxy)
+    elif file_proxy:
+        proxies["https"] = file_proxy
+
+    return proxies or None
+
+
+def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[str]:
     """
     Fetch each path in CONTACT_PATHS in order, aggregating emails.
     Short-circuits at the first page that yields at least one email.
@@ -132,7 +190,7 @@ def _crawl_business(url: str) -> List[str]:
             try:
                 resp = requests.get(
                     target, headers=_HEADERS, timeout=REQUEST_TIMEOUT_SEC,
-                    allow_redirects=True,
+                    allow_redirects=True, proxies=proxies,
                 )
             except requests.RequestException:
                 continue
@@ -198,6 +256,9 @@ def harvest_emails_from_websites() -> None:
     Persists results in the main thread — SQLAlchemy sessions are not thread-safe.
     """
     session = Session()
+    crawler_proxies = _build_crawler_proxies()
+    if crawler_proxies:
+        logger.info("Crawler proxies enabled for %s.", ", ".join(sorted(crawler_proxies)))
     try:
         # Preload the set of business_ids that already have at least one
         # email contact — single SELECT vs one-per-business.
@@ -226,7 +287,7 @@ def harvest_emails_from_websites() -> None:
         # this thread as results come back.
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_biz = {
-                pool.submit(_crawl_business, biz.website): biz
+                pool.submit(_crawl_business, biz.website, crawler_proxies): biz
                 for biz in pending
             }
 

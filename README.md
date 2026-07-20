@@ -81,6 +81,15 @@ CREDENTIALS_FILE=credentials.json
 REACHER_API_URL=http://104.128.66.74:8080/v0/check_email
 REACHER_TIMEOUT_SEC=30
 
+# Optional proxy config
+SCRAPER_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://proxy2.example.com:1080
+SCRAPER_PROXIES_FILE=proxies.txt
+CRAWLER_PROXY=http://user:pass@proxy3.example.com:8080
+CRAWLER_PROXY_FILE=proxies.txt
+# Or split crawler proxies by scheme
+# CRAWLER_HTTP_PROXY=http://proxy-http.example.com:8080
+# CRAWLER_HTTPS_PROXY=https://proxy-https.example.com:8443
+
 # Kamatera deploy credentials (only needed if you re-provision the
 # verifier server — the verify_emails.py module itself does NOT need them)
 KAMATERA_ACCESS_KEY=...
@@ -116,6 +125,14 @@ python run_pipeline.py \
 The scraper depth starts at 1 and grows by 2 each iteration up to
 `--max-depth`. The location is geocoded **once** at pipeline start and passed
 into every subsequent scrape iteration — Nominatim ToS friendly.
+
+Proxy notes:
+- `SCRAPER_PROXIES` passes comma-separated proxies straight to gosom `-proxies`.
+- `SCRAPER_PROXIES_FILE` loads one proxy URL per line and appends them to `SCRAPER_PROXIES`.
+- `CRAWLER_PROXY` applies one HTTP/HTTPS proxy to website crawling.
+- `CRAWLER_PROXY_FILE` loads one proxy URL per line; crawler uses first valid entry.
+- `CRAWLER_HTTP_PROXY` and `CRAWLER_HTTPS_PROXY` override `CRAWLER_PROXY` / `CRAWLER_PROXY_FILE` per scheme.
+- Crawler proxy support currently accepts `http` and `https` only.
 
 ---
 

@@ -4,6 +4,7 @@ import platform
 import subprocess
 import tempfile
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import ScrapeRun, RawLead
@@ -27,6 +28,59 @@ def _scraper_binary_path() -> str:
     return os.path.abspath(os.path.join(scraper_dir, name))
 
 Session = sessionmaker(bind=engine)
+
+
+def _validate_proxy_url(proxy_url: str, *, allow_socks: bool) -> str:
+    """Trim and validate one proxy URL, returning normalized value."""
+    proxy_url = proxy_url.strip()
+    if not proxy_url:
+        raise ValueError("Proxy URL cannot be empty.")
+
+    parsed = urlparse(proxy_url)
+    allowed_schemes = {"http", "https"}
+    if allow_socks:
+        allowed_schemes.update({"socks5", "socks5h"})
+
+    if parsed.scheme not in allowed_schemes:
+        allowed = ", ".join(sorted(allowed_schemes))
+        raise ValueError(f"Unsupported proxy scheme {parsed.scheme!r}. Allowed: {allowed}")
+    if not parsed.hostname or not parsed.port:
+        raise ValueError(f"Proxy URL must include host and port: {proxy_url!r}")
+
+    return proxy_url
+
+
+def _load_proxy_file(file_path: str) -> list[str]:
+    proxies = []
+    with open(file_path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            proxies.append(line)
+    return proxies
+
+
+def _scraper_proxy_args() -> list[str]:
+    """Return upstream gosom proxy args from env string or file."""
+    raw_proxies = os.getenv("SCRAPER_PROXIES", "").strip()
+    proxy_file = os.getenv("SCRAPER_PROXIES_FILE", "").strip()
+
+    proxy_values = []
+    if raw_proxies:
+        proxy_values.extend(raw_proxies.split(","))
+    if proxy_file:
+        proxy_values.extend(_load_proxy_file(proxy_file))
+    if not proxy_values:
+        return []
+
+    proxies = []
+    for proxy_url in proxy_values:
+        proxies.append(_validate_proxy_url(proxy_url, allow_socks=True))
+
+    logger.info("Scraper proxies enabled (%d configured).", len(proxies))
+    return ["-proxies", ",".join(proxies)]
+
 
 def geocode_location(location: str):
     """
@@ -110,6 +164,7 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
             "-fast-mode",
             "-email"
         ]
+        cmd.extend(_scraper_proxy_args())
         
         if lat is not None and lon is not None:
             cmd.extend(["-geo", f"{lat},{lon}"])
