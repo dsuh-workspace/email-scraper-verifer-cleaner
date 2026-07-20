@@ -25,6 +25,7 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
     text,
+    Float
 )
 from sqlalchemy.orm import declarative_base
 
@@ -70,6 +71,12 @@ class RawLead(Base):
     phone = Column(Text)
     website = Column(Text)
     email = Column(Text)
+    review_count = Column(Integer)
+    review_rating = Column(Float)
+    address = Column(Text)
+    status = Column(Text)
+    description = Column(Text)
+    place_id = Column(Text)
 
     # Stamped by process_leads after this raw row has been cleaned and
     # promoted into businesses/contacts. NULL means "still to process".
@@ -89,6 +96,12 @@ class Business(Base):
     # Nullable — some raw leads have no website.
     domain = Column(Text, unique=True, index=True)
     phone = Column(Text, index=True)
+    review_count = Column(Integer)
+    review_rating = Column(Float)
+    address = Column(Text)
+    status = Column(Text)
+    description = Column(Text)
+    place_id = Column(Text)
 
 
 class Contact(Base):

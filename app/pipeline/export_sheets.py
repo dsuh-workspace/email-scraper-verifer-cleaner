@@ -51,7 +51,7 @@ def append_leads_to_google_sheets(leads_to_export):
         sheet = service.spreadsheets()
         
         # Prepare rows to append
-        # Headers: Name, Email, Phone, Title, Business Name, Website, Category
+        # Headers: Name, Email, Phone, Title, Business Name, Website, Category, Review Count, Review Rating, Address, Status, Description, Place ID
         values = []
         for contact, biz in leads_to_export:
             values.append([
@@ -61,13 +61,19 @@ def append_leads_to_google_sheets(leads_to_export):
                 contact.title,
                 biz.business_name,
                 biz.website,
-                biz.category
+                biz.category,
+                str(biz.review_count) if biz.review_count is not None else "",
+                str(biz.review_rating) if biz.review_rating is not None else "",
+                biz.address or "",
+                biz.status or "",
+                biz.description or "",
+                biz.place_id or ""
             ])
-            
+
         body = {'values': values}
-        
+
         # Append to Sheet1 (starting at Column A)
-        range_name = 'Sheet1!A:G'
+        range_name = 'Sheet1!A:M'
         result = sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=range_name,
@@ -102,10 +108,12 @@ def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
             # Write headers if file is being created
             if not file_exists:
                 writer.writerow([
-                    "Export Date", "Contact Name", "Email", "Phone", 
-                    "Job Title", "Business Name", "Website", "Category"
+                    "Export Date", "Contact Name", "Email", "Phone",
+                    "Job Title", "Business Name", "Website", "Category",
+                    "Review Count", "Review Rating", "Address", "Status",
+                    "Description", "Place ID"
                 ])
-                
+
             for contact, biz in leads_to_export:
                 writer.writerow([
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -115,7 +123,13 @@ def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
                     contact.title,
                     biz.business_name,
                     biz.website,
-                    biz.category
+                    biz.category,
+                    str(biz.review_count) if biz.review_count is not None else "",
+                    str(biz.review_rating) if biz.review_rating is not None else "",
+                    biz.address or "",
+                    biz.status or "",
+                    biz.description or "",
+                    biz.place_id or ""
                 ])
         logger.info("Local CSV export completed.")
         return True

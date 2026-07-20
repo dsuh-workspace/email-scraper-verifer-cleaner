@@ -173,7 +173,7 @@ class TestRunLocationPipeline:
             stale_iterations_limit=2,
         )
 
-        assert metrics.depths_run == [1]
+        assert metrics.depths_run == (1,)
         assert metrics.new_exportable_contacts == 4
         assert metrics.total_contacts == 12
 
@@ -200,7 +200,7 @@ class TestRunLocationPipeline:
             stale_iterations_limit=2,
         )
 
-        assert metrics.depths_run == [1, 3]
+        assert metrics.depths_run == (1, 3)
         assert metrics.new_exportable_contacts == 0
         assert metrics.stale_iterations == 2
 
@@ -227,7 +227,7 @@ class TestRunLocationPipeline:
             stale_iterations_limit=None,
         )
 
-        assert metrics.depths_run == [1, 3]
+        assert metrics.depths_run == (1, 3)
         assert metrics.final_depth == 3
 
 

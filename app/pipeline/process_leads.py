@@ -182,6 +182,12 @@ def process_and_deduplicate_leads() -> None:
                     website=cleaned_website,
                     domain=domain,
                     phone=cleaned_phone,
+                    review_count=raw.review_count,
+                    review_rating=raw.review_rating,
+                    address=raw.address,
+                    status=raw.status,
+                    description=raw.description,
+                    place_id=raw.place_id
                 )
                 session.add(new_business)
                 session.flush()  # populate .id

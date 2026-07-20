@@ -93,7 +93,7 @@ class TestBuildCrawlerProxies:
         }
 
     def test_rejects_invalid_scheme(self, monkeypatch):
-        monkeypatch.setenv("CRAWLER_PROXY", "socks5://proxy.example.com:1080")
+        monkeypatch.setenv("CRAWLER_PROXY", "ftp://proxy.example.com:21")
         monkeypatch.delenv("CRAWLER_HTTP_PROXY", raising=False)
         monkeypatch.delenv("CRAWLER_HTTPS_PROXY", raising=False)
         monkeypatch.delenv("CRAWLER_PROXY_FILE", raising=False)

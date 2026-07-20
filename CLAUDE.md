@@ -1,10 +1,11 @@
 # email-scraper-verifer-cleaner — Review Notes
 
-Living review + backlog. Updated 2026-07-19.
+Living review + backlog. Updated 2026-07-20.
 
 Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
 dedupes → crawls sites for emails → optionally verifies via self-hosted
 Reacher on Kamatera → exports Sheets/CSV.
+Now captures rich map details (Review Count, Review Rating, Address, Status, Description, Place ID).
 
 ---
 

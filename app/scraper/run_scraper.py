@@ -218,10 +218,16 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
                 lead = RawLead(
                     scrape_run_id=scrape_run_id,
                     business_name=item.get("title"),
-                    category=category_str,
+                    category=", ".join(item.get("categories", [])) or category_str,
                     phone=item.get("phone"),
                     website=item.get("web_site"),
-                    email=email_str
+                    email=email_str,
+                    review_count=item.get("review_count"),
+                    review_rating=item.get("review_rating"),
+                    address=item.get("address"),
+                    status=item.get("status"),
+                    description=item.get("description"),
+                    place_id=item.get("place_id")
                 )
                 raw_leads_to_insert.append(lead)
             
