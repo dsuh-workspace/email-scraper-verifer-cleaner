@@ -173,7 +173,7 @@ Proxy notes:
 - `CRAWLER_PROXY` applies one HTTP/HTTPS proxy to website crawling.
 - `CRAWLER_PROXY_FILE` loads one proxy URL per line; crawler uses first valid entry.
 - `CRAWLER_HTTP_PROXY` and `CRAWLER_HTTPS_PROXY` override `CRAWLER_PROXY` / `CRAWLER_PROXY_FILE` per scheme.
-- Crawler proxy support currently accepts `http` and `https` only.
+- Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h`.
 
 ---
 
@@ -237,12 +237,15 @@ noise doesn't drown out pipeline output. Add a `FileHandler` to
 .venv/bin/pytest
 ```
 
-The suite covers the pure helpers — `extract_domain`, `normalize_phone`,
-`_parse_and_validate_emails`, `extract_emails_from_html`, and Reacher
-response handling in `verify_email_via_reacher` (mocked, no live server
-needed). DB-heavy `process_and_deduplicate_leads` and the network
-crawler in `harvest_emails_from_websites` are integration-test territory
-and are intentionally not covered here.
+The suite covers pure helpers plus orchestration/proxy edge cases —
+`extract_domain`, `normalize_phone`, `_parse_and_validate_emails`,
+`extract_emails_from_html`, Reacher response handling in
+`verify_email_via_reacher` (mocked, no live server needed), scraper proxy
+parsing, and `run_pipeline` / `run_zip_batch` control-flow behavior such
+as batch init and continue-on-error handling. DB-heavy
+`process_and_deduplicate_leads` and live network crawling in
+`harvest_emails_from_websites` are still integration-test territory and
+are intentionally not covered here.
 
 `tests/conftest.py` sets `DATABASE_URL=sqlite:///:memory:` before any
 `app.db.database` import so tests never touch a real DB.
@@ -285,7 +288,9 @@ and are intentionally not covered here.
 - **`businesses`** — canonical deduped businesses, `domain` UNIQUE.
 - **`contacts`** — one row per person/inbox; `(business_id, email)` UNIQUE.
 - **`email_verifications`** — Reacher results, one per contact.
-- **`export_history`** — every (`contact_id`, `destination`) push.
+- **`export_history`** — every (`contact_id`, `destination`) push, with `exported_at` timestamp.
 
 Indexes cover the FK columns + all `WHERE`-clause candidates
 (`raw_leads.processed_at`, `contacts.lead_status`, etc.).
+
+If you have an older DB, add/backfill `export_history.exported_at` before relying on that field in reporting or audits. Legacy DBs from before the case-insensitive URL normalization fix may also contain bad `businesses.domain` values like `http:` that need manual cleanup.
