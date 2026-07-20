@@ -29,3 +29,6 @@ app/scraper/google-maps-scraper
 data/leads_export.csv
 data/temp-*/
 temp-*/
+
+# Pytest
+.pytest_cache/

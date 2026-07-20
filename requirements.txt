@@ -9,3 +9,6 @@ requests>=2.31
 # but Sheets won't work at all without them).
 google-api-python-client>=2.100
 google-auth>=2.20
+
+# Test-only
+pytest>=8.0

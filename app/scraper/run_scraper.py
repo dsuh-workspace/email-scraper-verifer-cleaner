@@ -8,6 +8,10 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import ScrapeRun, RawLead
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def _scraper_binary_path() -> str:
     """
@@ -41,10 +45,10 @@ def geocode_location(location: str):
             if data:
                 lat = float(data[0]["lat"])
                 lon = float(data[0]["lon"])
-                print(f"Geocoded '{location}' to ({lat}, {lon})")
+                logger.info(f"Geocoded '{location}' to ({lat}, {lon})")
                 return lat, lon
     except Exception as e:
-        print(f"[Warning] Geocoding failed for '{location}': {e}")
+        logger.warning("Geocoding failed for %r: %s", location, e)
     return None, None
 
 def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon: float = None, depth: int = 1):
@@ -65,8 +69,7 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
     session.add(db_run)
     session.commit()
     scrape_run_id = db_run.id
-    print(f"[{datetime.now()}] Started Scrape Run #{scrape_run_id} for '{query}' in '{location}'...")
-
+    logger.info(f"[{datetime.now()}] Started Scrape Run #{scrape_run_id} for '{query}' in '{location}'...")
     # Geocode if lat/lon are not provided
     if lat is None or lon is None:
         geocoded_lat, geocoded_lon = geocode_location(location)
@@ -111,27 +114,37 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
         if lat is not None and lon is not None:
             cmd.extend(["-geo", f"{lat},{lon}"])
         
-        print(f"Executing: {' '.join(cmd)}")
+        logger.info("Executing: %s", " ".join(cmd))
+        # Run the scraper.
+        # Redirect stdout/stderr to capture runtime diagnostics.
+        # Timeout is a hard 30-min ceiling — deeper crawls (depth>10) can
+        # legitimately take a while, but we never want a hung Playwright
+        # instance to freeze the pipeline forever. Override via
+        # SCRAPER_TIMEOUT_SEC env var if needed.
+        scraper_timeout = int(os.getenv("SCRAPER_TIMEOUT_SEC", "1800"))
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                check=True,
+                timeout=scraper_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Scraper exceeded timeout of %ds and was killed.",
+                scraper_timeout,
+            )
+            raise
         
-        # Run the scraper
-        # We redirect stdout/stderr to capture any runtime diagnostics
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            check=True
-        )
-        
-        print("Scraper finished running successfully.")
-
+        logger.info("Scraper finished running successfully.")
         # 4. Read results and ingest into database
         if os.path.exists(results_file_path) and os.path.getsize(results_file_path) > 0:
             with open(results_file_path, 'r', encoding='utf-8') as rf:
                 leads_data = json.load(rf)
             
-            print(f"Found {len(leads_data)} raw leads. Ingesting into database...")
-            
+            logger.info(f"Found {len(leads_data)} raw leads. Ingesting into database...")
             raw_leads_to_insert = []
             for item in leads_data:
                 # Standardize categories (can be a list or a string depending on scraper schema)
@@ -155,20 +168,18 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
             if raw_leads_to_insert:
                 session.add_all(raw_leads_to_insert)
                 session.commit()
-                print(f"Successfully ingested {len(raw_leads_to_insert)} raw leads into 'raw_leads' table.")
+                logger.info(f"Successfully ingested {len(raw_leads_to_insert)} raw leads into 'raw_leads' table.")
             else:
-                print("No raw leads found to ingest.")
+                logger.info("No raw leads found to ingest.")
         else:
-            print("Warning: Scraper output file is empty or missing.")
-
+            logger.warning("Scraper output file is empty or missing.")
         # Update ScrapeRun status
         db_run.status = "completed"
         db_run.completed_at = datetime.now(timezone.utc)
         session.commit()
-        print(f"[{datetime.now()}] Completed Scrape Run #{scrape_run_id}.")
-
+        logger.info(f"[{datetime.now()}] Completed Scrape Run #{scrape_run_id}.")
     except Exception as e:
-        print(f"Error during scrape/ingest: {e}")
+        logger.error(f"Error during scrape/ingest: {e}")
         # Log failure status to DB
         db_run.status = "failed"
         db_run.completed_at = datetime.now(timezone.utc)
@@ -182,8 +193,7 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
                 if os.path.exists(path):
                     os.remove(path)
             except Exception as cleanup_err:
-                print(f"Failed to remove temp file {path}: {cleanup_err}")
-        
+                logger.error(f"Failed to remove temp file {path}: {cleanup_err}")
         session.close()
 
 if __name__ == "__main__":
@@ -198,4 +208,4 @@ if __name__ == "__main__":
             depth=1
         )
     except Exception as e:
-        print(f"Pipeline test run failed: {e}")
+        logger.error(f"Pipeline test run failed: {e}")

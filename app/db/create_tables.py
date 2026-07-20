@@ -29,6 +29,10 @@ from sqlalchemy.orm import declarative_base
 
 from app.db.database import engine
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 Base = declarative_base()
 
@@ -154,9 +158,7 @@ def init_db() -> None:
     models and can crash if DATABASE_URL is misconfigured.
     """
     Base.metadata.create_all(engine)
-    print("Database tables created (or already existed).")
-
-
+    logger.info("Database tables created (or already existed).")
 if __name__ == "__main__":
     # Allow `python -m app.db.create_tables` to bootstrap the schema.
     init_db()

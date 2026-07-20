@@ -156,10 +156,45 @@ and `export_new_leads()`.
 
 ---
 
+## Logging
+
+Every module logs via `app.logging_config.get_logger(__name__)`. Level is
+controlled by the `LOG_LEVEL` env var (default `INFO`; set `DEBUG` for
+verbose runs). Format:
+
+```
+2026-07-19 19:30:42 [INFO] app.pipeline.extract_emails: Checking 42 businesses...
+```
+
+`urllib3` and `requests` are pinned to `WARNING` so their per-request
+noise doesn't drown out pipeline output. Add a `FileHandler` to
+`app/logging_config.py` if you need on-disk logs.
+
+---
+
+## Tests
+
+```bash
+.venv/bin/pytest
+```
+
+The suite covers the pure helpers — `extract_domain`, `normalize_phone`,
+`_parse_and_validate_emails`, `extract_emails_from_html`, and Reacher
+response handling in `verify_email_via_reacher` (mocked, no live server
+needed). DB-heavy `process_and_deduplicate_leads` and the network
+crawler in `harvest_emails_from_websites` are integration-test territory
+and are intentionally not covered here.
+
+`tests/conftest.py` sets `DATABASE_URL=sqlite:///:memory:` before any
+`app.db.database` import so tests never touch a real DB.
+
+---
+
 ## Project structure
 
 ```
 ├── app/
+│   ├── logging_config.py       # Central logging setup
 │   ├── db/
 │   │   ├── create_tables.py    # SQLAlchemy models + init_db()
 │   │   └── database.py         # Engine + DATABASE_URL guard
@@ -172,6 +207,7 @@ and `export_new_leads()`.
 │   └── scraper/
 │       ├── google-maps-scraper[.exe]  # Compiled Go binary (gitignored)
 │       └── run_scraper.py      # Subprocess wrapper + geocoder
+├── tests/                      # Pytest suite for pure helpers
 ├── data/leads_export.csv       # Fallback CSV export (gitignored)
 ├── database/hvac_leads.db      # SQLite (gitignored)
 ├── .env                        # Local config (gitignored)

@@ -32,6 +32,10 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Business, Contact
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 Session = sessionmaker(bind=engine)
 
 # TLD length {2,} — the old {2,4} bound rejected legitimate industry TLDs
@@ -210,9 +214,10 @@ def harvest_emails_from_websites() -> None:
             .all()
         )
         pending = [b for b in businesses if b.id not in already_contacted]
-        print(
-            f"Checking {len(pending)} businesses for website email extraction "
-            f"({len(businesses) - len(pending)} already have emails)."
+        logger.info(
+            "Checking %d businesses for website email extraction "
+            "(%d already have emails).",
+            len(pending), len(businesses) - len(pending),
         )
 
         emails_harvested = 0
@@ -230,11 +235,11 @@ def harvest_emails_from_websites() -> None:
                 try:
                     emails = fut.result()
                 except Exception as e:
-                    print(f"  -> Crawl error for {biz.website}: {e}")
+                    logger.error(f"  -> Crawl error for {biz.website}: {e}")
                     continue
 
                 if emails:
-                    print(f"[{i}/{len(pending)}] {biz.website} -> {', '.join(emails)}")
+                    logger.info(f"[{i}/{len(pending)}] {biz.website} -> {', '.join(emails)}")
                     added = _persist_emails_for_business(session, biz, emails)
                     emails_harvested += added
 
@@ -243,13 +248,13 @@ def harvest_emails_from_websites() -> None:
                     session.commit()
 
         session.commit()
-        print(
-            f"Email harvesting completed. "
-            f"Harvested {emails_harvested} unique email contacts."
+        logger.info(
+            "Email harvesting completed. Harvested %d unique email contacts.",
+            emails_harvested,
         )
     except Exception as e:
         session.rollback()
-        print(f"Error during email harvesting: {e}")
+        logger.error(f"Error during email harvesting: {e}")
         raise
     finally:
         session.close()

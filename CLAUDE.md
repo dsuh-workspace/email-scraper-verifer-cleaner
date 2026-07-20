@@ -50,6 +50,11 @@ imported into `run_pipeline` on demand. Archived predecessor:
   - `businesses.domain` UNIQUE
   - `(contacts.business_id, contacts.email)` composite UNIQUE
   - Indexes on all FK columns + `raw_leads.processed_at`, `contacts.lead_status`, `export_history` composite
+- ✅ **Cleanup #15** Old BillionVerify verifier archived; new Reacher-based `verify_emails.py` runs against Kamatera instance
+- ✅ **Cleanup #17** Central logging (`app/logging_config.py`) — every module uses `logger` instead of `print()`; `LOG_LEVEL` env var controls verbosity
+- ✅ **Cleanup #19** `tests/` suite added — 48 passing unit tests covering `extract_domain`, `normalize_phone`, `_parse_and_validate_emails`, `extract_emails_from_html`, and Reacher response handling. Caught a real bug: `extract_domain` was case-sensitive on the scheme check (fixed inline).
+- ✅ **Cleanup #21** `os.makedirs` guarded against empty `dirname` for bare-filename CSV paths
+- ✅ **Cleanup #23** Scraper subprocess now has a 30-min hard timeout (override via `SCRAPER_TIMEOUT_SEC` env var); `TimeoutExpired` logs and propagates
 
 ---
 
@@ -66,12 +71,6 @@ blank Email column. Left as-is per project decision.
 Post-rewrite: none remain. Closed by natural attrition during the #13
 schema rewrite.
 
-### #15 — `verify_emails.py` orphaned
-
-Now archived and replaced. New Reacher-based module exists but is not
-auto-called from `run_pipeline`. Wire it in when you want verification
-inline — see README "Verification" section.
-
 ### #16 — Hardcoded config in `run_pipeline.py`
 
 `query`, `location`, `min_contacts` still hardcoded in `__main__`. Add
@@ -87,40 +86,15 @@ p.add_argument("--max-depth", type=int, default=20)
 args = p.parse_args()
 ```
 
-### #17 — `print()` everywhere, no `logging` module
-
-Replace with `logging.getLogger(__name__)` — levels, file output,
-structured logs.
-
-### #19 — No tests
-
-Zero test files. Priority test targets:
-
-- `normalize_phone` — the format branches
-- `extract_domain` — subdomains, ports, `www`, missing scheme
-- `extract_emails_from_html` — TLD edge cases, exclude list
-- `_parse_and_validate_emails` — multi-delimiter split, regex filter
-
 ### #20 — Commits inside per-business loop
 
 `extract_emails.py` batches every 25, which is acceptable. Not worth
 further tuning until we see real throughput numbers.
 
-### #21 — `os.makedirs(os.path.dirname(csv_path))` with bare filename
-
-`export_sheets.py:88` — edge case, only triggers if caller passes bare
-filename. Fix when we get around to configurable CSV paths.
-
 ### #22 — No `robots.txt` / no per-domain politeness
 
 Half-fixed: per-host locking is in place, `robots.txt` still ignored.
 Reasonable given we're crawling only shortlisted contact pages.
-
-### #23 — No timeout on scraper subprocess
-
-`run_scraper.py:96` — `subprocess.run(..., check=True)` with no
-`timeout=`. Bad scraper run can hang forever. Add `timeout=600` and
-catch `subprocess.TimeoutExpired`.
 
 ---
 

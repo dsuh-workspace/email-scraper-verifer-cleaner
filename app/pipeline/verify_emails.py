@@ -27,6 +27,10 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact, EmailVerification
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 load_dotenv()
 
 Session = sessionmaker(bind=engine)
@@ -81,20 +85,20 @@ def verify_email_via_reacher(email: str) -> dict:
             timeout=REACHER_TIMEOUT_SEC,
         )
     except requests.RequestException as e:
-        print(f"[Warning] Reacher request failed for {email}: {e}")
+        logger.warning("Reacher request failed for %s: %s", email, e)
         return {"is_reachable": "unknown", "score": 25, "raw": {}}
 
     if response.status_code != 200:
-        print(
-            f"[Warning] Reacher returned HTTP {response.status_code} for "
-            f"{email}: {response.text[:200]}"
+        logger.warning(
+            "Reacher returned HTTP %d for %s: %s",
+            response.status_code, email, response.text[:200],
         )
         return {"is_reachable": "unknown", "score": 25, "raw": {}}
 
     try:
         data = response.json()
     except ValueError as e:
-        print(f"[Warning] Reacher returned non-JSON for {email}: {e}")
+        logger.warning("Reacher returned non-JSON for %s: %s", email, e)
         return {"is_reachable": "unknown", "score": 25, "raw": {}}
 
     status = data.get("is_reachable", "unknown")
@@ -130,8 +134,7 @@ def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
             .all()
         )
 
-        print(f"Verifying {len(contacts)} unverified contacts via Reacher.")
-
+        logger.info(f"Verifying {len(contacts)} unverified contacts via Reacher.")
         verifications_run = 0
         for contact in contacts:
             result = verify_email_via_reacher(contact.email)
@@ -150,9 +153,9 @@ def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
             contact.lead_status = _LEAD_STATUS_BY_STATUS.get(status, "Unknown")
 
             verifications_run += 1
-            print(
-                f"Verified: {contact.email} -> "
-                f"Status: {status} (Score: {score})"
+            logger.info(
+                "Verified: %s -> Status: %s (Score: %d)",
+                contact.email, status, score,
             )
 
             # Commit incrementally so a crash mid-run doesn't lose progress.
@@ -163,12 +166,13 @@ def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
                 time.sleep(batch_sleep_sec)
 
         session.commit()
-        print(
-            f"Verification run finished. Processed {verifications_run} emails."
+        logger.info(
+            "Verification run finished. Processed %d emails.",
+            verifications_run,
         )
     except Exception as e:
         session.rollback()
-        print(f"Error during email verification run: {e}")
+        logger.error(f"Error during email verification run: {e}")
         raise
     finally:
         session.close()

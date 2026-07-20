@@ -30,6 +30,10 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import RawLead, Business, Contact
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 Session = sessionmaker(bind=engine)
 
 # Same regex as extract_emails.py so validation is consistent across the pipeline.
@@ -47,7 +51,10 @@ def extract_domain(url_str):
         return None
     try:
         url_str = url_str.strip()
-        if not url_str.startswith(('http://', 'https://')):
+        # Case-insensitive scheme check — some scraper output uses HTTPS://
+        # in uppercase and startswith() would miss it, causing us to prepend
+        # http:// and break the URL.
+        if not re.match(r'^https?://', url_str, re.IGNORECASE):
             url_str = 'http://' + url_str
         parsed = urllib.parse.urlparse(url_str)
         domain = parsed.netloc.lower()
@@ -113,8 +120,7 @@ def process_and_deduplicate_leads() -> None:
             .filter(RawLead.processed_at.is_(None))
             .all()
         )
-        print(f"Loaded {len(raw_leads)} unprocessed raw leads for processing.")
-
+        logger.info(f"Loaded {len(raw_leads)} unprocessed raw leads for processing.")
         # -- Pre-load existing businesses into fast lookup dicts (one SELECT total) --
         existing_by_domain: Dict[str, Business] = {}
         existing_by_name_phone: Dict[Tuple[str, str], Business] = {}
@@ -223,13 +229,12 @@ def process_and_deduplicate_leads() -> None:
             raw.processed_at = now
 
         session.commit()
-        print("Leads processing completed.")
-        print(f"Added {businesses_added} new businesses to 'businesses' table.")
-        print(f"Added {contacts_added} new contacts to 'contacts' table.")
-
+        logger.info("Leads processing completed.")
+        logger.info(f"Added {businesses_added} new businesses to 'businesses' table.")
+        logger.info(f"Added {contacts_added} new contacts to 'contacts' table.")
     except Exception as e:
         session.rollback()
-        print(f"Error during lead processing: {e}")
+        logger.error(f"Error during lead processing: {e}")
         raise
     finally:
         session.close()
