@@ -153,6 +153,9 @@ everything.
    does depth=20 mean to the Go scraper (results count? radius?
    Playwright pages loaded?). Needs research.
 
-5. **Verifier not in the loop** — is that a mistake or deliberate?
-   Answer probably "deliberate for now — Kamatera is expensive per call
-   and we don't want to spend on unverified leads". Confirm.
+5. **Verifier exists but is not wired into `run_pipeline`** — deliberate
+   as of now. `app/pipeline/verify_emails.py` is implemented and runnable
+   manually, but `run_pipeline.py` does not call it inside scrape /
+   process / harvest loop or before export. If we want inline
+   verification later, decide when it should run (each iteration vs once
+   at end) and whether cost / latency is acceptable.
