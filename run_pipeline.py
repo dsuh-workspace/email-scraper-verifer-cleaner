@@ -111,7 +111,7 @@ def run_location_pipeline(
                 location,
             )
             return LocationRunMetrics(
-                depths_run=depths_run,
+                depths_run=tuple(depths_run),
                 final_depth=depth,
                 total_contacts=total_contacts,
                 exportable_contacts=exportable_contacts,
@@ -127,7 +127,7 @@ def run_location_pipeline(
                 location,
             )
             return LocationRunMetrics(
-                depths_run=depths_run,
+                depths_run=tuple(depths_run),
                 final_depth=depth,
                 total_contacts=total_contacts,
                 exportable_contacts=exportable_contacts,

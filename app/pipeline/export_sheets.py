@@ -164,7 +164,8 @@ def export_new_leads(destination: str | None = None):
             for contact, _ in new_leads:
                 history = ExportHistory(
                     contact_id=contact.id,
-                    destination=destination
+                    destination=destination,
+                    exported_at=datetime.utcnow(),
                 )
                 session.add(history)
             session.commit()

@@ -24,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -136,8 +137,14 @@ class ExportHistory(Base):
     id = Column(Integer, primary_key=True)
     contact_id = Column(
         Integer, ForeignKey("contacts.id", ondelete="CASCADE"), index=True,
+        nullable=False,
     )
     destination = Column(Text, index=True)
+    exported_at = Column(
+        TIMESTAMP,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
 
     __table_args__ = (
         Index("ix_export_contact_dest", "contact_id", "destination"),
