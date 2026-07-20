@@ -1,11 +1,26 @@
 import os
 import json
+import platform
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import ScrapeRun, RawLead
+
+
+def _scraper_binary_path() -> str:
+    """
+    Resolve the google-maps-scraper binary path for the current OS.
+    Windows: google-maps-scraper.exe
+    macOS/Linux: google-maps-scraper (must be chmod +x)
+    """
+    scraper_dir = os.path.dirname(__file__)
+    if platform.system() == "Windows":
+        name = "google-maps-scraper.exe"
+    else:
+        name = "google-maps-scraper"
+    return os.path.abspath(os.path.join(scraper_dir, name))
 
 Session = sessionmaker(bind=engine)
 
@@ -72,9 +87,16 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
         os.close(fd_results)
 
         # 3. Build the scraper command
-        # Binary path relative to project root
-        binary_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "google-maps-scraper.exe"))
-        
+        # Binary path is OS-aware (see _scraper_binary_path)
+        binary_path = _scraper_binary_path()
+
+        if not os.path.exists(binary_path):
+            raise FileNotFoundError(
+                f"Scraper binary not found at {binary_path}. "
+                f"Download the google-maps-scraper build for {platform.system()} "
+                f"and place it at that path (chmod +x on unix)."
+            )
+
         cmd = [
             binary_path,
             "-input", query_file_path,
