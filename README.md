@@ -96,25 +96,26 @@ KAMATERA_SECRET_KEY=...
 ### Run the full pipeline
 
 ```bash
-python run_pipeline.py
+python run_pipeline.py --query "Plumbing" --location "San Francisco, CA"
 ```
 
-### Change the search target
+Defaults:
+- `--min-contacts 500`
+- `--max-depth 20`
 
-Edit the `__main__` block in `run_pipeline.py`:
+### Override campaign settings
 
-```python
-if __name__ == "__main__":
-    run_end_to_end_pipeline(
-        query="Plumbing",              # industry keyword
-        location="San Francisco, CA",  # geocoded once via Nominatim, cached
-        min_contacts=500,              # loops scraper depth until DB has this many contacts
-    )
+```bash
+python run_pipeline.py \
+  --query "HVAC" \
+  --location "Plano, TX" \
+  --min-contacts 50 \
+  --max-depth 9
 ```
 
-The scraper depth starts at 1 and grows by 2 each iteration up to 20. The
-location is geocoded **once** at pipeline start and passed into every
-subsequent scrape iteration — Nominatim ToS friendly.
+The scraper depth starts at 1 and grows by 2 each iteration up to
+`--max-depth`. The location is geocoded **once** at pipeline start and passed
+into every subsequent scrape iteration — Nominatim ToS friendly.
 
 ---
 

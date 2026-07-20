@@ -71,19 +71,21 @@ blank Email column. Left as-is per project decision.
 Post-rewrite: none remain. Closed by natural attrition during the #13
 schema rewrite.
 
-### #16 — Hardcoded config in `run_pipeline.py`
+### #16 — CLI validation follow-up for `run_pipeline.py`
 
-`query`, `location`, `min_contacts` still hardcoded in `__main__`. Add
-`argparse` when running from cron / multiple campaigns.
+`argparse` is now in place. Future hardening: reject invalid non-positive
+values for:
+
+- `--min-contacts <= 0`
+- `--max-depth <= 0`
+
+Likely shape:
 
 ```python
-import argparse
-p = argparse.ArgumentParser()
-p.add_argument("--query", required=True)
-p.add_argument("--location", required=True)
-p.add_argument("--min-contacts", type=int, default=500)
-p.add_argument("--max-depth", type=int, default=20)
-args = p.parse_args()
+if args.min_contacts <= 0:
+    parser.error("--min-contacts must be > 0")
+if args.max_depth <= 0:
+    parser.error("--max-depth must be > 0")
 ```
 
 ### #20 — Commits inside per-business loop

@@ -9,6 +9,7 @@ Stages:
     5. Export new leads to Sheets (or CSV fallback)
 """
 
+import argparse
 import sys
 
 from sqlalchemy.orm import sessionmaker
@@ -34,7 +35,35 @@ def get_contact_count() -> int:
         session.close()
 
 
-def run_end_to_end_pipeline(query: str, location: str, min_contacts: int = 500) -> None:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run end-to-end lead generation pipeline."
+    )
+    parser.add_argument("--query", required=True, help="Industry keyword to scrape")
+    parser.add_argument(
+        "--location", required=True, help="Location string for Google Maps search"
+    )
+    parser.add_argument(
+        "--min-contacts",
+        type=int,
+        default=500,
+        help="Stop once DB has at least this many contacts",
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=20,
+        help="Maximum scraper depth before stopping",
+    )
+    return parser.parse_args()
+
+
+def run_end_to_end_pipeline(
+    query: str,
+    location: str,
+    min_contacts: int = 500,
+    max_depth: int = 20,
+) -> None:
     """
     Orchestrate the pipeline (see module docstring). Loops the scraper at
     growing depth until the DB reaches `min_contacts` or hits max_depth.
@@ -58,7 +87,6 @@ def run_end_to_end_pipeline(query: str, location: str, min_contacts: int = 500) 
         )
 
     depth = 1
-    max_depth = 20
 
     try:
         while True:
@@ -104,10 +132,15 @@ def run_end_to_end_pipeline(query: str, location: str, min_contacts: int = 500) 
         sys.exit(1)
 
 
-if __name__ == "__main__":
-    # Default search: Plumbing in San Francisco, CA
+def main() -> None:
+    args = parse_args()
     run_end_to_end_pipeline(
-        query="Plumbing",
-        location="San Francisco, CA",
-        min_contacts=500,
+        query=args.query,
+        location=args.location,
+        min_contacts=args.min_contacts,
+        max_depth=args.max_depth,
     )
+
+
+if __name__ == "__main__":
+    main()
