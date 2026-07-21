@@ -235,6 +235,9 @@ noise doesn't drown out pipeline output. Add a `FileHandler` to
 
 ```bash
 .venv/bin/pytest
+
+# Live proxy smoke test (uses .env + CRAWLER_PROXY_FILE / CRAWLER_PROXY)
+.venv/bin/python scripts/smoke_test_proxies.py
 ```
 
 The suite covers pure helpers plus orchestration/proxy edge cases —

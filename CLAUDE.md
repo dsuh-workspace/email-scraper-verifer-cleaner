@@ -174,6 +174,11 @@ everything.
    verification later, decide when it should run (each iteration vs once
    at end) and whether cost / latency is acceptable.
 
+6. **Crawler proxy rotation** — current crawler uses only first proxy from
+   `CRAWLER_PROXY_FILE`. Future improvement if site blocking appears:
+   implement rotation strategy (prefer sticky-per-host over pure random)
+   so website crawling can spread load without breaking per-host politeness.
+
 ---
 
 ## Batch ZIP yield / count semantics
