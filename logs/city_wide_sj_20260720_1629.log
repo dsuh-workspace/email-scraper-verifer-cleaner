@@ -1,0 +1,34 @@
+2026-07-20 16:29:26 [INFO] app.db.create_tables: Database tables created (or already existed).
+2026-07-20 16:29:26 [INFO] __main__: Loaded 1 locations from /tmp/test_city_sj.csv
+2026-07-20 16:29:27 [INFO] app.scraper.run_scraper: Geocoded 'San Jose' to (37.3361663, -121.890591)
+2026-07-20 16:29:27 [INFO] run_pipeline: --- Running scraping loop (depth=1) ---
+2026-07-20 16:29:27 [INFO] app.scraper.run_scraper: [2026-07-20 16:29:27.653370] Started Scrape Run #1 for 'Plumbing' in 'San Jose'...
+2026-07-20 16:29:27 [INFO] app.scraper.run_scraper: Scraper proxies enabled (10 configured).
+2026-07-20 16:29:27 [INFO] app.scraper.run_scraper: Executing: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/query_xku0pfh0.txt -results /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/results_4ycc94pe.json -json -depth 1 -pages-per-browser 2 -fast-mode -email -proxies http://tdhltkwd:48gtxlkmo9yc@31.59.20.176:6754,http://tdhltkwd:48gtxlkmo9yc@31.56.127.193:7684,http://tdhltkwd:48gtxlkmo9yc@45.38.107.97:6014,http://tdhltkwd:48gtxlkmo9yc@198.105.121.200:6462,http://tdhltkwd:48gtxlkmo9yc@64.137.96.74:6641,http://tdhltkwd:48gtxlkmo9yc@198.23.243.226:6361,http://tdhltkwd:48gtxlkmo9yc@38.154.185.97:6370,http://tdhltkwd:48gtxlkmo9yc@84.247.60.125:6095,http://tdhltkwd:48gtxlkmo9yc@142.111.67.146:5611,http://tdhltkwd:48gtxlkmo9yc@191.96.254.138:6185 -geo 37.3361663,-121.890591
+2026-07-20 16:29:30 [INFO] app.scraper.run_scraper: Scraper finished running successfully.
+2026-07-20 16:29:30 [INFO] app.scraper.run_scraper: Found 17 raw leads. Ingesting into database...
+2026-07-20 16:29:30 [INFO] app.scraper.run_scraper: Successfully ingested 17 raw leads into 'raw_leads' table.
+2026-07-20 16:29:30 [INFO] app.scraper.run_scraper: [2026-07-20 16:29:30.937675] Completed Scrape Run #1.
+2026-07-20 16:29:30 [INFO] app.pipeline.process_leads: Loaded 17 unprocessed raw leads for processing.
+2026-07-20 16:29:30 [INFO] app.pipeline.process_leads: Leads processing completed.
+2026-07-20 16:29:30 [INFO] app.pipeline.process_leads: Added 17 new businesses to 'businesses' table.
+2026-07-20 16:29:30 [INFO] app.pipeline.process_leads: Added 17 new contacts to 'contacts' table.
+2026-07-20 16:29:30 [INFO] app.pipeline.extract_emails: Crawler proxies enabled for http, https.
+2026-07-20 16:29:30 [INFO] app.pipeline.extract_emails: Checking 16 businesses for website email extraction (0 already have emails).
+2026-07-20 16:29:36 [INFO] app.pipeline.extract_emails: [1/16] https://gogorooter.com/ -> gogorooter01@gmail.com
+2026-07-20 16:30:09 [ERROR] app.pipeline.extract_emails: Error during email harvesting: name 'ExportHistory' is not defined
+2026-07-20 16:30:09 [ERROR] __main__: Location run failed for San Jose. Continuing batch.
+Traceback (most recent call last):
+  File "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/run_zip_batch.py", line 94, in main
+    metrics = run_location_pipeline(
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/run_pipeline.py", line 94, in run_location_pipeline
+    harvest_emails_from_websites()
+  File "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/pipeline/extract_emails.py", line 306, in harvest_emails_from_websites
+    added = _persist_emails_for_business(session, biz, emails)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/pipeline/extract_emails.py", line 247, in _persist_emails_for_business
+    session.query(ExportHistory).filter(
+                  ^^^^^^^^^^^^^
+NameError: name 'ExportHistory' is not defined
+2026-07-20 16:30:09 [INFO] app.pipeline.export_sheets: No new leads to export.

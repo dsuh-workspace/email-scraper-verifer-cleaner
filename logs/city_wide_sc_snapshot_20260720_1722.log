@@ -1,0 +1,96 @@
+2026-07-20 17:22:13 [INFO] app.db.create_tables: Database tables created (or already existed).
+2026-07-20 17:22:13 [INFO] __main__: Loaded 1 locations from /tmp/test_city_sc.csv
+2026-07-20 17:22:14 [INFO] app.scraper.run_scraper: Geocoded 'Santa Clarita' to (34.4127963, -118.5538088)
+2026-07-20 17:22:14 [INFO] run_pipeline: --- Running scraping loop (depth=1) ---
+2026-07-20 17:22:14 [INFO] app.scraper.run_scraper: [2026-07-20 17:22:14.522424] Started Scrape Run #1 for 'Plumbing' in 'Santa Clarita'...
+2026-07-20 17:22:14 [INFO] app.scraper.run_scraper: Scraper proxies enabled (10 configured).
+2026-07-20 17:22:14 [INFO] app.scraper.run_scraper: Executing: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/query_gt3v129z.txt -results /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/results_7jce_93r.json -json -depth 1 -pages-per-browser 2 -fast-mode -email -proxies http://tdhltkwd:48gtxlkmo9yc@31.59.20.176:6754,http://tdhltkwd:48gtxlkmo9yc@31.56.127.193:7684,http://tdhltkwd:48gtxlkmo9yc@45.38.107.97:6014,http://tdhltkwd:48gtxlkmo9yc@198.105.121.200:6462,http://tdhltkwd:48gtxlkmo9yc@64.137.96.74:6641,http://tdhltkwd:48gtxlkmo9yc@198.23.243.226:6361,http://tdhltkwd:48gtxlkmo9yc@38.154.185.97:6370,http://tdhltkwd:48gtxlkmo9yc@84.247.60.125:6095,http://tdhltkwd:48gtxlkmo9yc@142.111.67.146:5611,http://tdhltkwd:48gtxlkmo9yc@191.96.254.138:6185 -geo 34.4127963,-118.5538088
+2026-07-20 17:22:17 [INFO] app.scraper.run_scraper: Scraper finished running successfully.
+2026-07-20 17:22:17 [INFO] app.scraper.run_scraper: Found 11 raw leads. Ingesting into database...
+2026-07-20 17:22:17 [INFO] app.scraper.run_scraper: Successfully ingested 11 raw leads into 'raw_leads' table.
+2026-07-20 17:22:17 [INFO] app.scraper.run_scraper: [2026-07-20 17:22:17.527418] Completed Scrape Run #1.
+2026-07-20 17:22:17 [INFO] app.pipeline.process_leads: Loaded 11 unprocessed raw leads for processing.
+2026-07-20 17:22:17 [INFO] app.pipeline.process_leads: Leads processing completed.
+2026-07-20 17:22:17 [INFO] app.pipeline.process_leads: Added 11 new businesses to 'businesses' table.
+2026-07-20 17:22:17 [INFO] app.pipeline.process_leads: Added 11 new contacts to 'contacts' table.
+2026-07-20 17:22:17 [INFO] app.pipeline.extract_emails: Crawler proxies enabled for http, https.
+2026-07-20 17:22:17 [INFO] app.pipeline.extract_emails: Checking 9 businesses for website email extraction (0 already have emails).
+2026-07-20 17:22:45 [INFO] app.pipeline.extract_emails: Email harvesting completed. Harvested 0 unique email contacts.
+2026-07-20 17:22:45 [INFO] run_pipeline: Location 'Santa Clarita' now has 11 total contacts and 0 new exportable contacts.
+2026-07-20 17:22:45 [INFO] run_pipeline: Increasing scraper depth to 3.
+2026-07-20 17:22:45 [INFO] run_pipeline: --- Running scraping loop (depth=3) ---
+2026-07-20 17:22:45 [INFO] app.scraper.run_scraper: [2026-07-20 17:22:45.876507] Started Scrape Run #2 for 'Plumbing' in 'Santa Clarita'...
+2026-07-20 17:22:45 [INFO] app.scraper.run_scraper: Scraper proxies enabled (10 configured).
+2026-07-20 17:22:45 [INFO] app.scraper.run_scraper: Executing: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/query_hcd_pgob.txt -results /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/results_86rr4z2a.json -json -depth 3 -pages-per-browser 2 -fast-mode -email -proxies http://tdhltkwd:48gtxlkmo9yc@31.59.20.176:6754,http://tdhltkwd:48gtxlkmo9yc@31.56.127.193:7684,http://tdhltkwd:48gtxlkmo9yc@45.38.107.97:6014,http://tdhltkwd:48gtxlkmo9yc@198.105.121.200:6462,http://tdhltkwd:48gtxlkmo9yc@64.137.96.74:6641,http://tdhltkwd:48gtxlkmo9yc@198.23.243.226:6361,http://tdhltkwd:48gtxlkmo9yc@38.154.185.97:6370,http://tdhltkwd:48gtxlkmo9yc@84.247.60.125:6095,http://tdhltkwd:48gtxlkmo9yc@142.111.67.146:5611,http://tdhltkwd:48gtxlkmo9yc@191.96.254.138:6185 -geo 34.4127963,-118.5538088
+2026-07-20 17:22:48 [INFO] app.scraper.run_scraper: Scraper finished running successfully.
+2026-07-20 17:22:48 [INFO] app.scraper.run_scraper: Found 11 raw leads. Ingesting into database...
+2026-07-20 17:22:48 [INFO] app.scraper.run_scraper: Successfully ingested 11 raw leads into 'raw_leads' table.
+2026-07-20 17:22:48 [INFO] app.scraper.run_scraper: [2026-07-20 17:22:48.786279] Completed Scrape Run #2.
+2026-07-20 17:22:48 [INFO] app.pipeline.process_leads: Loaded 11 unprocessed raw leads for processing.
+2026-07-20 17:22:48 [INFO] app.pipeline.process_leads: Leads processing completed.
+2026-07-20 17:22:48 [INFO] app.pipeline.process_leads: Added 0 new businesses to 'businesses' table.
+2026-07-20 17:22:48 [INFO] app.pipeline.process_leads: Added 0 new contacts to 'contacts' table.
+2026-07-20 17:22:48 [INFO] app.pipeline.extract_emails: Crawler proxies enabled for http, https.
+2026-07-20 17:22:48 [INFO] app.pipeline.extract_emails: Checking 9 businesses for website email extraction (0 already have emails).
+2026-07-20 17:23:17 [INFO] app.pipeline.extract_emails: Email harvesting completed. Harvested 0 unique email contacts.
+2026-07-20 17:23:17 [INFO] run_pipeline: Location 'Santa Clarita' now has 11 total contacts and 0 new exportable contacts.
+2026-07-20 17:23:17 [INFO] run_pipeline: Increasing scraper depth to 5.
+2026-07-20 17:23:17 [INFO] run_pipeline: --- Running scraping loop (depth=5) ---
+2026-07-20 17:23:17 [INFO] app.scraper.run_scraper: [2026-07-20 17:23:17.413759] Started Scrape Run #3 for 'Plumbing' in 'Santa Clarita'...
+2026-07-20 17:23:17 [INFO] app.scraper.run_scraper: Scraper proxies enabled (10 configured).
+2026-07-20 17:23:17 [INFO] app.scraper.run_scraper: Executing: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/query_z2yb8tnz.txt -results /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/results_pd74jr91.json -json -depth 5 -pages-per-browser 2 -fast-mode -email -proxies http://tdhltkwd:48gtxlkmo9yc@31.59.20.176:6754,http://tdhltkwd:48gtxlkmo9yc@31.56.127.193:7684,http://tdhltkwd:48gtxlkmo9yc@45.38.107.97:6014,http://tdhltkwd:48gtxlkmo9yc@198.105.121.200:6462,http://tdhltkwd:48gtxlkmo9yc@64.137.96.74:6641,http://tdhltkwd:48gtxlkmo9yc@198.23.243.226:6361,http://tdhltkwd:48gtxlkmo9yc@38.154.185.97:6370,http://tdhltkwd:48gtxlkmo9yc@84.247.60.125:6095,http://tdhltkwd:48gtxlkmo9yc@142.111.67.146:5611,http://tdhltkwd:48gtxlkmo9yc@191.96.254.138:6185 -geo 34.4127963,-118.5538088
+2026-07-20 17:23:20 [INFO] app.scraper.run_scraper: Scraper finished running successfully.
+2026-07-20 17:23:20 [INFO] app.scraper.run_scraper: Found 13 raw leads. Ingesting into database...
+2026-07-20 17:23:20 [INFO] app.scraper.run_scraper: Successfully ingested 13 raw leads into 'raw_leads' table.
+2026-07-20 17:23:20 [INFO] app.scraper.run_scraper: [2026-07-20 17:23:20.366440] Completed Scrape Run #3.
+2026-07-20 17:23:20 [INFO] app.pipeline.process_leads: Loaded 13 unprocessed raw leads for processing.
+2026-07-20 17:23:20 [INFO] app.pipeline.process_leads: Leads processing completed.
+2026-07-20 17:23:20 [INFO] app.pipeline.process_leads: Added 3 new businesses to 'businesses' table.
+2026-07-20 17:23:20 [INFO] app.pipeline.process_leads: Added 3 new contacts to 'contacts' table.
+2026-07-20 17:23:20 [INFO] app.pipeline.extract_emails: Crawler proxies enabled for http, https.
+2026-07-20 17:23:20 [INFO] app.pipeline.extract_emails: Checking 11 businesses for website email extraction (0 already have emails).
+2026-07-20 17:23:31 [INFO] app.pipeline.extract_emails: [2/11] https://www.wcwaterheaters.com/ -> info@wcwaterheaters.com
+2026-07-20 17:23:37 [INFO] app.pipeline.extract_emails: [8/11] http://kenncoplumbing.com/ -> info@kenncoplumbing.com
+2026-07-20 17:23:47 [INFO] app.pipeline.extract_emails: Email harvesting completed. Harvested 2 unique email contacts.
+2026-07-20 17:23:47 [INFO] run_pipeline: Location 'Santa Clarita' now has 14 total contacts and 2 new exportable contacts.
+2026-07-20 17:23:47 [INFO] run_pipeline: Increasing scraper depth to 7.
+2026-07-20 17:23:47 [INFO] run_pipeline: --- Running scraping loop (depth=7) ---
+2026-07-20 17:23:47 [INFO] app.scraper.run_scraper: [2026-07-20 17:23:47.964549] Started Scrape Run #4 for 'Plumbing' in 'Santa Clarita'...
+2026-07-20 17:23:47 [INFO] app.scraper.run_scraper: Scraper proxies enabled (10 configured).
+2026-07-20 17:23:47 [INFO] app.scraper.run_scraper: Executing: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/query_8l28btz4.txt -results /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/results_z8vmgabg.json -json -depth 7 -pages-per-browser 2 -fast-mode -email -proxies http://tdhltkwd:48gtxlkmo9yc@31.59.20.176:6754,http://tdhltkwd:48gtxlkmo9yc@31.56.127.193:7684,http://tdhltkwd:48gtxlkmo9yc@45.38.107.97:6014,http://tdhltkwd:48gtxlkmo9yc@198.105.121.200:6462,http://tdhltkwd:48gtxlkmo9yc@64.137.96.74:6641,http://tdhltkwd:48gtxlkmo9yc@198.23.243.226:6361,http://tdhltkwd:48gtxlkmo9yc@38.154.185.97:6370,http://tdhltkwd:48gtxlkmo9yc@84.247.60.125:6095,http://tdhltkwd:48gtxlkmo9yc@142.111.67.146:5611,http://tdhltkwd:48gtxlkmo9yc@191.96.254.138:6185 -geo 34.4127963,-118.5538088
+2026-07-20 17:23:50 [INFO] app.scraper.run_scraper: Scraper finished running successfully.
+2026-07-20 17:23:50 [INFO] app.scraper.run_scraper: Found 11 raw leads. Ingesting into database...
+2026-07-20 17:23:50 [INFO] app.scraper.run_scraper: Successfully ingested 11 raw leads into 'raw_leads' table.
+2026-07-20 17:23:50 [INFO] app.scraper.run_scraper: [2026-07-20 17:23:50.752180] Completed Scrape Run #4.
+2026-07-20 17:23:50 [INFO] app.pipeline.process_leads: Loaded 11 unprocessed raw leads for processing.
+2026-07-20 17:23:50 [INFO] app.pipeline.process_leads: Leads processing completed.
+2026-07-20 17:23:50 [INFO] app.pipeline.process_leads: Added 0 new businesses to 'businesses' table.
+2026-07-20 17:23:50 [INFO] app.pipeline.process_leads: Added 0 new contacts to 'contacts' table.
+2026-07-20 17:23:50 [INFO] app.pipeline.extract_emails: Crawler proxies enabled for http, https.
+2026-07-20 17:23:50 [INFO] app.pipeline.extract_emails: Checking 9 businesses for website email extraction (2 already have emails).
+2026-07-20 17:24:18 [INFO] app.pipeline.extract_emails: Email harvesting completed. Harvested 0 unique email contacts.
+2026-07-20 17:24:18 [INFO] run_pipeline: Location 'Santa Clarita' now has 14 total contacts and 2 new exportable contacts.
+2026-07-20 17:24:18 [INFO] run_pipeline: Increasing scraper depth to 9.
+2026-07-20 17:24:18 [INFO] run_pipeline: --- Running scraping loop (depth=9) ---
+2026-07-20 17:24:18 [INFO] app.scraper.run_scraper: [2026-07-20 17:24:18.210879] Started Scrape Run #5 for 'Plumbing' in 'Santa Clarita'...
+2026-07-20 17:24:18 [INFO] app.scraper.run_scraper: Scraper proxies enabled (10 configured).
+2026-07-20 17:24:18 [INFO] app.scraper.run_scraper: Executing: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/query_saf0vtyd.txt -results /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/results_zhrup4ug.json -json -depth 9 -pages-per-browser 2 -fast-mode -email -proxies http://tdhltkwd:48gtxlkmo9yc@31.59.20.176:6754,http://tdhltkwd:48gtxlkmo9yc@31.56.127.193:7684,http://tdhltkwd:48gtxlkmo9yc@45.38.107.97:6014,http://tdhltkwd:48gtxlkmo9yc@198.105.121.200:6462,http://tdhltkwd:48gtxlkmo9yc@64.137.96.74:6641,http://tdhltkwd:48gtxlkmo9yc@198.23.243.226:6361,http://tdhltkwd:48gtxlkmo9yc@38.154.185.97:6370,http://tdhltkwd:48gtxlkmo9yc@84.247.60.125:6095,http://tdhltkwd:48gtxlkmo9yc@142.111.67.146:5611,http://tdhltkwd:48gtxlkmo9yc@191.96.254.138:6185 -geo 34.4127963,-118.5538088
+2026-07-20 17:24:20 [INFO] app.scraper.run_scraper: Scraper finished running successfully.
+2026-07-20 17:24:20 [INFO] app.scraper.run_scraper: Found 11 raw leads. Ingesting into database...
+2026-07-20 17:24:20 [INFO] app.scraper.run_scraper: Successfully ingested 11 raw leads into 'raw_leads' table.
+2026-07-20 17:24:20 [INFO] app.scraper.run_scraper: [2026-07-20 17:24:20.647586] Completed Scrape Run #5.
+2026-07-20 17:24:20 [INFO] app.pipeline.process_leads: Loaded 11 unprocessed raw leads for processing.
+2026-07-20 17:24:20 [INFO] app.pipeline.process_leads: Leads processing completed.
+2026-07-20 17:24:20 [INFO] app.pipeline.process_leads: Added 0 new businesses to 'businesses' table.
+2026-07-20 17:24:20 [INFO] app.pipeline.process_leads: Added 0 new contacts to 'contacts' table.
+2026-07-20 17:24:20 [INFO] app.pipeline.extract_emails: Crawler proxies enabled for http, https.
+2026-07-20 17:24:20 [INFO] app.pipeline.extract_emails: Checking 9 businesses for website email extraction (2 already have emails).
+2026-07-20 17:24:47 [INFO] app.pipeline.extract_emails: Email harvesting completed. Harvested 0 unique email contacts.
+2026-07-20 17:24:47 [INFO] run_pipeline: Location 'Santa Clarita' now has 14 total contacts and 2 new exportable contacts.
+2026-07-20 17:24:47 [WARNING] run_pipeline: Reached max scraper depth (9) for 'Santa Clarita'. Stopping.
+2026-07-20 17:24:47 [INFO] __main__: Finished 'Santa Clarita': depths=(1, 3, 5, 7, 9) new_exportable=2 total_contacts=14
+2026-07-20 17:24:47 [INFO] app.pipeline.export_sheets: Found 2 new leads to export.
+2026-07-20 17:24:48 [WARNING] app.pipeline.export_sheets: Credentials file 'credentials.json' not found. Falling back to local CSV export.
+2026-07-20 17:24:48 [INFO] app.pipeline.export_sheets: Writing 2 leads to local CSV: data/leads_export.csv
+2026-07-20 17:24:48 [INFO] app.pipeline.export_sheets: Local CSV export completed.
+2026-07-20 17:24:48 [INFO] app.pipeline.export_sheets: Export logging completed. Logged 2 entries to export_history.
