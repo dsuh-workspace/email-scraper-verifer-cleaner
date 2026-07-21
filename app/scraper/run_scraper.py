@@ -90,7 +90,11 @@ def _scraper_proxy_args() -> list[str]:
 def geocode_location(location: str):
     """
     Geocodes a location string using Nominatim OpenStreetMap API.
-    Returns (lat, lon) or (None, None) if not found or on error.
+
+    Returns (lat, lon, bbox) where bbox is (min_lat, min_lon, max_lat, max_lon)
+    matching the scraper's -grid-bbox arg order. bbox is None if Nominatim
+    omitted the boundingbox field for the match. Returns (None, None, None)
+    on error or no match.
     """
     import requests
     headers = {
@@ -104,19 +108,44 @@ def geocode_location(location: str):
             if data:
                 lat = float(data[0]["lat"])
                 lon = float(data[0]["lon"])
-                logger.info(f"Geocoded '{location}' to ({lat}, {lon})")
-                return lat, lon
+                # Nominatim boundingbox is [south, north, west, east] as strings.
+                bbox = None
+                raw_bbox = data[0].get("boundingbox")
+                if raw_bbox and len(raw_bbox) == 4:
+                    try:
+                        south, north, west, east = (float(x) for x in raw_bbox)
+                        bbox = (south, west, north, east)  # min_lat, min_lon, max_lat, max_lon
+                    except (TypeError, ValueError):
+                        bbox = None
+                logger.info(f"Geocoded '{location}' to ({lat}, {lon}) bbox={bbox}")
+                return lat, lon, bbox
     except Exception as e:
         logger.warning("Geocoding failed for %r: %s", location, e)
-    return None, None
+    return None, None, None
 
-def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon: float = None, depth: int = 1):
+def execute_scrape_and_ingest(
+    query: str,
+    location: str,
+    lat: float = None,
+    lon: float = None,
+    depth: int = 1,
+    bbox: tuple[float, float, float, float] | None = None,
+    cell_km: float | None = None,
+):
     """
-    Runs the google-maps-scraper executable for a query at the specified coordinates,
-    then parses the resulting JSON and ingests it into the SQLite database.
+    Runs the google-maps-scraper executable for a query, then parses the
+    resulting JSON and ingests it into the SQLite database.
+
+    Two modes:
+    - Single-centroid (default): pass lat/lon (or let it geocode from
+      location), scraper uses -geo and -fast-mode. ~10-20 businesses per run.
+    - Grid mode: pass bbox=(min_lat, min_lon, max_lat, max_lon) and cell_km.
+      Scraper iterates cells internally in JS mode (much richer, 4-5x more
+      businesses than a curated ZIP sweep, per 2026-07-20 experiment).
+      -fast-mode is dropped; scraper rejects it with -grid-bbox.
     """
     session = Session()
-    
+
     # 1. Create a new ScrapeRun entry
     db_run = ScrapeRun(
         query=query,
@@ -129,9 +158,10 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
     session.commit()
     scrape_run_id = db_run.id
     logger.info(f"[{datetime.now()}] Started Scrape Run #{scrape_run_id} for '{query}' in '{location}'...")
-    # Geocode if lat/lon are not provided
-    if lat is None or lon is None:
-        geocoded_lat, geocoded_lon = geocode_location(location)
+    # Geocode if lat/lon are not provided (single-centroid mode fallback).
+    # Grid mode uses bbox instead, so lat/lon are optional there.
+    if bbox is None and (lat is None or lon is None):
+        geocoded_lat, geocoded_lon, _ = geocode_location(location)
         if geocoded_lat is not None and geocoded_lon is not None:
             lat, lon = geocoded_lat, geocoded_lon
 
@@ -166,13 +196,23 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
             "-json",
             "-depth", str(depth),
             "-pages-per-browser", "2",
-            "-fast-mode",
-            "-email"
+            "-email",
         ]
+        if bbox is not None:
+            # Grid mode: JS-mode iteration over cell centroids inside the
+            # scraper. -fast-mode is incompatible with -grid-bbox.
+            min_lat, min_lon, max_lat, max_lon = bbox
+            cell = cell_km if cell_km is not None else 2.0
+            cmd.extend([
+                "-grid-bbox", f"{min_lat},{min_lon},{max_lat},{max_lon}",
+                "-grid-cell", str(cell),
+            ])
+        else:
+            # Single-centroid legacy mode.
+            cmd.append("-fast-mode")
+            if lat is not None and lon is not None:
+                cmd.extend(["-geo", f"{lat},{lon}"])
         cmd.extend(_scraper_proxy_args())
-        
-        if lat is not None and lon is not None:
-            cmd.extend(["-geo", f"{lat},{lon}"])
         
         logger.info("Executing: %s", " ".join(cmd))
         # Run the scraper.
@@ -202,8 +242,22 @@ def execute_scrape_and_ingest(query: str, location: str, lat: float = None, lon:
         # 4. Read results and ingest into database
         if os.path.exists(results_file_path) and os.path.getsize(results_file_path) > 0:
             with open(results_file_path, 'r', encoding='utf-8') as rf:
-                leads_data = json.load(rf)
-            
+                raw_text = rf.read().strip()
+            # Grid mode emits JSONL (one object per line); single-centroid
+            # mode emits a JSON array. Handle both.
+            leads_data = []
+            if raw_text.startswith("["):
+                leads_data = json.loads(raw_text)
+            else:
+                for line in raw_text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        leads_data.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        logger.warning("Skipping malformed JSONL line: %s", e)
+
             logger.info(f"Found {len(leads_data)} raw leads. Ingesting into database...")
             raw_leads_to_insert = []
             for item in leads_data:

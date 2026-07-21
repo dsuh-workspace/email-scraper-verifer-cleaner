@@ -49,7 +49,7 @@ def modules():
 
     fake_scraper = types.ModuleType("app.scraper.run_scraper")
     fake_scraper.execute_scrape_and_ingest = lambda *args, **kwargs: None
-    fake_scraper.geocode_location = lambda location: (None, None)
+    fake_scraper.geocode_location = lambda location: (None, None, None)
 
     original_modules = {}
     for name, module in {
@@ -152,7 +152,7 @@ class TestParseArgs:
 class TestRunLocationPipeline:
     def test_stops_when_target_new_exportable_reached(self, monkeypatch, modules):
         run_pipeline, _ = modules
-        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0))
+        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *args, **kwargs: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
@@ -179,7 +179,7 @@ class TestRunLocationPipeline:
 
     def test_stops_after_stale_iterations(self, monkeypatch, modules):
         run_pipeline, _ = modules
-        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0))
+        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *args, **kwargs: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
@@ -206,7 +206,7 @@ class TestRunLocationPipeline:
 
     def test_stops_at_max_depth(self, monkeypatch, modules):
         run_pipeline, _ = modules
-        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0))
+        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *args, **kwargs: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
@@ -252,11 +252,17 @@ class TestMain:
 
         called = {}
 
-        def fake_run_end_to_end_pipeline(query, location, min_contacts, max_depth):
+        def fake_run_end_to_end_pipeline(
+            query, location, min_contacts, max_depth,
+            use_grid=False, cell_km=2.0, bbox=None,
+        ):
             called["query"] = query
             called["location"] = location
             called["min_contacts"] = min_contacts
             called["max_depth"] = max_depth
+            called["use_grid"] = use_grid
+            called["cell_km"] = cell_km
+            called["bbox"] = bbox
 
         monkeypatch.setattr(run_pipeline, "run_end_to_end_pipeline", fake_run_end_to_end_pipeline)
 
@@ -267,13 +273,16 @@ class TestMain:
             "location": "Plano, TX",
             "min_contacts": 50,
             "max_depth": 9,
+            "use_grid": False,
+            "cell_km": 2.0,
+            "bbox": None,
         }
 
     def test_legacy_pipeline_keeps_increasing_depth_until_target(self, monkeypatch, modules):
         run_pipeline, _ = modules
         monkeypatch.setattr(run_pipeline, "setup_logging", lambda: None)
         monkeypatch.setattr(run_pipeline, "init_db", lambda: None)
-        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0))
+        monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
 
         depths = []
         monkeypatch.setattr(
@@ -299,6 +308,122 @@ class TestMain:
 
         assert depths == [1, 3]
         assert exported == [True]
+
+    def test_grid_mode_single_pass_uses_bbox(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(run_pipeline, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_pipeline, "init_db", lambda: None)
+        # Nominatim bbox flows through when no override.
+        monkeypatch.setattr(
+            run_pipeline,
+            "geocode_location",
+            lambda location: (37.3, -121.8, (37.21, -122.05, 37.47, -121.75)),
+        )
+
+        calls = []
+
+        def fake_scrape(query, location, lat=None, lon=None, depth=1, bbox=None, cell_km=None):
+            calls.append({"bbox": bbox, "cell_km": cell_km, "depth": depth, "lat": lat, "lon": lon})
+
+        monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
+        monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            min_contacts=999,
+            max_depth=20,
+            use_grid=True,
+            cell_km=2.0,
+        )
+
+        # Exactly one scrape (grid mode does not loop on depth)
+        assert len(calls) == 1
+        assert calls[0]["bbox"] == (37.21, -122.05, 37.47, -121.75)
+        assert calls[0]["cell_km"] == 2.0
+
+    def test_grid_mode_respects_explicit_bbox(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(run_pipeline, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_pipeline, "init_db", lambda: None)
+        # Nominatim returns a different bbox; explicit override should win.
+        monkeypatch.setattr(
+            run_pipeline,
+            "geocode_location",
+            lambda location: (0.0, 0.0, (10.0, 10.0, 20.0, 20.0)),
+        )
+
+        received = {}
+
+        def fake_scrape(query, location, lat=None, lon=None, depth=1, bbox=None, cell_km=None):
+            received["bbox"] = bbox
+            received["cell_km"] = cell_km
+
+        monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
+        monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="anywhere",
+            min_contacts=1,
+            max_depth=20,
+            use_grid=True,
+            cell_km=1.5,
+            bbox=(1.0, 1.0, 2.0, 2.0),
+        )
+
+        assert received["bbox"] == (1.0, 1.0, 2.0, 2.0)
+        assert received["cell_km"] == 1.5
+
+    def test_grid_mode_errors_without_bbox(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(run_pipeline, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_pipeline, "init_db", lambda: None)
+        # Nominatim returns no bbox.
+        monkeypatch.setattr(
+            run_pipeline,
+            "geocode_location",
+            lambda location: (1.0, 2.0, None),
+        )
+        monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *a, **kw: None)
+        monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+
+        import pytest
+        with pytest.raises(SystemExit):
+            # RuntimeError is caught + logged inside run_end_to_end_pipeline, then sys.exit(1)
+            run_pipeline.run_end_to_end_pipeline(
+                query="Plumbing",
+                location="unmappable",
+                use_grid=True,
+            )
+
+    def test_parse_bbox_rejects_wrong_arity(self, modules):
+        run_pipeline, _ = modules
+        import pytest
+        with pytest.raises(ValueError):
+            run_pipeline._parse_bbox("1.0,2.0,3.0")
+
+    def test_parse_bbox_rejects_reversed(self, modules):
+        run_pipeline, _ = modules
+        import pytest
+        with pytest.raises(ValueError):
+            # min_lat > max_lat
+            run_pipeline._parse_bbox("5.0,1.0,3.0,2.0")
+
+    def test_parse_bbox_happy(self, modules):
+        run_pipeline, _ = modules
+        assert run_pipeline._parse_bbox("37.21,-122.05,37.47,-121.75") == (
+            37.21, -122.05, 37.47, -121.75,
+        )
 
 
 class TestZipBatchHelpers:

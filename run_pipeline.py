@@ -76,7 +76,7 @@ def run_location_pipeline(
     export_destination: str = LEGACY_EXPORT_DESTINATION,
 ) -> LocationRunMetrics:
     """Run scrape/process/harvest loop for one location and return metrics."""
-    lat, lon = geocode_location(location)
+    lat, lon, _bbox = geocode_location(location)
     if lat is None or lon is None:
         logger.warning("Could not geocode %r. Scraper will retry per iteration.", location)
 
@@ -181,10 +181,51 @@ def parse_args() -> argparse.Namespace:
         "--max-depth",
         type=int,
         default=20,
-        help="Maximum scraper depth before stopping",
+        help="Maximum scraper depth before stopping (single-centroid mode only)",
+    )
+    parser.add_argument(
+        "--grid",
+        action="store_true",
+        help=(
+            "Use native grid-mode scraping (JS-mode, requires Playwright). "
+            "One scrape iterates cells over the location's bounding box. "
+            "Empirically 4-25x higher coverage than single-centroid mode."
+        ),
+    )
+    parser.add_argument(
+        "--cell-km",
+        type=float,
+        default=2.0,
+        help="Grid cell size in km (default 2.0). Ignored without --grid.",
+    )
+    parser.add_argument(
+        "--bbox",
+        type=str,
+        default=None,
+        help=(
+            "Explicit bounding box 'min_lat,min_lon,max_lat,max_lon' for "
+            "grid mode. Overrides Nominatim-derived bbox. Ignored without --grid."
+        ),
     )
     return parser.parse_args()
 
+
+
+def _parse_bbox(raw: str) -> tuple[float, float, float, float]:
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 4:
+        raise ValueError(
+            f"--bbox must be 'min_lat,min_lon,max_lat,max_lon' (4 floats), got {raw!r}"
+        )
+    try:
+        min_lat, min_lon, max_lat, max_lon = (float(p) for p in parts)
+    except ValueError as e:
+        raise ValueError(f"--bbox values must be floats: {e}") from e
+    if not (min_lat < max_lat and min_lon < max_lon):
+        raise ValueError(
+            f"--bbox must satisfy min_lat<max_lat and min_lon<max_lon, got {raw!r}"
+        )
+    return (min_lat, min_lon, max_lat, max_lon)
 
 
 def run_end_to_end_pipeline(
@@ -192,44 +233,90 @@ def run_end_to_end_pipeline(
     location: str,
     min_contacts: int = 500,
     max_depth: int = 20,
+    use_grid: bool = False,
+    cell_km: float = 2.0,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> None:
     """
-    Orchestrate pipeline. Legacy stop condition uses total DB contacts.
+    Orchestrate pipeline.
+
+    Two modes:
+    - Single-centroid (default): loop scraper at increasing depths until
+      min_contacts hit or max_depth reached. Legacy behavior.
+    - Grid mode (use_grid=True): one scrape iterates cells over the
+      location's bounding box (Nominatim-derived, or explicit `bbox` arg).
+      No depth loop — grid+depth 3 was empirically 4-25x richer than a
+      curated ZIP sweep. If min_contacts isn't hit after the grid scrape,
+      we still stop; grid coverage is the ceiling.
     """
     setup_logging()
 
     logger.info("=" * 60)
     logger.info("STARTING END-TO-END LEAD GENERATION PIPELINE")
-    logger.info("query=%r location=%r min_contacts=%d", query, location, min_contacts)
+    logger.info(
+        "query=%r location=%r min_contacts=%d mode=%s",
+        query,
+        location,
+        min_contacts,
+        "grid" if use_grid else "single-centroid",
+    )
     logger.info("=" * 60)
 
     init_db()
 
     try:
-        lat, lon = geocode_location(location)
+        lat, lon, geo_bbox = geocode_location(location)
         if lat is None or lon is None:
             logger.warning("Could not geocode %r. Scraper will retry per iteration.", location)
 
-        depth = 1
-        while True:
-            logger.info("--- Running scraping loop (depth=%d) ---", depth)
-            execute_scrape_and_ingest(query, location, lat=lat, lon=lon, depth=depth)
+        if use_grid:
+            effective_bbox = bbox if bbox is not None else geo_bbox
+            if effective_bbox is None:
+                raise RuntimeError(
+                    f"Grid mode requires a bounding box. Nominatim returned none "
+                    f"for {location!r} and no --bbox override was supplied."
+                )
+            logger.info(
+                "--- Grid scrape (bbox=%s cell_km=%.2f) ---",
+                effective_bbox,
+                cell_km,
+            )
+            execute_scrape_and_ingest(
+                query,
+                location,
+                bbox=effective_bbox,
+                cell_km=cell_km,
+                depth=3,
+            )
             process_and_deduplicate_leads()
             harvest_emails_from_websites()
-
             current_contacts = get_contact_count()
-            logger.info("Current contacts in DB: %d / %d", current_contacts, min_contacts)
+            logger.info(
+                "Grid scrape complete. Contacts in DB: %d (target %d).",
+                current_contacts,
+                min_contacts,
+            )
+        else:
+            depth = 1
+            while True:
+                logger.info("--- Running scraping loop (depth=%d) ---", depth)
+                execute_scrape_and_ingest(query, location, lat=lat, lon=lon, depth=depth)
+                process_and_deduplicate_leads()
+                harvest_emails_from_websites()
 
-            if current_contacts >= min_contacts:
-                logger.info("Reached target of %d contacts.", min_contacts)
-                break
+                current_contacts = get_contact_count()
+                logger.info("Current contacts in DB: %d / %d", current_contacts, min_contacts)
 
-            if depth >= max_depth:
-                logger.warning("Reached max scraper depth (%d). Stopping.", max_depth)
-                break
+                if current_contacts >= min_contacts:
+                    logger.info("Reached target of %d contacts.", min_contacts)
+                    break
 
-            depth += 2
-            logger.info("Increasing scraper depth to %d.", depth)
+                if depth >= max_depth:
+                    logger.warning("Reached max scraper depth (%d). Stopping.", max_depth)
+                    break
+
+                depth += 2
+                logger.info("Increasing scraper depth to %d.", depth)
 
         export_new_leads()
         logger.info("=" * 60)
@@ -244,11 +331,17 @@ def run_end_to_end_pipeline(
 
 def main() -> None:
     args = parse_args()
+    bbox = _parse_bbox(args.bbox) if args.bbox else None
+    if bbox is not None and not args.grid:
+        logger.warning("--bbox supplied without --grid; bbox will be ignored.")
     run_end_to_end_pipeline(
         query=args.query,
         location=args.location,
         min_contacts=args.min_contacts,
         max_depth=args.max_depth,
+        use_grid=args.grid,
+        cell_km=args.cell_km,
+        bbox=bbox,
     )
 
 

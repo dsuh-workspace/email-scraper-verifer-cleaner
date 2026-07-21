@@ -125,6 +125,31 @@ python run_pipeline.py \
 `run_pipeline.py` keeps legacy semantics: `--min-contacts` is total DB
 contacts, not new contacts from current run.
 
+### Grid-mode scraping (recommended for coverage)
+
+```bash
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --grid \
+  --cell-km 2.0
+```
+
+Uses the scraper's native `-grid-bbox` mode (JS mode via Playwright).
+Iterates cells over the location's Nominatim-derived bounding box in one
+scraper invocation. Empirically **4-25× more unique businesses** than
+single-centroid mode (see `plans/generalized-city-coverage-method-2026-07-20.md`).
+
+One-time setup: run `./scripts/setup_scraper_playwright.sh` to install the
+Playwright driver + Chromium + FFmpeg (~265 MB). Also handles the
+mxschmitt/playwright-go v0.6100.0 version-mismatch workaround.
+
+Optional: `--bbox min_lat,min_lon,max_lat,max_lon` overrides the
+Nominatim-derived bbox when you want a specific region.
+
+Grid mode ignores `--max-depth` (single scrape) and typically saturates
+before `--min-contacts`.
+
 ### Batch zip-file mode
 
 Use `run_zip_batch.py` when you want one CSV of zips/locations and a per-zip

@@ -1,11 +1,18 @@
 # email-scraper-verifer-cleaner — Review Notes
 
-Living review + backlog. Updated 2026-07-20.
+Living review + backlog. Updated 2026-07-21.
 
 Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
 dedupes → crawls sites for emails → optionally verifies via self-hosted
 Reacher on Kamatera → exports Sheets/CSV.
 Now captures rich map details (Review Count, Review Rating, Address, Status, Description, Place ID).
+
+**2026-07-21**: pipeline now supports native grid-mode scraping via
+`--grid --cell-km <km>` on `run_pipeline.py`. Empirically 4-25× coverage
+of single-centroid mode. Requires Playwright driver installed via
+`./scripts/setup_scraper_playwright.sh` (one-time, ~265 MB). See
+`plans/generalized-city-coverage-method-2026-07-20.md` for the full
+strategy write-up + n=2 SJ/SC empirical results.
 
 ---
 

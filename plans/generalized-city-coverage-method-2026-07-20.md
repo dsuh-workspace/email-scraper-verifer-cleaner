@@ -205,29 +205,15 @@ Pros: cheap to implement; may recover businesses that only rank under specific q
 
 Cons: N× cost; diminishing returns per additional variant; requires per-vertical variant list (Plumbing variants ≠ HVAC variants ≠ Roofing variants).
 
-### Recommendation — REVISED after grid discovery
+### Recommendation — FINALIZED after empirical results
 
-Options were originally ranked A > B because B looked like ground-up work. After discovering B is native to the scraper, recommendation is:
+**v1 = option B (native grid mode) alone.** Grid A ran on SJ, returned 429 unique biz in 6:17 — 4.5× the 95-biz ZIP-sweep baseline. Rubric threshold ≥95 hit decisively.
 
-**Run a grid experiment on SJ first.** One command, ~1-2 hours runtime. Result determines v1:
+Option A (optimized ZIP sweep) is not needed for coverage. May still be worth keeping `run_zip_batch.py` alive as a fallback for markets where grid mode fails or as legacy compat, but no new v1 features for it.
 
-- **If grid ≥ 95 biz on SJ**: v1 = B (grid). Skip A entirely — grid subsumes ZIP sweep's coverage without CSV curation.
-- **If 70 ≤ grid < 95 biz**: v1 = A+B. Grid as default coarse pass, ZIP CSV for markets needing extra coverage.
-- **If grid < 70 biz**: v1 = A (as originally planned). Grid centroids not as effective as curated ZIPs.
+Option C (query variants) stackable on top; still opt-in.
 
-C (query variants) stacks orthogonally in all three cases; opt-in flag.
-
-**Grid experiment spec:**
-
-```
-Query: "Plumbing" (matches SJ ZIP-sweep baseline)
-BBox: "37.21,-122.05,37.47,-121.75" (rough SJ, ~30km × 25km)
-Cell size: 2 km (SJ has ~450 km² → ~113 cells)
-Depth: 5 (upstream recipe default for grid mode)
-Fresh DB
-```
-
-Direct comparison vs `hvac_leads.backup-2026-07-20.db` (95 biz, 28 ZIPs, depth 9).
+Remaining n=2 validation: run grid A on Santa Clarita (LA county, spread topology) to confirm the pattern holds beyond dense metros before deploying broadly.
 
 ---
 
@@ -318,6 +304,87 @@ The ZIP sweep's power was never "more depth" — it was **more distinct centroid
 - Retaining a city seed run for "informational" purposes adds ~3 min per market for ~1% marginal coverage. Not worth default. Available as opt-in only.
 
 **Also uncovered during testing:** `extract_emails.py:247` had `NameError: name 'ExportHistory' is not defined` — first SJ run crashed on this. Fixed in-place between run 1 and run 2. Ship the fix in commit before v1.
+
+### Grid experiment B (Python centroid loop, fast-mode) — RAN 2026-07-20
+
+To probe option B without Playwright, ran a Python driver that generates 182 grid centroids over SJ bbox (`37.21,-122.05,37.47,-121.75` @ 2 km) and invokes the scraper binary per centroid with `-geo lat,lon -fast-mode -depth {1|5}`. Then dedupe by `cid`.
+
+| Config | Raw records | Unique biz | Distinct ZIPs | Elapsed |
+|--------|-------------|------------|---------------|---------|
+| depth=1 | 1416 | **27** | 9 | 1.1 min |
+| depth=5 | 1416 | **27** | 12 | 1.2 min |
+
+Both configs converged on **27 unique biz** — same number, same records. Depth is a no-op in fast-mode (confirming Q9). 98% dedup rate — same handful of Plumbing businesses returned across nearly every centroid.
+
+**vs ZIP sweep (95 biz), Grid B = 28% coverage.** Roughly same magnitude as single-centroid (18%). Grid via fast-mode is only marginally better than 1 well-placed centroid.
+
+**Why grid B underperforms:** fast-mode uses the HTTP JSON endpoint Google exposes for their Maps SPA. That endpoint returns a small first-page-equivalent (~15-20 records) per query, and query string `"Plumbing in San Jose, CA"` dominates the ranking regardless of `-geo`. Rendering full Maps pages (Playwright JS mode) is what expands the result set — which is why the scraper's own grid mode requires JS mode and rejects `-fast-mode`.
+
+**Grid B conclusion:** insufficient to replace ZIP sweep. To fairly test the grid strategy, need option A (rebuild scraper with Playwright fix) and re-run in JS mode.
+
+### Grid experiment A (Playwright JS mode) — RAN 2026-07-20
+
+**Setup steps that worked** (for repro):
+
+1. `cd apl/tools/google-maps-scraper && /usr/local/go/bin/go build -o /tmp/gmaps-new .` (3.9 s, 46 MB binary; commit `0ef302e` with "Fixes 404 playwright")
+2. `PLAYWRIGHT_INSTALL_ONLY=1 /tmp/gmaps-new` — downloads Chrome for Testing 149.0.7827.55 + FFmpeg + Chrome Headless Shell (~265 MB) into `~/Library/Caches/ms-playwright-go/1.61.1/`
+3. **Version-mismatch hack** — the binary looks for driver at `~/Library/Caches/ms-playwright-go/1.60.0/` but `PLAYWRIGHT_INSTALL_ONLY=1` writes to `1.61.1/`. Copy the dir, patch `package/package.json` version field from `"1.61.1"` → `"1.60.0"`. Upstream bug in `mxschmitt/playwright-go v0.6100.0` where `Install()` and `Run()` disagree on the version path.
+
+**Command:**
+
+```
+/tmp/gmaps-new -input query.txt -results out.json -json \
+  -grid-bbox "37.21,-122.05,37.47,-121.75" \
+  -grid-cell 2.0 -depth 3 -c 4 -proxies $PROXIES -exit-on-inactivity 5m
+```
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Grid cells | 182 (2 km each) |
+| Runtime | **6 min 17 s** |
+| Concurrency | 4 |
+| Depth | 3 |
+| Total records emitted | 431 |
+| Unique cid | **429** |
+| Distinct ZIPs covered | **50** |
+
+**Full method comparison:**
+
+| Method | Unique biz | Runtime | Notes |
+|--------|-----------|---------|-------|
+| SJ ZIP sweep (28 ZIPs, d=9, fast) | 95 | hours | pre-experiment baseline |
+| SJ 1 centroid city (d=9, fast) | 17 | 2:38 | first experiment |
+| SJ grid B (182 tiles, d=1, fast) | 27 | 1:06 | Python loop, fast-mode |
+| SJ grid B (182 tiles, d=5, fast) | 27 | 1:12 | depth is no-op in fast-mode |
+| SJ 1 centroid (d=3, JS) | 40 | 0:46 | JS mode smoke test |
+| **SJ grid A (182 tiles, d=3, JS)** | **429** | **6:17** | **native grid, canonical fix** |
+
+Grid A on SJ delivers **4.5× the coverage** of the 28-ZIP curated sweep. Also expands geographically past SJ city limits (bbox catches Sunnyvale, Santa Clara, Cupertino, Fremont, Mountain View — same Santa Clara Valley market that businesses actually cover).
+
+**Rubric decision**: 429 ≥ 95 → **v1 = option B (native grid mode) alone. Option A (optimized ZIP sweep) is not needed.** Grid subsumes and outperforms.
+
+**Additional wins over ZIP-sweep:**
+- No per-market ZIP CSV curation (bbox from Nominatim geocoder for free)
+- Single subprocess call vs N per-ZIP subprocess spawns (less overhead, less DB churn)
+- Scraper's `centralwriter` handles cross-cell dedup internally (429/431 unique = 99.5%)
+- Runtime 6 min vs many hours for a comparable-coverage ZIP sweep
+
+**Caveats:**
+- JS mode heavier per-cell (Playwright, Chromium). Requires Playwright driver install + version-mismatch hack until upstream fixed.
+- Depth 3 seems enough for ~1-2 pages per cell; taller depths tested but not compared here.
+- 2 km cell was our first pick. Could try 1 km (~4× cells, ~4× runtime, ideally more unique) or 3 km (fewer cells, faster, possibly fewer unique).
+- ~~Only tested SJ. Should validate n=2 by running grid A on Santa Clarita for topology contrast before deploying broadly.~~ **Done 2026-07-21**: SC grid A returned 195 unique biz across all 10 SC ZIPs (91321-91390) — 14× the city-wide fast-mode number. Pattern holds for spread-out suburban topology.
+
+### Grid A n=2 combined result
+
+| Market | City-wide (fast, 1 centroid) | Grid A (JS, native grid, 2 km) | Multiplier |
+|--------|------------------------------|--------------------------------|------------|
+| San Jose | 17 | 429 (50 ZIPs) | 25× |
+| Santa Clarita | 12-14 | 195 (10 ZIPs) | 14-16× |
+
+Grid A wins decisively in both topologies. Deploy as v1.
 
 ---
 
@@ -772,15 +839,19 @@ Check:
 
 ---
 
-## Bottom line — REVISED (again, after grid discovery)
+## Bottom line — FINALIZED after grid A results
 
-**Empirical test (n=2, 2026-07-20) killed city-first.** City-wide `Plumbing in {city}` at `-depth 9` captures ~18% of ZIP-sweep coverage. Root cause: default `-radius 10000m` around single centroid + GMaps' ~120-per-query cap.
+**Empirical arc (n=2 → grid experiment) delivered a clear winner:**
 
-**Then discovered**: upstream scraper natively supports grid tiling via `-grid-bbox` + `-grid-cell`. This is the canonical fix for the ~120-per-query cap, per the scraper's own package doc.
+1. City-first (n=2): 17-18 biz per market → 18% coverage vs ZIP sweep. **Dead.**
+2. Grid B fast-mode (182 tiles): 27 biz → 28% coverage. **Dead** — HTTP endpoint capped.
+3. **Grid A JS mode (182 tiles, d=3)**: **429 biz in 6:17** on SJ — 4.5× ZIP sweep. **Winner.**
 
 New generalized method:
 
-**Empirically-selected geographic partition (curated ZIP subregions, native grid tiles, or both) driven by whichever proves higher coverage in a small SJ grid experiment. Judge each subregion by marginal `new_exportable_contacts` (with parallel `new_exportable_email_contacts` metric to catch placeholder-heavy successes).**
+**Native scraper grid mode (`-grid-bbox` + `-grid-cell`) in JS mode, sized around each market's bounding box (from Nominatim). Judge by cumulative unique biz and email-yield rate; ZIP CSVs no longer necessary. Optional query variants (option C) for further multiplier.**
+
+Simple, fast, generalizes, uses upstream's canonical solution.
 
 That gives:
 - proven coverage (SJ ZIP sweep found 95 biz vs city-run's 17)

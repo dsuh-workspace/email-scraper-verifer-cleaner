@@ -33,3 +33,6 @@ temp-*/
 
 # Pytest
 .pytest_cache/
+
+# Runtime logs
+logs/
