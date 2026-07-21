@@ -114,10 +114,11 @@ def _normalize_url(url: str) -> str:
 
 
 def _validate_proxy_url(proxy_url: str) -> str:
+    proxy_url = _normalize_proxy_line(proxy_url)
     proxy_url = proxy_url.strip()
     if not proxy_url:
         raise ValueError("Crawler proxy URL cannot be empty.")
-
+        
     parsed = urllib.parse.urlparse(proxy_url)
     if parsed.scheme not in ALLOWED_PROXY_SCHEMES:
         allowed = ", ".join(sorted(ALLOWED_PROXY_SCHEMES))
@@ -128,6 +129,19 @@ def _validate_proxy_url(proxy_url: str) -> str:
     return proxy_url
 
 
+def _normalize_proxy_line(line: str) -> str:
+    if "://" in line:
+        return line
+    parts = line.split(":")
+    if len(parts) == 4:
+        host, port, user, password = parts
+        return f"http://{user}:{password}@{host}:{port}"
+    elif len(parts) == 2:
+        host, port = parts
+        return f"http://{host}:{port}"
+    return line
+
+
 def _load_proxy_file(file_path: str) -> List[str]:
     proxies = []
     with open(file_path, "r", encoding="utf-8") as handle:
@@ -135,7 +149,7 @@ def _load_proxy_file(file_path: str) -> List[str]:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            proxies.append(line)
+            proxies.append(_normalize_proxy_line(line))
     return proxies
 
 
