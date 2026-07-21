@@ -26,10 +26,10 @@ Default flow (revised):
 Candidate v1 improvements (see [Revised strategy options](#revised-strategy-options)):
 
 - **A. Optimized ZIP sweep** — cleanest incremental. Keep ZIP-first. Add ZIP priority ordering, cumulative-yield stop.
-- **B. Grid-tile fallback** — for markets without a ZIP CSV, auto-generate lat/lon grid tiles from city bounding box.
+- **B. Grid tiles** — **NATIVELY SUPPORTED by scraper binary via `-grid-bbox` + `-grid-cell`**. Auto-tiles bbox, iterates cells inside Go binary, dedups internally. Python side needs minimal glue.
 - **C. Query-variation multiplier** — orthogonal to geo. Same location × N query variants ("plumbing", "plumber", "emergency plumber") multiplies per-centroid yield.
 
-Pick one (or combine) once we agree on direction.
+**Recommended flow**: run a grid experiment on SJ (~1-2 hr) BEFORE picking v1. If grid ≥ ZIP-sweep coverage, v1 = B (dominates A). If grid falls short, v1 = A. Either way, C stacks on top.
 
 ---
 
@@ -147,19 +147,52 @@ Missing `priority` field → `math.inf`. Non-int → warn + treat as `inf`.
 - SJ existing CSV re-run with reasonable stop thresholds skips ≥5 tail ZIPs while retaining ≥95% of biz coverage (real gain shown)
 - All existing 73 tests pass; ≥6 new tests for priority + cumulative-stop + email-only metric
 
-### B. Grid-tile auto-fallback (generalizes)
+### B. Grid-tile auto-fallback — **NATIVELY SUPPORTED BY SCRAPER**
 
-For markets without a hand-curated ZIP CSV:
-- Take city name → geocode to centroid → derive bounding box (city polygon via Nominatim, or fixed radius e.g. 10 km).
-- Generate lat/lon grid at fixed spacing (e.g. 2-4 km tiles).
-- Run each tile as a scrape target (same query, distinct `-geo lat,lon`).
-- Same dedup / cumulative-yield stop as option A.
+**Discovery 2026-07-20**: the upstream Go scraper (`github.com/gosom/google-maps-scraper`, mirrored at `apl/tools/google-maps-scraper/`) already implements grid scraping as a first-class feature. Package doc:
 
-Pros: works for any city with no prep; grid density is a knob; reuses `run_location_pipeline` with `--geo` override.
+> Package grid provides utilities to divide a geographic bounding box into a grid of smaller cells. This is useful for overcoming Google Maps' ~120 results-per-search limit: by splitting a large area into many small cells and issuing one search per cell, you can retrieve far more results.
 
-Cons: tile centroids don't match Google Maps' "logical" area boundaries (ZIPs, districts, neighborhoods); may have more overlap waste; hard to prove coverage bounds without empirical study.
+Installed binary flags:
 
-Open Q: does scraper query `"Plumbing in San Jose"` + `-geo <tile-lat>,<tile-lon>` behave the same as `"Plumbing in 95112"` (same location text)? Or does location text drive results more than `-geo`? Untested. Needs a tile-vs-ZIP experiment before committing to B.
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `-grid-bbox` | (empty) | `minLat,minLon,maxLat,maxLon` — activates grid mode |
+| `-grid-cell` | 1.0 | km per cell |
+| `-radius` | 10000 | per-query search radius (m). Explains why single-centroid city runs saturated at ~17 biz — one 10km-radius search around SJ centroid |
+| `-zoom` | 15 | Google Maps zoom level |
+| `-lang` | en | Google language code |
+
+Recipe from upstream `docs/recipes.md`:
+
+```bash
+google-maps-scraper -input query.txt -depth 5 \
+  -grid-bbox "52.34,13.09,52.68,13.76" \
+  -grid-cell 1.0 \
+  -results out.json -json ...
+```
+
+**Python integration effort:** minimal.
+- `run_scraper.execute_scrape_and_ingest` — accept optional `bbox` + `cell_km`; pass `-grid-bbox` / `-grid-cell` to binary instead of `-geo`.
+- `run_pipeline.geocode_location` — extend to also return bounding box (Nominatim returns `boundingbox` field, currently discarded).
+- Cell iteration + inner-scraper dedup happens in the Go binary. Python-side dedup (`process_leads` on `raw_leads`) still runs against `place_id`, catches anything the Go deduper misses.
+
+**Pros:**
+- Upstream canonical solution — battle-tested
+- No per-market ZIP CSV curation
+- Bbox derivable from geocoder (Nominatim returns it for free)
+- One subprocess invocation vs 30 for ZIP sweep → less overhead, less proxy churn
+- Cell size = single knob for coverage/cost tradeoff (1km fine, 4km coarse)
+- Works for any city, not just ones with pre-curated ZIP lists
+
+**Cons / unknowns:**
+- Cell centroids don't match Google Maps' "logical" area boundaries (ZIPs, districts). May have more overlap waste than curated ZIPs.
+- Untested locally at this project — need SJ grid experiment to compare vs 95-biz ZIP-sweep baseline.
+- `-radius` default 10km with 1km cells means large overlap per cell. Tuning `-radius` down may or may not help.
+
+**Open Q**: does scraper query `"Plumbing in San Jose"` + grid bbox behave the same as `"Plumbing"` alone + grid bbox? Grid uses lat/lon centroids per cell, so the "in San Jose" text hint may cause GMaps to re-narrow. Recipe examples use just `"plumbers in Austin Texas"` — query string still names the city, so grid + city-in-query is the canonical pattern.
+
+**Suggested empirical test before committing:** run `Plumbing` grid over SJ bbox (roughly `37.21,-122.05,37.47,-121.75`) at `-grid-cell 2.0`, compare biz count to ZIP-sweep 95. Expect ≥95 if grid replaces ZIP; if <70, grid alone insufficient and ZIP-first stays.
 
 ### C. Query-variation multiplier (orthogonal)
 
@@ -172,13 +205,29 @@ Pros: cheap to implement; may recover businesses that only rank under specific q
 
 Cons: N× cost; diminishing returns per additional variant; requires per-vertical variant list (Plumbing variants ≠ HVAC variants ≠ Roofing variants).
 
-### Recommendation
+### Recommendation — REVISED after grid discovery
 
-**v1 = A (optimized ZIP sweep) with C (query variants) as opt-in.** Skip B until we've proven tile-vs-ZIP equivalence with a small experiment.
+Options were originally ranked A > B because B looked like ground-up work. After discovering B is native to the scraper, recommendation is:
 
-- A gets us proven coverage on curated markets
-- C stacks on top for higher yield per market
-- B parked as follow-up for markets without ZIP CSVs; needs its own test before shipping
+**Run a grid experiment on SJ first.** One command, ~1-2 hours runtime. Result determines v1:
+
+- **If grid ≥ 95 biz on SJ**: v1 = B (grid). Skip A entirely — grid subsumes ZIP sweep's coverage without CSV curation.
+- **If 70 ≤ grid < 95 biz**: v1 = A+B. Grid as default coarse pass, ZIP CSV for markets needing extra coverage.
+- **If grid < 70 biz**: v1 = A (as originally planned). Grid centroids not as effective as curated ZIPs.
+
+C (query variants) stacks orthogonally in all three cases; opt-in flag.
+
+**Grid experiment spec:**
+
+```
+Query: "Plumbing" (matches SJ ZIP-sweep baseline)
+BBox: "37.21,-122.05,37.47,-121.75" (rough SJ, ~30km × 25km)
+Cell size: 2 km (SJ has ~450 km² → ~113 cells)
+Depth: 5 (upstream recipe default for grid mode)
+Fresh DB
+```
+
+Direct comparison vs `hvac_leads.backup-2026-07-20.db` (95 biz, 28 ZIPs, depth 9).
 
 ---
 
@@ -723,13 +772,15 @@ Check:
 
 ---
 
-## Bottom line — REVISED
+## Bottom line — REVISED (again, after grid discovery)
 
-**Empirical test (n=2, 2026-07-20) killed city-first.** City-wide `Plumbing in {city}` at `-depth 9` captures ~18% of ZIP-sweep coverage and adds ~1% marginal net-new. `-depth` is per-query pagination cap ~10-20 results, not a coverage lever.
+**Empirical test (n=2, 2026-07-20) killed city-first.** City-wide `Plumbing in {city}` at `-depth 9` captures ~18% of ZIP-sweep coverage. Root cause: default `-radius 10000m` around single centroid + GMaps' ~120-per-query cap.
+
+**Then discovered**: upstream scraper natively supports grid tiling via `-grid-bbox` + `-grid-cell`. This is the canonical fix for the ~120-per-query cap, per the scraper's own package doc.
 
 New generalized method:
 
-**Subregion-first (ZIP or grid), optimized for cumulative-yield stop and priority ordering. Judge each subregion by marginal `new_exportable_contacts` (with parallel `new_exportable_email_contacts` metric to catch placeholder-heavy successes). Optional cheap city-wide seed for ~1% marginal.**
+**Empirically-selected geographic partition (curated ZIP subregions, native grid tiles, or both) driven by whichever proves higher coverage in a small SJ grid experiment. Judge each subregion by marginal `new_exportable_contacts` (with parallel `new_exportable_email_contacts` metric to catch placeholder-heavy successes).**
 
 That gives:
 - proven coverage (SJ ZIP sweep found 95 biz vs city-run's 17)
