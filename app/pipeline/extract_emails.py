@@ -31,7 +31,7 @@ import requests
 from sqlalchemy.orm import sessionmaker
 
 from app.db.database import engine
-from app.db.create_tables import Business, Contact
+from app.db.create_tables import Business, Contact, ExportHistory
 
 from app.logging_config import get_logger
 
