@@ -4,7 +4,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
-from app.db.create_tables import Contact, Business, ExportHistory
+from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification
 
 from app.logging_config import get_logger, setup_logging
 
@@ -137,19 +137,23 @@ def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
         logger.error(f"Failed to write to local CSV: {e}")
         return False
 
-def export_new_leads(destination: str | None = None):
+def export_new_leads(destination: str | None = None, min_score: int = 0):
     """
-    Finds contacts that haven't been exported yet,
-    exports them to Sheets (or fallback CSV), and logs the export history.
+    Finds contacts that haven't been exported yet, exports them to Sheets
+    (or fallback CSV), and logs the export history.
+
+    When min_score > 0, gate exports by the latest EmailVerification.score
+    for each contact. Contacts with no verification row are treated as
+    score=0 (unverified) and skipped.
     """
     session = Session()
     destination = destination or (
         SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else LEGACY_EXPORT_DESTINATION
     )
-    
+
     try:
         # Query contacts that don't have an export history entry for this destination
-        new_leads = session.query(Contact, Business).join(
+        query = session.query(Contact, Business).join(
             Business, Contact.business_id == Business.id
         ).filter(
             Contact.email.isnot(None),
@@ -159,7 +163,21 @@ def export_new_leads(destination: str | None = None):
                     ExportHistory.contact_id.isnot(None),
                 )
             )
-        ).all()
+        )
+        if min_score > 0:
+            # Sub-select latest verification per contact by max(id) (id is
+            # monotonic, no timestamp column on EmailVerification).
+            latest = (
+                session.query(
+                    EmailVerification.contact_id.label("cid"),
+                    EmailVerification.score.label("score"),
+                )
+            ).subquery()
+            query = query.join(latest, latest.c.cid == Contact.id).filter(
+                latest.c.score >= min_score
+            )
+            logger.info("Gating export at min_score=%d (verifier score).", min_score)
+        new_leads = query.all()
         
         if not new_leads:
             logger.info("No new leads to export.")

@@ -21,7 +21,13 @@ def modules():
     fake_create_tables.ExportHistory = type(
         "ExportHistory", (), {"contact_id": object(), "destination": object()}
     )
+    fake_create_tables.EmailVerification = type(
+        "EmailVerification", (), {"contact_id": object(), "score": object()}
+    )
     fake_create_tables.init_db = lambda: None
+
+    fake_verify = types.ModuleType("app.pipeline.verify_emails")
+    fake_verify.verify_contacts_emails = lambda **_kw: None
 
     fake_logging = types.ModuleType("app.logging_config")
 
@@ -39,7 +45,7 @@ def modules():
     fake_logging.setup_logging = lambda: None
 
     fake_export = types.ModuleType("app.pipeline.export_sheets")
-    fake_export.export_new_leads = lambda: None
+    fake_export.export_new_leads = lambda **_kw: None
 
     fake_extract = types.ModuleType("app.pipeline.extract_emails")
     fake_extract.harvest_emails_from_websites = lambda: None
@@ -61,6 +67,7 @@ def modules():
         "app.pipeline.export_sheets": fake_export,
         "app.pipeline.extract_emails": fake_extract,
         "app.pipeline.process_leads": fake_process,
+        "app.pipeline.verify_emails": fake_verify,
         "app.scraper.run_scraper": fake_scraper,
     }.items():
         original_modules[name] = sys.modules.get(name)
@@ -283,6 +290,7 @@ class TestMain:
             use_grid=False, cell_km=2.0, bbox=None,
             disable_scraper_proxy=False, disable_crawler_proxy=False,
             strategy="single-centroid", queries=None, zip_csv=None,
+            verify=False, min_score=0,
         ):
             called["query"] = query
             called["location"] = location
@@ -296,6 +304,8 @@ class TestMain:
             called["strategy"] = strategy
             called["queries"] = queries
             called["zip_csv"] = zip_csv
+            called["verify"] = verify
+            called["min_score"] = min_score
 
         monkeypatch.setattr(run_pipeline, "run_end_to_end_pipeline", fake_run_end_to_end_pipeline)
 
@@ -314,6 +324,8 @@ class TestMain:
             "strategy": "single-centroid",
             "queries": None,
             "zip_csv": None,
+            "verify": False,
+            "min_score": 0,
         }
 
     def test_legacy_pipeline_keeps_increasing_depth_until_target(self, monkeypatch, modules):
@@ -335,7 +347,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: next(contact_counts))
 
         exported = []
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: exported.append(True))
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: exported.append(True))
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -367,7 +379,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -404,7 +416,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -433,7 +445,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
         import pytest
         with pytest.raises(SystemExit):
@@ -491,7 +503,7 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites",
                             lambda **_: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
     def test_full_harvest_runs_grid_then_multi_query(self, monkeypatch, modules):
         run_pipeline, _ = modules
@@ -574,7 +586,7 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **_: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
         import pytest
         with pytest.raises(SystemExit):
@@ -672,7 +684,7 @@ class TestZipBatchMain:
         monkeypatch.setattr(run_zip_batch, "init_db", lambda: init_db_calls.append(True))
 
         exported = []
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda: exported.append(True))
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: exported.append(True))
 
         run_zip_batch.main()
 
@@ -718,7 +730,7 @@ class TestZipBatchMain:
         monkeypatch.setattr(run_zip_batch, "run_location_pipeline", fake_run_location_pipeline)
 
         exported = []
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda: exported.append(True))
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: exported.append(True))
 
         run_zip_batch.main()
 
@@ -744,7 +756,7 @@ class TestZipBatchProxyFlags:
         monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
         monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
         monkeypatch.setattr(run_zip_batch, "load_locations", lambda path: ["95112"])
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: None)
 
         called = {}
 

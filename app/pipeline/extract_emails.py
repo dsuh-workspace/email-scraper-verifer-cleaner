@@ -50,12 +50,40 @@ EXCLUDE_EXTENSIONS = (
     ".webp", ".css", ".js",
 )
 
-# Also exclude obvious CDN/tracking noise found in scraped HTML.
+# Substring match against the full email. Blocks CDN/tracking noise plus
+# well-known template-site placeholders that regex-match but never
+# resolve to real inboxes. Verifier catches most of these too, but
+# pre-filtering saves API calls + keeps junk out of the DB.
 EXCLUDE_DOMAINS = (
+    # tracking / CDN / build-tool noise
     "sentry.io",
+    "sentry-next.wixpress.com",
     "wixpress.com",
+    "wix.com",
+    "cloudflare.com",
+    "cloudfront.net",
+    "googleusercontent.com",
+    "gstatic.com",
+    "cdn.",
+    # documentation / spec placeholders
     "example.com",
+    "example.org",
+    "example.net",
     "domain.com",
+    "yourdomain.com",
+    "your-domain.com",
+    "mysite.com",
+    "your-email.com",
+    "youremail.com",
+    "yoursite.com",
+    "email.com",
+    # frequent template-site junk seen in scraped SJ/SC data
+    "gami.com",
+    "test.com",
+    "sample.com",
+    # registrar / host placeholder shown by parked pages
+    "godaddy.com",
+    "sentry-cdn.com",
 )
 
 # Paths to try in order. First hit that returns emails short-circuits.

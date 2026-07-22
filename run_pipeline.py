@@ -21,6 +21,7 @@ from app.logging_config import get_logger, setup_logging
 from app.pipeline.export_sheets import export_new_leads
 from app.pipeline.extract_emails import harvest_emails_from_websites
 from app.pipeline.process_leads import process_and_deduplicate_leads
+from app.pipeline.verify_emails import verify_contacts_emails
 from app.scraper.run_scraper import execute_scrape_and_ingest, geocode_location
 
 logger = get_logger(__name__)
@@ -275,6 +276,27 @@ def parse_args() -> argparse.Namespace:
             "skipped if omitted."
         ),
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "After crawling, run Reacher (self-hosted check-if-email-exists) "
+            "against every unverified contact email. Requires REACHER_API_URL "
+            "to point at a live instance. Failures are logged but do not "
+            "abort the pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--min-score",
+        type=int,
+        default=0,
+        help=(
+            "Only export contacts whose latest EmailVerification.score is >= N. "
+            "0 (default) exports everything. Reacher scoring: safe=100, "
+            "risky=50, unknown=25, invalid=0. Contacts with no verification "
+            "row are treated as score=0 and skipped when min-score > 0."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -325,6 +347,8 @@ def run_end_to_end_pipeline(
     strategy: str = "single-centroid",
     queries: tuple[str, ...] | None = None,
     zip_csv: str | None = None,
+    verify: bool = False,
+    min_score: int = 0,
 ) -> None:
     """
     Orchestrate pipeline. Three strategies:
@@ -488,7 +512,16 @@ def run_end_to_end_pipeline(
                 depth += 2
                 logger.info("Increasing scraper depth to %d.", depth)
 
-        export_new_leads()
+        if verify:
+            logger.info("--- Verifying harvested emails via Reacher ---")
+            try:
+                verify_contacts_emails()
+            except Exception as ve:  # noqa: BLE001
+                # Verifier is best-effort — server can be down / port 25
+                # blocked. Log and keep going so we still get an export.
+                logger.warning("Verification pass failed: %s", ve)
+
+        export_new_leads(min_score=min_score)
         logger.info("=" * 60)
         logger.info("PIPELINE EXECUTED SUCCESSFULLY")
         logger.info("=" * 60)
@@ -541,6 +574,8 @@ def main() -> None:
         strategy=strategy,
         queries=query_variants,
         zip_csv=args.zip_csv,
+        verify=args.verify,
+        min_score=args.min_score,
     )
 
 

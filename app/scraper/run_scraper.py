@@ -160,6 +160,7 @@ def execute_scrape_and_ingest(
     queries: list[str] | None = None,
     fast_mode: bool | None = None,
     lang: str = "en",
+    category: str | None = None,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -187,10 +188,13 @@ def execute_scrape_and_ingest(
     session = Session()
 
     # 1. Create a new ScrapeRun entry
+    # Derive category from the query so non-HVAC/non-plumbing runs get
+    # labeled correctly. Callers can override with an explicit category=.
+    effective_category = category if category else (query.strip() if query else None)
     db_run = ScrapeRun(
         query=query,
         location=location,
-        category="HVAC/Plumbing",  # Default category context
+        category=effective_category,
         status="running",
         started_at=datetime.now(timezone.utc)
     )
@@ -325,10 +329,13 @@ def execute_scrape_and_ingest(
                 emails = item.get("emails", [])
                 email_str = ", ".join(emails) if isinstance(emails, list) else str(emails) if emails else None
                 
+                # Prefer scraper's per-business categories; fall back to the
+                # run-level effective_category (derived from query) so we
+                # never stamp the wrong industry on new leads.
                 lead = RawLead(
                     scrape_run_id=scrape_run_id,
                     business_name=item.get("title"),
-                    category=", ".join(item.get("categories", [])) or category_str,
+                    category=category_str or effective_category,
                     phone=item.get("phone"),
                     website=item.get("web_site"),
                     email=email_str,

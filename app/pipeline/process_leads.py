@@ -39,6 +39,31 @@ Session = sessionmaker(bind=engine)
 # Same regex as extract_emails.py so validation is consistent across the pipeline.
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
+# Substring match — same blocklist rationale as extract_emails.EXCLUDE_DOMAINS.
+# Keep the two lists loosely in sync; duplication here is deliberate so the
+# scraper-side email field is filtered before insert (crawler-side is
+# handled in extract_emails.py).
+_PLACEHOLDER_EMAIL_SUBSTRINGS = (
+    "sentry.io",
+    "wixpress.com",
+    "wix.com",
+    "example.com",
+    "example.org",
+    "example.net",
+    "domain.com",
+    "yourdomain.com",
+    "your-domain.com",
+    "mysite.com",
+    "yoursite.com",
+    "youremail.com",
+    "your-email.com",
+    "email.com",
+    "gami.com",
+    "test.com",
+    "sample.com",
+    "godaddy.com",
+)
+
 # Raw scraper output separates emails with any of these — treat them all.
 _EMAIL_SPLIT_RE = re.compile(r'[,;\s]+')
 
@@ -101,9 +126,12 @@ def _parse_and_validate_emails(raw_email_field: str):
         email = part.strip().lower().rstrip('.,;')
         if not email or email in seen:
             continue
-        if EMAIL_REGEX.match(email):
-            seen.add(email)
-            valid.append(email)
+        if not EMAIL_REGEX.match(email):
+            continue
+        if any(bad in email for bad in _PLACEHOLDER_EMAIL_SUBSTRINGS):
+            continue
+        seen.add(email)
+        valid.append(email)
     return valid
 
 
@@ -122,10 +150,15 @@ def process_and_deduplicate_leads() -> None:
         )
         logger.info(f"Loaded {len(raw_leads)} unprocessed raw leads for processing.")
         # -- Pre-load existing businesses into fast lookup dicts (one SELECT total) --
+        # Skip garbage domain rows ('http:', 'https:', '') left by the legacy
+        # case-sensitive scheme-check bug. Seeding those into the dedup map
+        # collapses every subsequent website-less biz onto whichever row
+        # happened to hold that key.
+        _BAD_DOMAINS = {"http:", "https:", ""}
         existing_by_domain: Dict[str, Business] = {}
         existing_by_name_phone: Dict[Tuple[str, str], Business] = {}
         for biz in session.query(Business).all():
-            if biz.domain:
+            if biz.domain and biz.domain not in _BAD_DOMAINS:
                 existing_by_domain[biz.domain] = biz
             if biz.business_name and biz.phone:
                 existing_by_name_phone[(biz.business_name, biz.phone)] = biz
