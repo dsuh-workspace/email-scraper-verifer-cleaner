@@ -7,27 +7,75 @@ dedupes → crawls sites for emails → optionally verifies via self-hosted
 Reacher on Kamatera → exports Sheets/CSV.
 Now captures rich map details (Review Count, Review Rating, Address, Status, Description, Place ID).
 
-**2026-07-21**: pipeline now supports native grid-mode scraping via
+**2026-07-21 (v1)**: pipeline supports native grid-mode scraping via
 `--grid --cell-km <km>` on `run_pipeline.py`. Empirically 4-25× coverage
 of single-centroid mode. Requires Playwright driver installed via
 `./scripts/setup_scraper_playwright.sh` (one-time, ~265 MB). See
 `plans/generalized-city-coverage-method-2026-07-20.md` for the full
 strategy write-up + n=2 SJ/SC empirical results.
 
+**2026-07-21 (v2)**: pipeline adds `--strategy full-harvest` = grid +
+multi-query slow at centroid + optional fast ZIP top-up (via
+`--zip-csv`). On SJ 2026-07-20 experiment: grid alone = 362 biz, full
+harvest = 504 biz (+39%). Default queries = 8 plumbing variants; override
+with `--queries "a,b,c"`. See
+`plans/scrape-strategy-experiments-2026-07-20.md` for full n=1 evidence.
+
 ---
 
 ## Pipeline flow (as-built)
 
+Three strategies via `--strategy {single-centroid, grid, full-harvest}`
+on `run_pipeline.py`. Default = `single-centroid` (legacy). Selection
+sugar: `--grid` == `--strategy grid`.
+
+**Single-centroid** (legacy depth-loop):
 ```
-run_pipeline.run_end_to_end_pipeline(query, location, min_contacts)
-  init_db()                              # bootstrap schema once
-  lat, lon = geocode_location(location)  # ONCE via Nominatim, cached
-  loop (depth 1 → max 20, step +2):
-    run_scraper.execute_scrape_and_ingest(query, location, lat, lon)  # subprocess → raw_leads
-    process_leads.process_and_deduplicate  # unprocessed raw_leads → businesses + contacts
-    extract_emails.harvest_emails_from_websites  # concurrent crawl /contact,/about,... → contacts
-    if contact_count >= min_contacts: break
-  export_sheets.export_new_leads         # Sheets → fallback CSV
+init_db()
+lat, lon = geocode_location(location)             # ONCE via Nominatim
+loop (depth 1 → max_depth, step +2):
+  execute_scrape_and_ingest(query, location, lat, lon, depth)
+  process_and_deduplicate_leads()
+  harvest_emails_from_websites()
+  if contact_count >= min_contacts: break
+export_new_leads()
+```
+
+**Grid** (v1, JS mode, requires Playwright):
+```
+init_db()
+lat, lon, bbox = geocode_location(location)       # bbox from Nominatim
+                                                  # or --bbox override
+execute_scrape_and_ingest(query, location,
+                          bbox=bbox, cell_km=2.0, depth=3)
+process_and_deduplicate_leads()
+harvest_emails_from_websites()
+export_new_leads()
+```
+
+**Full-harvest** (v2, three passes):
+```
+init_db()
+lat, lon, bbox = geocode_location(location)
+
+# PASS 1: grid single-query
+execute_scrape_and_ingest(query, location, bbox=bbox, cell_km, depth=3)
+process_and_deduplicate_leads()
+
+# PASS 2: multi-query slow at centroid (8 variants in one input file)
+execute_scrape_and_ingest(query, location, lat, lon, depth=10,
+                          queries=DEFAULT_HARVEST_QUERIES, fast_mode=False)
+process_and_deduplicate_leads()
+
+# PASS 3 (optional): fast ZIP top-up
+for row in load_zip_csv(zip_csv):
+  zlat, zlon, _ = geocode_location(f"{city}, {state}, {zip}")
+  execute_scrape_and_ingest(query, zip_loc, lat=zlat, lon=zlon,
+                            depth=3, fast_mode=True)
+process_and_deduplicate_leads()
+
+harvest_emails_from_websites()                    # one crawl at end
+export_new_leads()
 ```
 
 Verification (`app/pipeline/verify_emails.py`) is NOT auto-wired into the
@@ -39,6 +87,16 @@ imported into `run_pipeline` on demand. Archived predecessor:
 
 ## Recently closed
 
+- ✅ **Coverage v2** (2026-07-21) `--strategy full-harvest`: grid + multi-query
+  slow at centroid + optional fast ZIP top-up. SJ 2026-07-20 experiment showed
+  504 unique biz vs 362 for grid alone (+39%). Default 8-query variant list
+  chosen from experiment's per-variant marginal-lift table.
+- ✅ **Coverage v1** (2026-07-21) `--grid --cell-km <km>` via scraper's native
+  `-grid-bbox`. JS mode via Playwright. 429 biz on SJ 2026-07-20 (vs 95 for
+  28-ZIP sweep, 17 for single centroid). Requires
+  `scripts/setup_scraper_playwright.sh` one-time driver install + version-hack.
+- ✅ **Bug** (2026-07-20) `extract_emails.py:247` — `ExportHistory` imported
+  now. Crash was silent unless a placeholder contact was hit during crawl.
 - ✅ **Critical #1** OS-aware scraper binary path (`.exe` on Windows, bare on unix)
 - ✅ **Critical #2** `create_all()` moved into `init_db()`, called from `run_pipeline`
 - ✅ **Critical #3** `processed_at` flag on `raw_leads` — no more quadratic reprocessing
@@ -168,11 +226,14 @@ everything.
 
 3. **`min_contacts` semantics** — total DB contacts vs new-this-run?
    Currently total, so re-running on a full DB never scrapes anything.
-   Probably wants "new this run".
+   Probably wants "new this run". Only affects `single-centroid`
+   strategy; `grid` and `full-harvest` don't loop on depth.
 
-4. **`max_depth=20`** — no evidence 20 is a rational upper bound. What
-   does depth=20 mean to the Go scraper (results count? radius?
-   Playwright pages loaded?). Needs research.
+4. **`max_depth=20`** — largely obsolete after 2026-07-20 experiment.
+   Fast-mode caps at ~19 results per invocation regardless of depth (see
+   `plans/scrape-strategy-experiments-2026-07-20.md`). Slow mode saturates
+   ~depth 10 (~110 leads). Grid mode uses depth 3 per cell. Flag retained
+   only for legacy `single-centroid` strategy compatibility.
 
 5. **Verifier exists but is not wired into `run_pipeline`** — deliberate
    as of now. `app/pipeline/verify_emails.py` is implemented and runnable
