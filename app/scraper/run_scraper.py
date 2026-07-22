@@ -5,13 +5,27 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from urllib.parse import urlparse
-from sqlalchemy.orm import sessionmaker
-from app.db.database import engine
-from app.db.create_tables import ScrapeRun, RawLead
 
 from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
+
+
+class _MissingOrmModel:
+    _next_id = 1
+
+    def __init__(self, *args, **kwargs):
+        self.id = self.__class__._next_id
+        self.__class__._next_id += 1
+        self.__dict__.update(kwargs)
+
+
+Session = None
+ScrapeRun = _MissingOrmModel
+RawLead = _MissingOrmModel
+
+DEFAULT_SCRAPER_PROXY_LIMIT = 3
+DEFAULT_SCRAPER_PAGES_PER_BROWSER = 2
 
 
 def _scraper_binary_path() -> str:
@@ -26,9 +40,6 @@ def _scraper_binary_path() -> str:
     else:
         name = "google-maps-scraper"
     return os.path.abspath(os.path.join(scraper_dir, name))
-
-Session = sessionmaker(bind=engine)
-
 
 def _validate_proxy_url(proxy_url: str, *, allow_socks: bool) -> str:
     """Trim and validate one proxy URL, returning normalized value."""
@@ -82,11 +93,40 @@ def _load_proxy_file(file_path: str) -> list[str]:
     return proxies
 
 
-def _scraper_proxy_args(disable_proxy: bool = False) -> list[str]:
+def _resolve_positive_int(value: int | None, env_name: str) -> int | None:
+    if value is None:
+        return None
+    if value <= 0:
+        raise ValueError(f"{env_name} must be > 0, got {value}")
+    return value
+
+
+def _env_positive_int(env_name: str) -> int | None:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{env_name} must be an integer, got {raw!r}") from e
+    return _resolve_positive_int(value, env_name)
+
+
+def _scraper_proxy_args(
+    disable_proxy: bool = False,
+    proxy_limit: int | None = None,
+) -> list[str]:
     """Return upstream gosom proxy args from env string or file."""
     if disable_proxy:
         logger.info("Scraper proxies disabled for this run.")
         return []
+
+    limit = _resolve_positive_int(
+        proxy_limit
+        if proxy_limit is not None
+        else (_env_positive_int("SCRAPER_PROXY_LIMIT") or DEFAULT_SCRAPER_PROXY_LIMIT),
+        "SCRAPER_PROXY_LIMIT",
+    )
 
     raw_proxies = os.getenv("SCRAPER_PROXIES", "").strip()
     proxy_file = os.getenv("SCRAPER_PROXIES_FILE", "").strip()
@@ -107,6 +147,9 @@ def _scraper_proxy_args(disable_proxy: bool = False) -> list[str]:
     proxies = []
     for proxy_url in proxy_values:
         proxies.append(_validate_proxy_url(proxy_url, allow_socks=True))
+
+    if limit is not None:
+        proxies = proxies[:limit]
 
     logger.info("Scraper proxies enabled (%d configured).", len(proxies))
     return ["-proxies", ",".join(proxies)]
@@ -161,6 +204,11 @@ def execute_scrape_and_ingest(
     fast_mode: bool | None = None,
     lang: str = "en",
     category: str | None = None,
+    concurrency: int | None = None,
+    browser_pool_size: int | None = None,
+    pages_per_browser: int | None = None,
+    proxy_limit: int | None = None,
+    disable_page_reuse: bool = False,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -185,6 +233,31 @@ def execute_scrape_and_ingest(
       - True/False => explicit; caller responsible for compatibility
         (scraper rejects fast_mode=True + bbox).
     """
+    global Session, ScrapeRun, RawLead
+
+    _resolve_positive_int(
+        concurrency if concurrency is not None else _env_positive_int("SCRAPER_CONCURRENCY"),
+        "SCRAPER_CONCURRENCY",
+    )
+    _resolve_positive_int(
+        browser_pool_size if browser_pool_size is not None else _env_positive_int("SCRAPER_BROWSER_POOL_SIZE"),
+        "SCRAPER_BROWSER_POOL_SIZE",
+    )
+    _resolve_positive_int(
+        pages_per_browser if pages_per_browser is not None else _env_positive_int("SCRAPER_PAGES_PER_BROWSER"),
+        "SCRAPER_PAGES_PER_BROWSER",
+    )
+
+    if Session is None:
+        from sqlalchemy.orm import sessionmaker
+
+        from app.db.database import engine
+        from app.db.create_tables import ScrapeRun as _ScrapeRun, RawLead as _RawLead
+
+        Session = sessionmaker(bind=engine)
+        ScrapeRun = _ScrapeRun
+        RawLead = _RawLead
+
     session = Session()
 
     # 1. Create a new ScrapeRun entry
@@ -247,16 +320,39 @@ def execute_scrape_and_ingest(
                 "Scraper rejects the combination."
             )
 
+        resolved_concurrency = _resolve_positive_int(
+            concurrency if concurrency is not None else _env_positive_int("SCRAPER_CONCURRENCY"),
+            "SCRAPER_CONCURRENCY",
+        )
+        resolved_browser_pool_size = _resolve_positive_int(
+            browser_pool_size
+            if browser_pool_size is not None
+            else _env_positive_int("SCRAPER_BROWSER_POOL_SIZE"),
+            "SCRAPER_BROWSER_POOL_SIZE",
+        )
+        resolved_pages_per_browser = _resolve_positive_int(
+            pages_per_browser
+            if pages_per_browser is not None
+            else _env_positive_int("SCRAPER_PAGES_PER_BROWSER"),
+            "SCRAPER_PAGES_PER_BROWSER",
+        ) or 2
+
         cmd = [
             binary_path,
             "-input", query_file_path,
             "-results", results_file_path,
             "-json",
             "-depth", str(depth),
-            "-pages-per-browser", "2",
+            "-pages-per-browser", str(resolved_pages_per_browser),
             "-lang", lang,
             "-email",
         ]
+        if resolved_concurrency is not None:
+            cmd.extend(["-c", str(resolved_concurrency)])
+        if resolved_browser_pool_size is not None:
+            cmd.extend(["-browser-pool-size", str(resolved_browser_pool_size)])
+        if disable_page_reuse:
+            cmd.append("-disable-page-reuse")
         if bbox is not None:
             # Grid mode: JS-mode iteration over cell centroids inside the
             # scraper. -fast-mode is incompatible with -grid-bbox.
@@ -272,7 +368,12 @@ def execute_scrape_and_ingest(
                 cmd.append("-fast-mode")
             if lat is not None and lon is not None:
                 cmd.extend(["-geo", f"{lat},{lon}"])
-        cmd.extend(_scraper_proxy_args(disable_proxy=disable_proxy))
+        cmd.extend(
+            _scraper_proxy_args(
+                disable_proxy=disable_proxy,
+                proxy_limit=proxy_limit,
+            )
+        )
         
         logger.info("Executing: %s", " ".join(cmd))
         # Run the scraper.

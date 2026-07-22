@@ -91,6 +91,11 @@ def run_location_pipeline(
     export_destination: str = LEGACY_EXPORT_DESTINATION,
     disable_scraper_proxy: bool = False,
     disable_crawler_proxy: bool = False,
+    scraper_concurrency: int | None = None,
+    scraper_browser_pool_size: int | None = None,
+    scraper_pages_per_browser: int | None = None,
+    scraper_proxy_limit: int | None = None,
+    scraper_disable_page_reuse: bool = False,
 ) -> LocationRunMetrics:
     """Run scrape/process/harvest loop for one location and return metrics."""
     lat, lon, _bbox = geocode_location(location)
@@ -113,6 +118,11 @@ def run_location_pipeline(
             lon=lon,
             depth=depth,
             disable_proxy=disable_scraper_proxy,
+            concurrency=scraper_concurrency,
+            browser_pool_size=scraper_browser_pool_size,
+            pages_per_browser=scraper_pages_per_browser,
+            proxy_limit=scraper_proxy_limit,
+            disable_page_reuse=scraper_disable_page_reuse,
         )
         process_and_deduplicate_leads()
         harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
@@ -277,6 +287,35 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--scraper-concurrency",
+        type=int,
+        default=None,
+        help="Override scraper -c concurrency for this run.",
+    )
+    parser.add_argument(
+        "--scraper-browser-pool-size",
+        type=int,
+        default=None,
+        help="Override scraper -browser-pool-size for this run.",
+    )
+    parser.add_argument(
+        "--scraper-pages-per-browser",
+        type=int,
+        default=None,
+        help="Override scraper -pages-per-browser for this run.",
+    )
+    parser.add_argument(
+        "--scraper-proxy-limit",
+        type=int,
+        default=None,
+        help="Limit forwarded scraper proxies to first N validated entries.",
+    )
+    parser.add_argument(
+        "--scraper-disable-page-reuse",
+        action="store_true",
+        help="Pass upstream -disable-page-reuse for this run.",
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help=(
@@ -349,6 +388,11 @@ def run_end_to_end_pipeline(
     zip_csv: str | None = None,
     verify: bool = False,
     min_score: int = 0,
+    scraper_concurrency: int | None = None,
+    scraper_browser_pool_size: int | None = None,
+    scraper_pages_per_browser: int | None = None,
+    scraper_proxy_limit: int | None = None,
+    scraper_disable_page_reuse: bool = False,
 ) -> None:
     """
     Orchestrate pipeline. Three strategies:
@@ -406,6 +450,11 @@ def run_end_to_end_pipeline(
                 cell_km=cell_km,
                 depth=3,
                 disable_proxy=disable_scraper_proxy,
+                concurrency=scraper_concurrency,
+                browser_pool_size=scraper_browser_pool_size,
+                pages_per_browser=scraper_pages_per_browser,
+                proxy_limit=scraper_proxy_limit,
+                disable_page_reuse=scraper_disable_page_reuse,
             )
             process_and_deduplicate_leads()
             harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
@@ -434,6 +483,11 @@ def run_end_to_end_pipeline(
                 cell_km=cell_km,
                 depth=3,
                 disable_proxy=disable_scraper_proxy,
+                concurrency=scraper_concurrency,
+                browser_pool_size=scraper_browser_pool_size,
+                pages_per_browser=scraper_pages_per_browser,
+                proxy_limit=scraper_proxy_limit,
+                disable_page_reuse=scraper_disable_page_reuse,
             )
             process_and_deduplicate_leads()
 
@@ -450,6 +504,11 @@ def run_end_to_end_pipeline(
                     queries=query_variants,
                     fast_mode=False,
                     disable_proxy=disable_scraper_proxy,
+                    concurrency=scraper_concurrency,
+                    browser_pool_size=scraper_browser_pool_size,
+                    pages_per_browser=scraper_pages_per_browser,
+                    proxy_limit=scraper_proxy_limit,
+                    disable_page_reuse=scraper_disable_page_reuse,
                 )
                 process_and_deduplicate_leads()
             else:
@@ -474,6 +533,11 @@ def run_end_to_end_pipeline(
                         depth=3,
                         fast_mode=True,
                         disable_proxy=disable_scraper_proxy,
+                        concurrency=scraper_concurrency,
+                        browser_pool_size=scraper_browser_pool_size,
+                        pages_per_browser=scraper_pages_per_browser,
+                        proxy_limit=scraper_proxy_limit,
+                        disable_page_reuse=scraper_disable_page_reuse,
                     )
                 process_and_deduplicate_leads()
             else:
@@ -494,6 +558,11 @@ def run_end_to_end_pipeline(
                 execute_scrape_and_ingest(
                     query, location, lat=lat, lon=lon, depth=depth,
                     disable_proxy=disable_scraper_proxy,
+                    concurrency=scraper_concurrency,
+                    browser_pool_size=scraper_browser_pool_size,
+                    pages_per_browser=scraper_pages_per_browser,
+                    proxy_limit=scraper_proxy_limit,
+                    disable_page_reuse=scraper_disable_page_reuse,
                 )
                 process_and_deduplicate_leads()
                 harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
@@ -576,6 +645,11 @@ def main() -> None:
         zip_csv=args.zip_csv,
         verify=args.verify,
         min_score=args.min_score,
+        scraper_concurrency=args.scraper_concurrency,
+        scraper_browser_pool_size=args.scraper_browser_pool_size,
+        scraper_pages_per_browser=args.scraper_pages_per_browser,
+        scraper_proxy_limit=args.scraper_proxy_limit,
+        scraper_disable_page_reuse=args.scraper_disable_page_reuse,
     )
 
 

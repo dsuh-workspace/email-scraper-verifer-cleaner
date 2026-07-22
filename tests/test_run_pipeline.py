@@ -280,6 +280,15 @@ class TestMain:
                 "50",
                 "--max-depth",
                 "9",
+                "--scraper-concurrency",
+                "3",
+                "--scraper-browser-pool-size",
+                "2",
+                "--scraper-pages-per-browser",
+                "1",
+                "--scraper-proxy-limit",
+                "4",
+                "--scraper-disable-page-reuse",
             ],
         )
 
@@ -291,6 +300,11 @@ class TestMain:
             disable_scraper_proxy=False, disable_crawler_proxy=False,
             strategy="single-centroid", queries=None, zip_csv=None,
             verify=False, min_score=0,
+            scraper_concurrency=None,
+            scraper_browser_pool_size=None,
+            scraper_pages_per_browser=None,
+            scraper_proxy_limit=None,
+            scraper_disable_page_reuse=False,
         ):
             called["query"] = query
             called["location"] = location
@@ -306,6 +320,11 @@ class TestMain:
             called["zip_csv"] = zip_csv
             called["verify"] = verify
             called["min_score"] = min_score
+            called["scraper_concurrency"] = scraper_concurrency
+            called["scraper_browser_pool_size"] = scraper_browser_pool_size
+            called["scraper_pages_per_browser"] = scraper_pages_per_browser
+            called["scraper_proxy_limit"] = scraper_proxy_limit
+            called["scraper_disable_page_reuse"] = scraper_disable_page_reuse
 
         monkeypatch.setattr(run_pipeline, "run_end_to_end_pipeline", fake_run_end_to_end_pipeline)
 
@@ -326,6 +345,11 @@ class TestMain:
             "zip_csv": None,
             "verify": False,
             "min_score": 0,
+            "scraper_concurrency": 3,
+            "scraper_browser_pool_size": 2,
+            "scraper_pages_per_browser": 1,
+            "scraper_proxy_limit": 4,
+            "scraper_disable_page_reuse": True,
         }
 
     def test_legacy_pipeline_keeps_increasing_depth_until_target(self, monkeypatch, modules):
@@ -489,13 +513,21 @@ class TestFullHarvestStrategy:
 
         def fake_scrape(query, location, lat=None, lon=None, depth=1,
                         bbox=None, cell_km=None, disable_proxy=False,
-                        queries=None, fast_mode=None, lang="en"):
+                        queries=None, fast_mode=None, lang="en",
+                        concurrency=None, browser_pool_size=None,
+                        pages_per_browser=None, proxy_limit=None,
+                        disable_page_reuse=False):
             calls.append({
                 "query": query, "location": location,
                 "lat": lat, "lon": lon, "depth": depth,
                 "bbox": bbox, "cell_km": cell_km,
                 "queries": tuple(queries) if queries else None,
                 "fast_mode": fast_mode,
+                "concurrency": concurrency,
+                "browser_pool_size": browser_pool_size,
+                "pages_per_browser": pages_per_browser,
+                "proxy_limit": proxy_limit,
+                "disable_page_reuse": disable_page_reuse,
             })
 
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
@@ -533,6 +565,31 @@ class TestFullHarvestStrategy:
         assert calls[1]["depth"] == 10
         assert calls[1]["fast_mode"] is False
         assert calls[1]["queries"] == tuple(run_pipeline.DEFAULT_HARVEST_QUERIES)
+
+    def test_full_harvest_forwards_scraper_tuning(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            scraper_concurrency=3,
+            scraper_browser_pool_size=2,
+            scraper_pages_per_browser=1,
+            scraper_proxy_limit=4,
+        )
+
+        assert len(calls) == 2
+        assert calls[0]["concurrency"] == 3
+        assert calls[0]["browser_pool_size"] == 2
+        assert calls[0]["pages_per_browser"] == 1
+        assert calls[0]["proxy_limit"] == 4
+        assert calls[1]["concurrency"] == 3
+        assert calls[1]["browser_pool_size"] == 2
+        assert calls[1]["pages_per_browser"] == 1
+        assert calls[1]["proxy_limit"] == 4
 
     def test_full_harvest_uses_custom_queries(self, monkeypatch, modules):
         run_pipeline, _ = modules
@@ -770,3 +827,46 @@ class TestZipBatchProxyFlags:
 
         assert called["disable_scraper_proxy"] is True
         assert called["disable_crawler_proxy"] is True
+
+    def test_zip_batch_forwards_scraper_tuning_flags(self, monkeypatch, modules):
+        _, run_zip_batch = modules
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_zip_batch.py",
+                "--query",
+                "Plumbing",
+                "--zip-file",
+                "zips.csv",
+                "--scraper-concurrency",
+                "3",
+                "--scraper-browser-pool-size",
+                "2",
+                "--scraper-pages-per-browser",
+                "1",
+                "--scraper-proxy-limit",
+                "4",
+                "--scraper-disable-page-reuse",
+            ],
+        )
+        monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "load_locations", lambda path: ["95112"])
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: None)
+
+        called = {}
+
+        def fake_run_location_pipeline(**kwargs):
+            called.update(kwargs)
+            return types.SimpleNamespace(new_exportable_contacts=0, depths_run=(), total_contacts=0)
+
+        monkeypatch.setattr(run_zip_batch, "run_location_pipeline", fake_run_location_pipeline)
+
+        run_zip_batch.main()
+
+        assert called["scraper_concurrency"] == 3
+        assert called["scraper_browser_pool_size"] == 2
+        assert called["scraper_pages_per_browser"] == 1
+        assert called["scraper_proxy_limit"] == 4
+        assert called["scraper_disable_page_reuse"] is True

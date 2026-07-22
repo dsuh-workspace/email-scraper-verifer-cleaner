@@ -11,6 +11,10 @@ from app.scraper.run_scraper import _scraper_proxy_args
 def _clear_scraper_proxy_env(monkeypatch):
     monkeypatch.delenv("SCRAPER_PROXIES", raising=False)
     monkeypatch.delenv("SCRAPER_PROXIES_FILE", raising=False)
+    monkeypatch.delenv("SCRAPER_PROXY_LIMIT", raising=False)
+    monkeypatch.delenv("SCRAPER_CONCURRENCY", raising=False)
+    monkeypatch.delenv("SCRAPER_BROWSER_POOL_SIZE", raising=False)
+    monkeypatch.delenv("SCRAPER_PAGES_PER_BROWSER", raising=False)
 
 
 class TestScraperProxyArgs:
@@ -334,3 +338,90 @@ class TestExecuteScrapeMultiQuery:
         )
         lines = [ln for ln in files[0].splitlines() if ln.strip()]
         assert lines == ["Plumbing in San Jose, CA"]
+
+    def test_scraper_tuning_flags_forwarded(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+            concurrency=3,
+            browser_pool_size=2,
+            pages_per_browser=1,
+        )
+        cmd = captured[0]
+        assert cmd[cmd.index("-c") + 1] == "3"
+        assert cmd[cmd.index("-browser-pool-size") + 1] == "2"
+        assert cmd[cmd.index("-pages-per-browser") + 1] == "1"
+
+    def test_scraper_tuning_env_defaults_forwarded(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        monkeypatch.setenv("SCRAPER_CONCURRENCY", "4")
+        monkeypatch.setenv("SCRAPER_BROWSER_POOL_SIZE", "2")
+        monkeypatch.setenv("SCRAPER_PAGES_PER_BROWSER", "1")
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+        )
+        cmd = captured[0]
+        assert cmd[cmd.index("-c") + 1] == "4"
+        assert cmd[cmd.index("-browser-pool-size") + 1] == "2"
+        assert cmd[cmd.index("-pages-per-browser") + 1] == "1"
+
+    def test_proxy_limit_trims_proxy_list(self, monkeypatch):
+        monkeypatch.setenv(
+            "SCRAPER_PROXIES",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080,http://proxy3.example.com:8080",
+        )
+        assert run_scraper._scraper_proxy_args(proxy_limit=2) == [
+            "-proxies",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080",
+        ]
+
+    def test_default_proxy_limit_is_three(self, monkeypatch):
+        monkeypatch.setenv(
+            "SCRAPER_PROXIES",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080,http://proxy3.example.com:8080,http://proxy4.example.com:8080",
+        )
+        assert run_scraper._scraper_proxy_args() == [
+            "-proxies",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080,http://proxy3.example.com:8080",
+        ]
+
+    def test_proxy_limit_env_overrides_default(self, monkeypatch):
+        monkeypatch.setenv(
+            "SCRAPER_PROXIES",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080,http://proxy3.example.com:8080,http://proxy4.example.com:8080",
+        )
+        monkeypatch.setenv("SCRAPER_PROXY_LIMIT", "4")
+        assert run_scraper._scraper_proxy_args() == [
+            "-proxies",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080,http://proxy3.example.com:8080,http://proxy4.example.com:8080",
+        ]
+
+    def test_disable_page_reuse_forwards_flag(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+            disable_page_reuse=True,
+        )
+        assert "-disable-page-reuse" in captured[0]
+
+    def test_invalid_scraper_tuning_values_raise(self, monkeypatch):
+        with pytest.raises(ValueError, match="SCRAPER_CONCURRENCY must be > 0"):
+            run_scraper.execute_scrape_and_ingest(
+                query="Plumbing",
+                location="San Jose, CA",
+                lat=37.3,
+                lon=-121.9,
+                concurrency=0,
+            )

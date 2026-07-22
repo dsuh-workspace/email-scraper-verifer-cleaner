@@ -84,6 +84,12 @@ REACHER_TIMEOUT_SEC=30
 # Optional proxy config
 SCRAPER_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://proxy2.example.com:1080
 SCRAPER_PROXIES_FILE=proxies.txt
+# Optional scraper tuning defaults
+# SCRAPER_CONCURRENCY=3
+# SCRAPER_BROWSER_POOL_SIZE=1
+# SCRAPER_PAGES_PER_BROWSER=1
+# SCRAPER_PROXY_LIMIT=3
+# SCRAPER_DISABLE_PAGE_REUSE=1   # not read by wrapper; use CLI flag today
 CRAWLER_PROXY=http://user:pass@proxy3.example.com:8080
 CRAWLER_PROXY_FILE=proxies.txt
 # Or split crawler proxies by scheme
@@ -108,11 +114,38 @@ KAMATERA_SECRET_KEY=...
 python run_pipeline.py --query "Plumbing" --location "San Francisco, CA"
 # Disable both scraper + crawler proxies for this run
 python run_pipeline.py --query "Plumbing" --location "San Francisco, CA" --no-proxy
+# Conservative scraper tuning: 3 proxies, 1 page/browser, low concurrency
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --scraper-proxy-limit 3 \
+  --scraper-pages-per-browser 1 \
+  --scraper-browser-pool-size 1 \
+  --scraper-concurrency 3
 ```
+
+`run_zip_batch.py` now exposes same scraper tuning knobs, including
+`--scraper-disable-page-reuse`, and forwards them into
+`run_location_pipeline(...)` for each ZIP.
 
 Defaults:
 - `--min-contacts 500`
 - `--max-depth 20`
+- scraper concurrency/browser pool use upstream defaults unless overridden
+- scraper pages per browser defaults to current wrapper value `2`
+- scraper forwards first `3` validated proxies by default unless overridden
+
+Scraper runtime knobs exposed by this wrapper:
+- `--scraper-concurrency` → upstream `-c`
+- `--scraper-browser-pool-size` → upstream `-browser-pool-size`
+- `--scraper-pages-per-browser` → upstream `-pages-per-browser`
+- `--scraper-proxy-limit` → wrapper-side cap; forwards first `N` validated proxies
+- `--scraper-disable-page-reuse` → upstream `-disable-page-reuse`
+
+Not exposed here today:
+- per-action delay / jitter
+- scroll timing or human-ish cadence
+- sticky proxy/session policies
 
 ### Override campaign settings
 

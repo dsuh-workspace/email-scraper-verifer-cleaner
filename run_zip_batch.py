@@ -92,6 +92,35 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable crawler proxy usage for this run.",
     )
+    parser.add_argument(
+        "--scraper-concurrency",
+        type=int,
+        default=None,
+        help="Override scraper -c concurrency for this run.",
+    )
+    parser.add_argument(
+        "--scraper-browser-pool-size",
+        type=int,
+        default=None,
+        help="Override scraper -browser-pool-size for this run.",
+    )
+    parser.add_argument(
+        "--scraper-pages-per-browser",
+        type=int,
+        default=None,
+        help="Override scraper -pages-per-browser for this run.",
+    )
+    parser.add_argument(
+        "--scraper-proxy-limit",
+        type=int,
+        default=None,
+        help="Limit forwarded scraper proxies to first N validated entries.",
+    )
+    parser.add_argument(
+        "--scraper-disable-page-reuse",
+        action="store_true",
+        help="Pass upstream -disable-page-reuse for this run.",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +145,11 @@ def main() -> None:
                 stale_iterations_limit=args.stale_iterations,
                 disable_scraper_proxy=disable_scraper_proxy,
                 disable_crawler_proxy=disable_crawler_proxy,
+                scraper_concurrency=args.scraper_concurrency,
+                scraper_browser_pool_size=args.scraper_browser_pool_size,
+                scraper_pages_per_browser=args.scraper_pages_per_browser,
+                scraper_proxy_limit=args.scraper_proxy_limit,
+                scraper_disable_page_reuse=args.scraper_disable_page_reuse,
             )
         except Exception:
             logger.exception("Location run failed for %s. Continuing batch.", location)
