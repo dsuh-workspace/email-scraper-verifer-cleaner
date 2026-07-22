@@ -28,16 +28,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Set
 
 import requests
-from sqlalchemy.orm import sessionmaker
-
-from app.db.database import engine
-from app.db.create_tables import Business, Contact, ExportHistory
 
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-Session = sessionmaker(bind=engine)
 
 # TLD length {2,} — the old {2,4} bound rejected legitimate industry TLDs
 # like .plumbing, .services, .contractors, .museum which show up on
@@ -263,7 +257,7 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
     return sorted(found)
 
 
-def _persist_emails_for_business(session, biz: Business, emails: List[str]) -> int:
+def _persist_emails_for_business(session, biz, emails: List[str]) -> int:
     """
     Add new Contact rows for each found email; remove phone-only placeholders
     once we have at least one real email for the business. Returns count added.
@@ -310,6 +304,12 @@ def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
     Fan out across all businesses that have a website but no email contact yet.
     Persists results in the main thread — SQLAlchemy sessions are not thread-safe.
     """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import engine
+    from app.db.create_tables import Business, Contact, ExportHistory
+
+    Session = sessionmaker(bind=engine)
     session = Session()
     try:
         crawler_proxies = _build_crawler_proxies(disable_proxy=disable_proxy)

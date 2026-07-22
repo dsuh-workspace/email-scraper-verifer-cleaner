@@ -26,15 +26,9 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Dict, Tuple
 
-from sqlalchemy.orm import sessionmaker
-from app.db.database import engine
-from app.db.create_tables import RawLead, Business, Contact
-
 from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
-
-Session = sessionmaker(bind=engine)
 
 # Same regex as extract_emails.py so validation is consistent across the pipeline.
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
@@ -140,6 +134,12 @@ def process_and_deduplicate_leads() -> None:
     Main entrypoint. Processes unprocessed raw leads and promotes to
     businesses + contacts, deduping in memory to avoid N+1 queries.
     """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import engine
+    from app.db.create_tables import RawLead, Business, Contact
+
+    Session = sessionmaker(bind=engine)
     session = Session()
     try:
         # -- Load unprocessed raw leads (skip anything with processed_at set) --
