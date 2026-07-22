@@ -77,12 +77,29 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Stop zip after this many consecutive zero-progress iterations",
     )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Disable scraper and crawler proxy usage for this run.",
+    )
+    parser.add_argument(
+        "--no-scraper-proxy",
+        action="store_true",
+        help="Disable scraper proxy usage for this run.",
+    )
+    parser.add_argument(
+        "--no-crawler-proxy",
+        action="store_true",
+        help="Disable crawler proxy usage for this run.",
+    )
     return parser.parse_args()
 
 
 
 def main() -> None:
     args = parse_args()
+    disable_scraper_proxy = args.no_proxy or args.no_scraper_proxy
+    disable_crawler_proxy = args.no_proxy or args.no_crawler_proxy
     setup_logging()
     init_db()
 
@@ -97,6 +114,8 @@ def main() -> None:
                 max_depth=args.max_depth,
                 target_new_exportable=args.target_new_exportable,
                 stale_iterations_limit=args.stale_iterations,
+                disable_scraper_proxy=disable_scraper_proxy,
+                disable_crawler_proxy=disable_crawler_proxy,
             )
         except Exception:
             logger.exception("Location run failed for %s. Continuing batch.", location)

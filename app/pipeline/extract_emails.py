@@ -130,16 +130,23 @@ def _validate_proxy_url(proxy_url: str) -> str:
 
 
 def _normalize_proxy_line(line: str) -> str:
+    line = line.strip()
+    if not line:
+        return line
     if "://" in line:
         return line
+
     parts = line.split(":")
     if len(parts) == 4:
         host, port, user, password = parts
         return f"http://{user}:{password}@{host}:{port}"
-    elif len(parts) == 2:
+    if len(parts) == 2:
         host, port = parts
         return f"http://{host}:{port}"
-    return line
+
+    raise ValueError(
+        "Unsupported proxy line format. Expected URL, host:port, or host:port:user:password."
+    )
 
 
 def _load_proxy_file(file_path: str) -> List[str]:
@@ -153,7 +160,11 @@ def _load_proxy_file(file_path: str) -> List[str]:
     return proxies
 
 
-def _build_crawler_proxies() -> Optional[dict[str, str]]:
+def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, str]]:
+    if disable_proxy:
+        logger.info("Crawler proxies disabled for this run.")
+        return None
+
     http_proxy = os.getenv("CRAWLER_HTTP_PROXY", "").strip()
     https_proxy = os.getenv("CRAWLER_HTTPS_PROXY", "").strip()
     fallback_proxy = os.getenv("CRAWLER_PROXY", "").strip()
@@ -266,14 +277,14 @@ def _persist_emails_for_business(session, biz: Business, emails: List[str]) -> i
     return added
 
 
-def harvest_emails_from_websites() -> None:
+def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
     """
     Fan out across all businesses that have a website but no email contact yet.
     Persists results in the main thread — SQLAlchemy sessions are not thread-safe.
     """
     session = Session()
     try:
-        crawler_proxies = _build_crawler_proxies()
+        crawler_proxies = _build_crawler_proxies(disable_proxy=disable_proxy)
         if crawler_proxies:
             logger.info("Crawler proxies enabled for %s.", ", ".join(sorted(crawler_proxies)))
         # Preload the set of business_ids that already have at least one

@@ -52,16 +52,23 @@ def _validate_proxy_url(proxy_url: str, *, allow_socks: bool) -> str:
 
 
 def _normalize_proxy_line(line: str) -> str:
+    line = line.strip()
+    if not line:
+        return line
     if "://" in line:
         return line
+
     parts = line.split(":")
     if len(parts) == 4:
         host, port, user, password = parts
         return f"http://{user}:{password}@{host}:{port}"
-    elif len(parts) == 2:
+    if len(parts) == 2:
         host, port = parts
         return f"http://{host}:{port}"
-    return line
+
+    raise ValueError(
+        "Unsupported proxy line format. Expected URL, host:port, or host:port:user:password."
+    )
 
 
 def _load_proxy_file(file_path: str) -> list[str]:
@@ -75,8 +82,12 @@ def _load_proxy_file(file_path: str) -> list[str]:
     return proxies
 
 
-def _scraper_proxy_args() -> list[str]:
+def _scraper_proxy_args(disable_proxy: bool = False) -> list[str]:
     """Return upstream gosom proxy args from env string or file."""
+    if disable_proxy:
+        logger.info("Scraper proxies disabled for this run.")
+        return []
+
     raw_proxies = os.getenv("SCRAPER_PROXIES", "").strip()
     proxy_file = os.getenv("SCRAPER_PROXIES_FILE", "").strip()
 
@@ -145,6 +156,7 @@ def execute_scrape_and_ingest(
     depth: int = 1,
     bbox: tuple[float, float, float, float] | None = None,
     cell_km: float | None = None,
+    disable_proxy: bool = False,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -226,7 +238,7 @@ def execute_scrape_and_ingest(
             cmd.append("-fast-mode")
             if lat is not None and lon is not None:
                 cmd.extend(["-geo", f"{lat},{lon}"])
-        cmd.extend(_scraper_proxy_args())
+        cmd.extend(_scraper_proxy_args(disable_proxy=disable_proxy))
         
         logger.info("Executing: %s", " ".join(cmd))
         # Run the scraper.

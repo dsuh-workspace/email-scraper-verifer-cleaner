@@ -111,6 +111,9 @@ class TestParseArgs:
         assert args.location == "San Francisco, CA"
         assert args.min_contacts == 500
         assert args.max_depth == 20
+        assert args.no_proxy is False
+        assert args.no_scraper_proxy is False
+        assert args.no_crawler_proxy is False
 
     def test_overrides_parse(self, monkeypatch, modules):
         run_pipeline, _ = modules
@@ -137,6 +140,29 @@ class TestParseArgs:
         assert args.min_contacts == 50
         assert args.max_depth == 9
 
+    def test_proxy_disable_flags_parse(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_pipeline.py",
+                "--query",
+                "HVAC",
+                "--location",
+                "Plano, TX",
+                "--no-proxy",
+                "--no-scraper-proxy",
+                "--no-crawler-proxy",
+            ],
+        )
+
+        args = run_pipeline.parse_args()
+
+        assert args.no_proxy is True
+        assert args.no_scraper_proxy is True
+        assert args.no_crawler_proxy is True
+
     def test_missing_required_arg_exits(self, monkeypatch, modules):
         run_pipeline, _ = modules
         monkeypatch.setattr(
@@ -155,7 +181,7 @@ class TestRunLocationPipeline:
         monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *args, **kwargs: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 12)
 
         counts = iter([5, 9])
@@ -182,7 +208,7 @@ class TestRunLocationPipeline:
         monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *args, **kwargs: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 12)
 
         counts = iter([5, 5, 5])
@@ -209,7 +235,7 @@ class TestRunLocationPipeline:
         monkeypatch.setattr(run_pipeline, "geocode_location", lambda location: (1.0, 2.0, (0.5, 1.5, 1.5, 2.5)))
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *args, **kwargs: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 12)
 
         counts = iter([5, 5, 5])
@@ -255,6 +281,7 @@ class TestMain:
         def fake_run_end_to_end_pipeline(
             query, location, min_contacts, max_depth,
             use_grid=False, cell_km=2.0, bbox=None,
+            disable_scraper_proxy=False, disable_crawler_proxy=False,
         ):
             called["query"] = query
             called["location"] = location
@@ -263,6 +290,8 @@ class TestMain:
             called["use_grid"] = use_grid
             called["cell_km"] = cell_km
             called["bbox"] = bbox
+            called["disable_scraper_proxy"] = disable_scraper_proxy
+            called["disable_crawler_proxy"] = disable_crawler_proxy
 
         monkeypatch.setattr(run_pipeline, "run_end_to_end_pipeline", fake_run_end_to_end_pipeline)
 
@@ -276,6 +305,8 @@ class TestMain:
             "use_grid": False,
             "cell_km": 2.0,
             "bbox": None,
+            "disable_scraper_proxy": False,
+            "disable_crawler_proxy": False,
         }
 
     def test_legacy_pipeline_keeps_increasing_depth_until_target(self, monkeypatch, modules):
@@ -291,7 +322,7 @@ class TestMain:
             lambda query, location, lat=None, lon=None, depth=1: depths.append(depth),
         )
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
 
         contact_counts = iter([10, 60])
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: next(contact_counts))
@@ -327,7 +358,7 @@ class TestMain:
 
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
         monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
 
@@ -364,7 +395,7 @@ class TestMain:
 
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
         monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
 
@@ -393,7 +424,7 @@ class TestMain:
         )
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *a, **kw: None)
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
-        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
         monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
 
@@ -555,3 +586,37 @@ class TestZipBatchMain:
 
         assert seen == ["95112", "95123"]
         assert exported == [True]
+
+
+class TestZipBatchProxyFlags:
+    def test_zip_batch_forwards_proxy_disable_flags(self, monkeypatch, modules):
+        _, run_zip_batch = modules
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_zip_batch.py",
+                "--query",
+                "Plumbing",
+                "--zip-file",
+                "zips.csv",
+                "--no-proxy",
+            ],
+        )
+        monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "load_locations", lambda path: ["95112"])
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda: None)
+
+        called = {}
+
+        def fake_run_location_pipeline(**kwargs):
+            called.update(kwargs)
+            return types.SimpleNamespace(new_exportable_contacts=0, depths_run=(), total_contacts=0)
+
+        monkeypatch.setattr(run_zip_batch, "run_location_pipeline", fake_run_location_pipeline)
+
+        run_zip_batch.main()
+
+        assert called["disable_scraper_proxy"] is True
+        assert called["disable_crawler_proxy"] is True

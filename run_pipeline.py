@@ -74,6 +74,8 @@ def run_location_pipeline(
     target_new_exportable: int | None = None,
     stale_iterations_limit: int | None = None,
     export_destination: str = LEGACY_EXPORT_DESTINATION,
+    disable_scraper_proxy: bool = False,
+    disable_crawler_proxy: bool = False,
 ) -> LocationRunMetrics:
     """Run scrape/process/harvest loop for one location and return metrics."""
     lat, lon, _bbox = geocode_location(location)
@@ -89,9 +91,16 @@ def run_location_pipeline(
         logger.info("--- Running scraping loop (depth=%d) ---", depth)
         depths_run.append(depth)
 
-        execute_scrape_and_ingest(query, location, lat=lat, lon=lon, depth=depth)
+        execute_scrape_and_ingest(
+            query,
+            location,
+            lat=lat,
+            lon=lon,
+            depth=depth,
+            disable_proxy=disable_scraper_proxy,
+        )
         process_and_deduplicate_leads()
-        harvest_emails_from_websites()
+        harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
 
         total_contacts = get_contact_count()
         exportable_contacts = get_exportable_contact_count(export_destination)
@@ -207,6 +216,21 @@ def parse_args() -> argparse.Namespace:
             "grid mode. Overrides Nominatim-derived bbox. Ignored without --grid."
         ),
     )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Disable scraper and crawler proxy usage for this run.",
+    )
+    parser.add_argument(
+        "--no-scraper-proxy",
+        action="store_true",
+        help="Disable scraper proxy usage for this run.",
+    )
+    parser.add_argument(
+        "--no-crawler-proxy",
+        action="store_true",
+        help="Disable crawler proxy usage for this run.",
+    )
     return parser.parse_args()
 
 
@@ -236,6 +260,8 @@ def run_end_to_end_pipeline(
     use_grid: bool = False,
     cell_km: float = 2.0,
     bbox: tuple[float, float, float, float] | None = None,
+    disable_scraper_proxy: bool = False,
+    disable_crawler_proxy: bool = False,
 ) -> None:
     """
     Orchestrate pipeline.
@@ -334,6 +360,9 @@ def main() -> None:
     bbox = _parse_bbox(args.bbox) if args.bbox else None
     if bbox is not None and not args.grid:
         logger.warning("--bbox supplied without --grid; bbox will be ignored.")
+    disable_scraper_proxy = args.no_proxy or args.no_scraper_proxy
+    disable_crawler_proxy = args.no_proxy or args.no_crawler_proxy
+
     run_end_to_end_pipeline(
         query=args.query,
         location=args.location,
@@ -342,6 +371,8 @@ def main() -> None:
         use_grid=args.grid,
         cell_km=args.cell_km,
         bbox=bbox,
+        disable_scraper_proxy=disable_scraper_proxy,
+        disable_crawler_proxy=disable_crawler_proxy,
     )
 
 

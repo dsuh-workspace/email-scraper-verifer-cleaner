@@ -106,6 +106,8 @@ KAMATERA_SECRET_KEY=...
 
 ```bash
 python run_pipeline.py --query "Plumbing" --location "San Francisco, CA"
+# Disable both scraper + crawler proxies for this run
+python run_pipeline.py --query "Plumbing" --location "San Francisco, CA" --no-proxy
 ```
 
 Defaults:
@@ -193,11 +195,15 @@ The scraper depth starts at 1 and grows by 2 each iteration up to
 into every subsequent scrape iteration — Nominatim ToS friendly.
 
 Proxy notes:
+- `--no-proxy` disables both scraper and crawler proxies for one run.
+- `--no-scraper-proxy` disables only scraper proxies for one run.
+- `--no-crawler-proxy` disables only crawler proxies for one run.
 - `SCRAPER_PROXIES` passes comma-separated proxies straight to gosom `-proxies`.
-- `SCRAPER_PROXIES_FILE` loads one proxy URL per line and appends them to `SCRAPER_PROXIES`.
+- `SCRAPER_PROXIES_FILE` loads one proxy per line and appends them to `SCRAPER_PROXIES`.
 - `CRAWLER_PROXY` applies one HTTP/HTTPS proxy to website crawling.
-- `CRAWLER_PROXY_FILE` loads one proxy URL per line; crawler uses first valid entry.
+- `CRAWLER_PROXY_FILE` loads one proxy per line; crawler uses first valid entry.
 - `CRAWLER_HTTP_PROXY` and `CRAWLER_HTTPS_PROXY` override `CRAWLER_PROXY` / `CRAWLER_PROXY_FILE` per scheme.
+- Proxy file lines may be full URLs (`http://user:pass@host:port`) or compact Webshare-style lines (`host:port:user:password`).
 - Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h`.
 
 ---
