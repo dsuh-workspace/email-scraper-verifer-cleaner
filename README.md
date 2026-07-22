@@ -34,10 +34,25 @@ in explicitly when you want it — see [Verification](#verification) below.
 - macOS or Linux (Windows works too, use the `.exe` binary variant)
 - Google Maps scraper binary (see below)
 
+### Python version / virtualenv
+
+Preferred local setup:
+
+```bash
+pyenv shell 3.12.9
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+This repo now includes `.python-version` with `3.12.9`, so `pyenv`
+should auto-select the right interpreter when you `cd` into the repo.
+Run tests and CLI entrypoints inside `.venv`.
+
 ### 2. Install
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```

@@ -230,6 +230,19 @@ Reasonable given we're crawling only shortlisted contact pages.
 
 ## Environment / operational
 
+### Python / venv conventions
+
+- Repo pins Python via `.python-version` = `3.12.9`.
+- Run Python commands inside `.venv`.
+- Canonical setup:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  ```
+- Tests and CLI entrypoints (`run_pipeline.py`, `run_zip_batch.py`) should
+  be run from activated `.venv`, not arbitrary system Python.
+
 ### Kamatera Reacher instance
 
 - URL: `http://104.128.66.74:8080/v0/check_email`
