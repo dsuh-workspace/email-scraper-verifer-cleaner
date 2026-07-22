@@ -204,7 +204,7 @@ Proxy notes:
 - `CRAWLER_PROXY_FILE` loads one proxy per line; crawler uses first valid entry.
 - `CRAWLER_HTTP_PROXY` and `CRAWLER_HTTPS_PROXY` override `CRAWLER_PROXY` / `CRAWLER_PROXY_FILE` per scheme.
 - Proxy file lines may be full URLs (`http://user:pass@host:port`) or compact Webshare-style lines (`host:port:user:password`).
-- Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h`.
+- Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h` when provided as full proxy URLs. Compact proxy-file lines normalize to `http://...` URLs.
 
 ---
 
