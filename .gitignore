@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # Python Virtual Environments
 .venv/
 venv/
@@ -12,6 +15,7 @@ __pycache__/
 # Environments and Secrets
 .env
 .env.*
+proxies.txt
 
 # Local Database files
 *.db
@@ -20,8 +24,12 @@ database/hvac_leads.db
 
 # Scraper Executable Binary
 app/scraper/google-maps-scraper.exe
+app/scraper/google-maps-scraper
 
 # Output data exports
 data/leads_export.csv
 data/temp-*/
 temp-*/
+
+# Pytest
+.pytest_cache/

@@ -1,0 +1,19 @@
+{
+  "label": "E_zip_95132",
+  "queries": [
+    "Plumbing"
+  ],
+  "geo": "37.4031565,-121.8608159",
+  "grid_bbox": null,
+  "grid_cell_km": null,
+  "depth": 3,
+  "zoom": null,
+  "fast_mode": true,
+  "email": false,
+  "concurrency": 1,
+  "rc": 0,
+  "wall_sec": 2.1,
+  "n_leads": 17,
+  "out": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/E_zip_95132.json",
+  "log": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/E_zip_95132.log"
+}

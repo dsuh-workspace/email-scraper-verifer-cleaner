@@ -1,0 +1,11 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ 🌍 Google Maps Scraper                                                       ║
+║ ⭐ If you find this project useful, please star it on GitHub: https://github ║
+║ .com/gosom/google-maps-scraper                                               ║
+║ 💖 Consider sponsoring to support development: https://github.com/sponsors/g ║
+║ osom                                                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+{"level":"info","component":"scrapemate","time":"2026-07-21T07:06:27.421912Z","message":"starting scrapemate"}
+{"level":"info","component":"scrapemate","job":"Job{ID: dcc72e11-7c3f-4d8f-a756-eba1f0975e45, Method: GET, URL: https://maps.google.com/search, UrlParams: map[authuser:0 hl:en pb:!4m12!1m3!1d3826.902183192154!2d-121.8906!3d37.3362!2m3!1f0!2f0!3f0!3m2!1i600!2i800!4f15.0!7i20!8i0!10b1!12m22!1m3!18b1!30b1!34e1!2m3!5m1!6e2!20e3!4b0!10b1!12b1!13b1!16b1!17m1!3e1!20m3!5e2!6b1!14b1!46m1!1b0!96b1!19m4!2m3!1i360!2i120!4i8 q:Plumbing tbm:map]}","status":"success","duration":851.641,"time":"2026-07-21T07:06:28.273635Z","message":"job finished"}
+{"level":"info","component":"scrapemate","time":"2026-07-21T07:06:28.273711Z","message":"scrapemate exited"}

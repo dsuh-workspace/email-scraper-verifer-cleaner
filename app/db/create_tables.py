@@ -1,121 +1,184 @@
-# We import the building blocks from SQLAlchemy to define our table columns
-from sqlalchemy import (
-    create_engine,       # Manages the connection to the database
-    Column,              # Tells SQLAlchemy that this variable is a table column.
-    Integer,             # Data type: whole numbers
-    Text,                # Data type: names, URLs, emails
-    TIMESTAMP,           # Data type: exact date and time
-    ForeignKey,          # Creates a relationship link to another table
-    Boolean              # Data type: True or False
-)
+"""
+SQLAlchemy models + schema bootstrap.
 
-# This tool acts as the master register that tracks all of our database blueprints
+Constraints/indexes summary
+---------------------------
+- businesses.domain          UNIQUE  (dedupe key)
+- (contacts.business_id, contacts.email)   composite UNIQUE   nullable — SQLite
+                                                                treats NULLs as
+                                                                distinct so
+                                                                phone-only rows
+                                                                still insert.
+- (contacts.business_id, contacts.phone)   composite index (dup checks)
+- (export_history.contact_id, destination) composite index (export filter)
+- FK columns get an index individually so joins are cheap.
+
+Call init_db() once at startup — do NOT invoke on module import.
+"""
+
+from sqlalchemy import (
+    Column,
+    Integer,
+    Text,
+    TIMESTAMP,
+    ForeignKey,
+    Index,
+    UniqueConstraint,
+    text,
+    Float
+)
 from sqlalchemy.orm import declarative_base
 
-
-# NOTE: If Python gives you an import error, change this to: from app.db.database import engine
 from app.db.database import engine
 
+from app.logging_config import get_logger
 
-# Base is a special class. Any Python class we create that uses (Base) will automatically be turned into a SQL table.
+logger = get_logger(__name__)
+
+
 Base = declarative_base()
 
 # ================================
-# Defining the tables
+# Table definitions
 # ================================
 
+
 class ScrapeRun(Base):
-    # tracks everytime webscraper runs to gather new HVAC leads
-    __tablename__ = "scrape_runs" # The actual name of the table inside PostgreSQL
+    """One row per invocation of the Google Maps scraper."""
+    __tablename__ = "scrape_runs"
 
     id = Column(Integer, primary_key=True)
     query = Column(Text)
     location = Column(Text)
     category = Column(Text)
-    status = Column(Text)
+    status = Column(Text, index=True)
     started_at = Column(TIMESTAMP)
     completed_at = Column(TIMESTAMP)
 
 
 class RawLead(Base):
-    "The 'rough draft' table where scraped data is dumped directly from the web."
+    """Rough-draft dump of scraper output. Cleaned into Business/Contact."""
     __tablename__ = "raw_leads"
 
     id = Column(Integer, primary_key=True)
 
-# This links this lead back to the specific ScrapeRun that found it.
-    # If ScrapeRun #5 found this lead, this column will hold the number 5.
-    scrape_run_id = Column(Integer, ForeignKey("scrape_runs.id"))
-    
-    business_name = Column(Text)  # Name scraped off Google/Yelp
-    category = Column(Text)       # Category tags found on their page
-    phone = Column(Text)          # Scraped phone number
-    website = Column(Text)        # Scraped website URL
-    email = Column(Text)          # Any email found on their site during the scrape
+    scrape_run_id = Column(
+        Integer, ForeignKey("scrape_runs.id"), index=True,
+    )
+
+    business_name = Column(Text)
+    category = Column(Text)
+    phone = Column(Text)
+    website = Column(Text)
+    email = Column(Text)
+    review_count = Column(Integer)
+    review_rating = Column(Float)
+    address = Column(Text)
+    status = Column(Text)
+    description = Column(Text)
+    place_id = Column(Text)
+
+    # Stamped by process_leads after this raw row has been cleaned and
+    # promoted into businesses/contacts. NULL means "still to process".
+    # Indexed because process_leads filters on `IS NULL`.
+    processed_at = Column(TIMESTAMP, index=True)
 
 
 class Business(Base):
-    """Your cleaned, master directory of unique HVAC companies. 
-    Duplicates from raw_leads are filtered out before moving here."""
+    """Cleaned, deduped master directory of unique companies."""
     __tablename__ = "businesses"
 
-    id = Column(Integer, primary_key=True)  # Master business ID
-    business_name = Column(Text)            # Verified business name
-    category = Column(Text)                 # Main business category
-    website = Column(Text)                  # Cleaned website URL
-    domain = Column(Text)                   # Just the domain (e.g., "coolair.com") for quick checking
-    phone = Column(Text)                    # Main office phone number
+    id = Column(Integer, primary_key=True)
+    business_name = Column(Text, index=True)
+    category = Column(Text)
+    website = Column(Text)
+    # unique so dedupe is enforced at the DB layer, not just app layer.
+    # Nullable — some raw leads have no website.
+    domain = Column(Text, unique=True, index=True)
+    phone = Column(Text, index=True)
+    review_count = Column(Integer)
+    review_rating = Column(Float)
+    address = Column(Text)
+    status = Column(Text)
+    description = Column(Text)
+    place_id = Column(Text)
 
 
 class Contact(Base):
-    """Tracks individual people working at those companies (Owners, Managers, etc.)"""
+    """Individual person at a Business (owner, manager, generic info@, etc.)."""
     __tablename__ = "contacts"
 
-    id = Column(Integer, primary_key=True)  # Unique ID for this human being
-    
-    # Links this person directly to a business profile in the 'businesses' table
-    business_id = Column(Integer, ForeignKey("businesses.id"))
-    
-    name = Column(Text)         # Person's name (e.g., "John Doe")
-    phone = Column(Text)        # Their direct or cell phone number
-    title = Column(Text)        # Their job role (e.g., "Owner", "Marketing Director")
-    email = Column(Text)        # Their direct business email address
-    lead_status = Column(Text)  # Where they are in your sales funnel (e.g., "Not Contacted", "Emailed")
+    id = Column(Integer, primary_key=True)
+
+    business_id = Column(
+        Integer, ForeignKey("businesses.id"), index=True,
+    )
+
+    name = Column(Text)
+    phone = Column(Text)
+    title = Column(Text)
+    email = Column(Text)
+    lead_status = Column(Text, index=True)
+
+    __table_args__ = (
+        # Composite unique — one (biz, email) pair max. NULL emails are
+        # allowed multiple times (SQLite + Postgres both treat NULL as
+        # distinct for UNIQUE), which matches how we insert phone-only
+        # placeholder contacts.
+        UniqueConstraint("business_id", "email", name="uq_contact_biz_email"),
+        Index("ix_contact_biz_phone", "business_id", "phone"),
+    )
 
 
 class EmailVerification(Base):
-    """Stores data showing whether a contact's email address is real or fake."""
+    """Cache of Reacher (or other) verification results per contact."""
     __tablename__ = "email_verifications"
 
     id = Column(Integer, primary_key=True)
-    
-    # Links this verification result to a specific person in the 'contacts' table
-    contact_id = Column(Integer, ForeignKey("contacts.id"))
-    
-    status = Column(Text)   # Result from your validation tool (e.g., "deliverable", "undeliverable", "catch-all")
-    score = Column(Integer)  # Deliverability score from 1 to 100
+    contact_id = Column(
+        Integer, ForeignKey("contacts.id"), index=True,
+    )
+
+    status = Column(Text, index=True)
+    score = Column(Integer)
 
 
 class ExportHistory(Base):
-    """Logs every time you export a lead to a spreadsheet or CRM 
-    so you never accidentally spam the same person twice."""
+    """Every time we push a contact to Sheets/CSV/CRM, log it here."""
     __tablename__ = "export_history"
 
     id = Column(Integer, primary_key=True)
-    
-    # Links this export log to the specific contact that was exported
-    contact_id = Column(Integer, ForeignKey("contacts.id"))
-    
-    destination = Column(Text)  # Where you sent it (e.g., "Gsheet_Dallas_HVAC", "HubSpot_Import")
+    contact_id = Column(
+        Integer, ForeignKey("contacts.id", ondelete="CASCADE"), index=True,
+        nullable=False,
+    )
+    destination = Column(Text, index=True)
+    exported_at = Column(
+        TIMESTAMP,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        Index("ix_export_contact_dest", "contact_id", "destination"),
+    )
+
 
 # ==========================================
-# 4. EXECUTION (THE TRIGGER)
+# EXECUTION (call explicitly, not on import)
 # ==========================================
 
-# This single line tells SQLAlchemy to take all 6 blueprints defined above,
-# cross-reference them against the database 'engine' pipeline, and completely 
-# construct the actual physical tables inside your PostgreSQL database.
-Base.metadata.create_all(engine)
 
-# Success message to let you know it completed without crashing
-print("Database tables created.")
+def init_db() -> None:
+    """
+    Create all tables if they don't exist. Idempotent.
+
+    Called once from run_pipeline.py at startup. Do NOT invoke at
+    module-import time — that fires every time a worker imports the
+    models and can crash if DATABASE_URL is misconfigured.
+    """
+    Base.metadata.create_all(engine)
+    logger.info("Database tables created (or already existed).")
+if __name__ == "__main__":
+    # Allow `python -m app.db.create_tables` to bootstrap the schema.
+    init_db()

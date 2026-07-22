@@ -1,135 +1,183 @@
+"""
+Email verification via self-hosted Reacher (check-if-email-exists) backend.
+
+Live instance is deployed to Kamatera (see the autopilotlocal/email-verifier
+repo, CLAUDE.md — Hetzner blocks outbound port 25 for new accounts by
+default, Kamatera does not). The Reacher backend itself has no auth.
+
+The Kamatera *deploy* scripts read KAMATERA_ACCESS_KEY / KAMATERA_SECRET_KEY
+from .env, but those are only needed to (re)provision the server — not to
+call the /v0/check_email endpoint. This module needs only REACHER_API_URL.
+
+API contract:
+    POST {REACHER_API_URL}
+    body: {"to_email": "someone@example.com"}
+    response (200): Reacher CheckEmailOutput — the field we care about is
+        is_reachable ∈ {"safe", "risky", "invalid", "unknown"}
+    See https://github.com/reacherhq/check-if-email-exists for the full shape.
+"""
+
 import os
+import time
+
 import requests
 from dotenv import load_dotenv
 from sqlalchemy.orm import sessionmaker
+
 from app.db.database import engine
 from app.db.create_tables import Contact, EmailVerification
+
+from app.logging_config import get_logger, setup_logging
+
+logger = get_logger(__name__)
 
 load_dotenv()
 
 Session = sessionmaker(bind=engine)
 
-BILLIONVERIFY_API_URL = os.getenv("BILLIONVERIFY_API_URL", "https://api.billionverify.com/v1/verify/single")
-BILLIONVERIFY_API_KEY = os.getenv("BILLIONVERIFY_API_KEY")
+# Reacher backend on Kamatera. Override in .env for local dev / new deploys.
+REACHER_API_URL = os.getenv(
+    "REACHER_API_URL",
+    "http://104.128.66.74:8080/v0/check_email",
+)
+REACHER_TIMEOUT_SEC = int(os.getenv("REACHER_TIMEOUT_SEC", "30"))
 
-def verify_email_via_billionverify(email: str) -> dict:
-    """
-    Sends verification request to BillionVerify API.
-    If BILLIONVERIFY_API_KEY is not configured or set to 'mock', returns a simulated check.
-    """
-    if not BILLIONVERIFY_API_KEY or BILLIONVERIFY_API_KEY.lower() == "mock":
-        # Mock Response for local testing
-        print(f"Mocking BillionVerify verification for: {email}")
-        
-        # Simple domain-based validation rules for mock
-        if "@" not in email:
-            return {"is_reachable": "invalid", "score": 0}
-        
-        domain = email.split("@")[1]
-        if domain in ["example.com", "test.com", "bogus.xyz"]:
-            return {"is_reachable": "invalid", "score": 10}
-        elif "gmail.com" in domain or "yahoo.com" in domain or "outlook.com" in domain:
-            return {"is_reachable": "safe", "score": 95}
-        
-        # Default fallback for normal business domains
-        return {"is_reachable": "safe", "score": 85}
+# Reacher does not return a numeric score, only a reachability bucket.
+# Map the bucket back to an integer so the EmailVerification.score column
+# stays meaningful for downstream sorting/filtering.
+_SCORE_BY_STATUS = {
+    "safe": 95,
+    "risky": 50,
+    "invalid": 10,
+    "unknown": 25,
+}
 
-    # Real BillionVerify API call
+# Contact.lead_status vocabulary — unchanged from the archived BillionVerify
+# implementation so downstream export/CRM logic keeps working.
+_LEAD_STATUS_BY_STATUS = {
+    "safe": "Verified",
+    "risky": "Risky",
+    "invalid": "Invalid",
+    "unknown": "Unknown",
+}
+
+
+def verify_email_via_reacher(email: str) -> dict:
+    """
+    Call the Reacher backend for a single email.
+
+    Returns a dict with:
+        is_reachable: str  — one of safe/risky/invalid/unknown
+        score:        int  — 0..100, derived from is_reachable
+        raw:          dict — full Reacher response (for debugging)
+
+    Never raises: network / parse errors fall back to unknown so the
+    pipeline keeps going instead of crashing on one bad address.
+    """
+    if not email or "@" not in email:
+        return {"is_reachable": "invalid", "score": 0, "raw": {}}
+
     try:
-        headers = {
-            "BV-API-KEY": BILLIONVERIFY_API_KEY,
-            "Content-Type": "application/json"
-        }
-        payload = {"email": email}
-        
-        response = requests.post(BILLIONVERIFY_API_URL, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # BillionVerify responds with: { "status": "valid", "score": 0.95, ... }
-            bv_status = data.get("status", "unknown").lower()
-            bv_score = data.get("score", 0.5)
-            
-            # Map BillionVerify statuses to standard safe/invalid/risky/unknown vocabulary
-            mapped_status = "unknown"
-            if bv_status == "valid":
-                mapped_status = "safe"
-            elif bv_status == "invalid":
-                mapped_status = "invalid"
-            elif bv_status in ["risky", "catchall"]:
-                mapped_status = "risky"
-                
-            # BillionVerify returns score as float (0.0 to 1.0). Convert to int (0 to 100).
-            int_score = int(bv_score * 100) if isinstance(bv_score, (int, float)) else 50
-            
-            return {
-                "is_reachable": mapped_status,
-                "score": int_score
-            }
-        else:
-            print(f"BillionVerify API responded with error status: {response.status_code}")
-            return {"is_reachable": "unknown", "score": 50}
-            
-    except Exception as e:
-        print(f"BillionVerify API call exception: {e}")
-        return {"is_reachable": "unknown", "score": 50}
+        response = requests.post(
+            REACHER_API_URL,
+            json={"to_email": email},
+            headers={"Content-Type": "application/json"},
+            timeout=REACHER_TIMEOUT_SEC,
+        )
+    except requests.RequestException as e:
+        logger.warning("Reacher request failed for %s: %s", email, e)
+        return {"is_reachable": "unknown", "score": 25, "raw": {}}
 
-def verify_contacts_emails():
+    if response.status_code != 200:
+        logger.warning(
+            "Reacher returned HTTP %d for %s: %s",
+            response.status_code, email, response.text[:200],
+        )
+        return {"is_reachable": "unknown", "score": 25, "raw": {}}
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        logger.warning("Reacher returned non-JSON for %s: %s", email, e)
+        return {"is_reachable": "unknown", "score": 25, "raw": {}}
+
+    status = data.get("is_reachable", "unknown")
+    if status not in _SCORE_BY_STATUS:
+        status = "unknown"
+
+    return {
+        "is_reachable": status,
+        "score": _SCORE_BY_STATUS[status],
+        "raw": data,
+    }
+
+
+def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
     """
-    Finds contacts with emails that haven't been verified yet,
-    verifies them via BillionVerify, and records the results.
+    Pull every contact that has an email + no prior verification row,
+    check each via Reacher, persist an EmailVerification row and update
+    Contact.lead_status.
+
+    batch_sleep_sec: optional pause between requests. Reacher runs on our
+    own server so we don't need to be gentle for the vendor's sake, but a
+    small delay reduces the chance of getting our IP greylisted by target
+    mail providers during a large run.
     """
     session = Session()
     try:
-        # Get contacts with emails that don't have a record in email_verifications yet
-        unverified_contacts = session.query(Contact).filter(
-            Contact.email.isnot(None),
-            ~Contact.id.in_(session.query(EmailVerification.contact_id))
-        ).all()
+        contacts = (
+            session.query(Contact)
+            .filter(Contact.email.isnot(None))
+            .filter(
+                ~Contact.id.in_(session.query(EmailVerification.contact_id))
+            )
+            .all()
+        )
 
-        if not unverified_contacts:
-            print("No new contact emails to verify.")
-            return
-
-        print(f"Found {len(unverified_contacts)} contacts to verify.")
+        logger.info(f"Verifying {len(contacts)} unverified contacts via Reacher.")
         verifications_run = 0
-
-        for contact in unverified_contacts:
-            result = verify_email_via_billionverify(contact.email)
-            
-            reacher_status = result["is_reachable"]
+        for contact in contacts:
+            result = verify_email_via_reacher(contact.email)
+            status = result["is_reachable"]
             score = result["score"]
-            
-            # 1. Insert verification entry
+
+            # 1. Persist verification row
             verification = EmailVerification(
                 contact_id=contact.id,
-                status=reacher_status,
-                score=score
+                status=status,
+                score=score,
             )
             session.add(verification)
-            
+
             # 2. Update contact lead status
-            if reacher_status == "safe":
-                contact.lead_status = "Verified"
-            elif reacher_status == "invalid":
-                contact.lead_status = "Invalid"
-            elif reacher_status == "risky":
-                contact.lead_status = "Risky"
-            else:
-                contact.lead_status = "Unknown"
+            contact.lead_status = _LEAD_STATUS_BY_STATUS.get(status, "Unknown")
 
             verifications_run += 1
-            print(f"Verified: {contact.email} -> Status: {reacher_status} (Score: {score})")
+            logger.info(
+                "Verified: %s -> Status: %s (Score: %d)",
+                contact.email, status, score,
+            )
+
+            # Commit incrementally so a crash mid-run doesn't lose progress.
+            if verifications_run % 25 == 0:
+                session.commit()
+
+            if batch_sleep_sec > 0:
+                time.sleep(batch_sleep_sec)
 
         session.commit()
-        print(f"Verification run finished. Processed {verifications_run} emails.")
-
+        logger.info(
+            "Verification run finished. Processed %d emails.",
+            verifications_run,
+        )
     except Exception as e:
         session.rollback()
-        print(f"Error during email verification process: {e}")
-        raise e
+        logger.error(f"Error during email verification run: {e}")
+        raise
     finally:
         session.close()
 
+
 if __name__ == "__main__":
+    setup_logging()
     verify_contacts_emails()

@@ -1,0 +1,19 @@
+{
+  "label": "Dr1_repeat",
+  "queries": [
+    "Plumbing"
+  ],
+  "geo": null,
+  "grid_bbox": "37.20,-121.99,37.44,-121.75",
+  "grid_cell_km": 3.0,
+  "depth": 3,
+  "zoom": null,
+  "fast_mode": false,
+  "email": false,
+  "concurrency": 1,
+  "rc": 0,
+  "wall_sec": 601.5,
+  "n_leads": 361,
+  "out": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/Dr1_repeat.json",
+  "log": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/Dr1_repeat.log"
+}
