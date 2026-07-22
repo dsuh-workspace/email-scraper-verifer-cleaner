@@ -4,9 +4,8 @@ import platform
 import subprocess
 import tempfile
 from datetime import datetime, timezone
-from urllib.parse import urlparse
-
 from app.logging_config import get_logger, setup_logging
+from app.proxy_utils import load_proxy_file, normalize_proxy_line, validate_proxy_url
 
 logger = get_logger(__name__)
 
@@ -40,58 +39,6 @@ def _scraper_binary_path() -> str:
     else:
         name = "google-maps-scraper"
     return os.path.abspath(os.path.join(scraper_dir, name))
-
-def _validate_proxy_url(proxy_url: str, *, allow_socks: bool) -> str:
-    """Trim and validate one proxy URL, returning normalized value."""
-    proxy_url = _normalize_proxy_line(proxy_url)
-    proxy_url = proxy_url.strip()
-    if not proxy_url:
-        raise ValueError("Proxy URL cannot be empty.")
-        
-    parsed = urlparse(proxy_url)
-    allowed_schemes = {"http", "https"}
-    if allow_socks:
-        allowed_schemes.update({"socks5", "socks5h"})
-
-    if parsed.scheme not in allowed_schemes:
-        allowed = ", ".join(sorted(allowed_schemes))
-        raise ValueError(f"Unsupported proxy scheme {parsed.scheme!r}. Allowed: {allowed}")
-    if not parsed.hostname or not parsed.port:
-        raise ValueError(f"Proxy URL must include host and port: {proxy_url!r}")
-
-    return proxy_url
-
-
-def _normalize_proxy_line(line: str) -> str:
-    line = line.strip()
-    if not line:
-        return line
-    if "://" in line:
-        return line
-
-    parts = line.split(":")
-    if len(parts) == 4:
-        host, port, user, password = parts
-        return f"http://{user}:{password}@{host}:{port}"
-    if len(parts) == 2:
-        host, port = parts
-        return f"http://{host}:{port}"
-
-    raise ValueError(
-        "Unsupported proxy line format. Expected URL, host:port, or host:port:user:password."
-    )
-
-
-def _load_proxy_file(file_path: str) -> list[str]:
-    proxies = []
-    with open(file_path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            proxies.append(_normalize_proxy_line(line))
-    return proxies
-
 
 def _resolve_positive_int(value: int | None, env_name: str) -> int | None:
     if value is None:
@@ -135,7 +82,7 @@ def _scraper_proxy_args(
     if raw_proxies:
         proxy_values.extend(raw_proxies.split(","))
     if proxy_file:
-        proxy_values.extend(_load_proxy_file(proxy_file))
+        proxy_values.extend(load_proxy_file(proxy_file))
     if not proxy_values:
         return []
 
@@ -146,7 +93,14 @@ def _scraper_proxy_args(
 
     proxies = []
     for proxy_url in proxy_values:
-        proxies.append(_validate_proxy_url(proxy_url, allow_socks=True))
+        proxies.append(
+            validate_proxy_url(
+                proxy_url,
+                error_prefix="Proxy",
+                allowed_schemes={"http", "https", "socks5", "socks5h"},
+                unsupported_message="Unsupported proxy scheme",
+            )
+        )
 
     if limit is not None:
         proxies = proxies[:limit]

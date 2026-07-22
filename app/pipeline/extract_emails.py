@@ -30,6 +30,7 @@ from typing import List, Optional, Set
 import requests
 
 from app.logging_config import get_logger
+from app.proxy_utils import load_proxy_file, validate_proxy_url
 
 logger = get_logger(__name__)
 
@@ -105,11 +106,7 @@ _host_locks_guard = threading.Lock()
 def _host_lock(host: str) -> threading.Lock:
     """Return a per-host lock so parallel workers on the same domain serialize."""
     with _host_locks_guard:
-        lock = _host_locks.get(host)
-        if lock is None:
-            lock = threading.Lock()
-            _host_locks[host] = lock
-        return lock
+        return _host_locks.setdefault(host, threading.Lock())
 
 
 def extract_emails_from_html(html_text: str) -> List[str]:
@@ -135,53 +132,6 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def _validate_proxy_url(proxy_url: str) -> str:
-    proxy_url = _normalize_proxy_line(proxy_url)
-    proxy_url = proxy_url.strip()
-    if not proxy_url:
-        raise ValueError("Crawler proxy URL cannot be empty.")
-        
-    parsed = urllib.parse.urlparse(proxy_url)
-    if parsed.scheme not in ALLOWED_PROXY_SCHEMES:
-        allowed = ", ".join(sorted(ALLOWED_PROXY_SCHEMES))
-        raise ValueError(f"Unsupported crawler proxy scheme {parsed.scheme!r}. Allowed: {allowed}")
-    if not parsed.hostname or not parsed.port:
-        raise ValueError(f"Crawler proxy URL must include host and port: {proxy_url!r}")
-
-    return proxy_url
-
-
-def _normalize_proxy_line(line: str) -> str:
-    line = line.strip()
-    if not line:
-        return line
-    if "://" in line:
-        return line
-
-    parts = line.split(":")
-    if len(parts) == 4:
-        host, port, user, password = parts
-        return f"http://{user}:{password}@{host}:{port}"
-    if len(parts) == 2:
-        host, port = parts
-        return f"http://{host}:{port}"
-
-    raise ValueError(
-        "Unsupported proxy line format. Expected URL, host:port, or host:port:user:password."
-    )
-
-
-def _load_proxy_file(file_path: str) -> List[str]:
-    proxies = []
-    with open(file_path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            proxies.append(_normalize_proxy_line(line))
-    return proxies
-
-
 def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, str]]:
     if disable_proxy:
         logger.info("Crawler proxies disabled for this run.")
@@ -194,22 +144,47 @@ def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, st
 
     file_proxy = None
     if proxy_file:
-        file_proxies = _load_proxy_file(proxy_file)
+        file_proxies = load_proxy_file(proxy_file)
         if file_proxies:
-            file_proxy = _validate_proxy_url(file_proxies[0])
+            file_proxy = validate_proxy_url(
+                file_proxies[0],
+                error_prefix="Crawler",
+                allowed_schemes=ALLOWED_PROXY_SCHEMES,
+                unsupported_message="Unsupported crawler proxy scheme",
+            )
 
     proxies = {}
     if http_proxy:
-        proxies["http"] = _validate_proxy_url(http_proxy)
+        proxies["http"] = validate_proxy_url(
+            http_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif fallback_proxy:
-        proxies["http"] = _validate_proxy_url(fallback_proxy)
+        proxies["http"] = validate_proxy_url(
+            fallback_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif file_proxy:
         proxies["http"] = file_proxy
 
     if https_proxy:
-        proxies["https"] = _validate_proxy_url(https_proxy)
+        proxies["https"] = validate_proxy_url(
+            https_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif fallback_proxy:
-        proxies["https"] = _validate_proxy_url(fallback_proxy)
+        proxies["https"] = validate_proxy_url(
+            fallback_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif file_proxy:
         proxies["https"] = file_proxy
 
@@ -237,7 +212,7 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
             try:
                 resp = requests.get(
                     target, headers=_HEADERS, timeout=REQUEST_TIMEOUT_SEC,
-                    allow_redirects=True, proxies=proxies,
+                    proxies=proxies,
                 )
                 if resp.status_code != 200 or not resp.text:
                     continue

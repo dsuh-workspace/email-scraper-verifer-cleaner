@@ -76,12 +76,9 @@ def extract_domain(url_str):
         if not re.match(r'^https?://', url_str, re.IGNORECASE):
             url_str = 'http://' + url_str
         parsed = urllib.parse.urlparse(url_str)
-        domain = parsed.netloc.lower()
+        domain = (parsed.hostname or "").lower()
         if domain.startswith('www.'):
             domain = domain[4:]
-        # Remove port if present
-        if ':' in domain:
-            domain = domain.split(':')[0]
         return domain or None
     except Exception:
         return None
@@ -165,11 +162,11 @@ def process_and_deduplicate_leads() -> None:
 
         # -- Pre-load contact fingerprints so we don't re-add duplicates --
         # keyed by (business_id, email) and (business_id, phone)
-        existing_emails: set = set(
+        existing_emails: set = {
             (row[0], row[1])
             for row in session.query(Contact.business_id, Contact.email)
             .filter(Contact.email.isnot(None))
-        )
+        }
         existing_phones: set = set(
             (row[0], row[1])
             for row in session.query(Contact.business_id, Contact.phone)
