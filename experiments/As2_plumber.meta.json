@@ -1,0 +1,19 @@
+{
+  "label": "As2_plumber",
+  "queries": [
+    "Plumber"
+  ],
+  "geo": "37.3361663,-121.8905910",
+  "grid_bbox": null,
+  "grid_cell_km": null,
+  "depth": 10,
+  "zoom": null,
+  "fast_mode": false,
+  "email": false,
+  "concurrency": 1,
+  "rc": 0,
+  "wall_sec": 94.8,
+  "n_leads": 111,
+  "out": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/As2_plumber.json",
+  "log": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/As2_plumber.log"
+}

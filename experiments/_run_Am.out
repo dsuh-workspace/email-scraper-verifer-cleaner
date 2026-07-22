@@ -1,0 +1,2 @@
+[Am_multi_slow_d10] cmd: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/tmpriq2xpsz.txt -results /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/Am_multi_slow_d10.json -json -depth 10 -pages-per-browser 2 -c 1 -lang en -geo 37.3361663,-121.8905910
+[Am_multi_slow_d10] rc=0 n=263 wall=393.7s

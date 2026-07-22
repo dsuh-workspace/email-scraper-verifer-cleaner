@@ -1,0 +1,19 @@
+{
+  "label": "Dt1_tight_3km_d3",
+  "queries": [
+    "Plumbing"
+  ],
+  "geo": null,
+  "grid_bbox": "37.20,-121.99,37.44,-121.75",
+  "grid_cell_km": 3.0,
+  "depth": 3,
+  "zoom": null,
+  "fast_mode": false,
+  "email": false,
+  "concurrency": 1,
+  "rc": 0,
+  "wall_sec": 607.0,
+  "n_leads": 363,
+  "out": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/Dt1_tight_3km_d3.json",
+  "log": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/Dt1_tight_3km_d3.log"
+}

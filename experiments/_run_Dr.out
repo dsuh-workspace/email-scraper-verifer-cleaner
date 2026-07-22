@@ -1,0 +1,2 @@
+[Dr1_repeat] cmd: /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/app/scraper/google-maps-scraper -input /var/folders/jn/2mwm2559193g6kjfnzgzqp2c0000gn/T/tmprli6723n.txt -results /Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/Dr1_repeat.json -json -depth 3 -pages-per-browser 2 -c 1 -lang en -grid-bbox 37.20,-121.99,37.44,-121.75 -grid-cell 3.0
+[Dr1_repeat] rc=0 n=361 wall=601.5s

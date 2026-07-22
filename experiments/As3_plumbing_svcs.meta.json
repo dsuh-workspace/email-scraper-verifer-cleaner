@@ -1,0 +1,19 @@
+{
+  "label": "As3_plumbing_svcs",
+  "queries": [
+    "Plumbing services"
+  ],
+  "geo": "37.3361663,-121.8905910",
+  "grid_bbox": null,
+  "grid_cell_km": null,
+  "depth": 10,
+  "zoom": null,
+  "fast_mode": false,
+  "email": false,
+  "concurrency": 1,
+  "rc": 0,
+  "wall_sec": 95.9,
+  "n_leads": 110,
+  "out": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/As3_plumbing_svcs.json",
+  "log": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/experiments/As3_plumbing_svcs.log"
+}

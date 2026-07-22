@@ -1,0 +1,19 @@
+{
+  "label": "pass3_zip_95110",
+  "queries": [
+    "Plumbing"
+  ],
+  "geo": "37.3343312,-121.8954173",
+  "grid_bbox": null,
+  "grid_cell_km": null,
+  "depth": 3,
+  "zoom": null,
+  "fast_mode": true,
+  "email": false,
+  "concurrency": 1,
+  "rc": 0,
+  "wall_sec": 3.0,
+  "n_leads": 19,
+  "out": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/data/harvests/san_jose/2026-07-22/passes/pass3_zip_95110.json",
+  "log": "/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/.claude/worktrees/dazzling-dancing-comet/data/harvests/san_jose/2026-07-22/passes/pass3_zip_95110.log"
+}
