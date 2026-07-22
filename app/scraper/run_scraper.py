@@ -157,18 +157,32 @@ def execute_scrape_and_ingest(
     bbox: tuple[float, float, float, float] | None = None,
     cell_km: float | None = None,
     disable_proxy: bool = False,
+    queries: list[str] | None = None,
+    fast_mode: bool | None = None,
+    lang: str = "en",
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
     resulting JSON and ingests it into the SQLite database.
 
-    Two modes:
+    Three modes:
     - Single-centroid (default): pass lat/lon (or let it geocode from
       location), scraper uses -geo and -fast-mode. ~10-20 businesses per run.
     - Grid mode: pass bbox=(min_lat, min_lon, max_lat, max_lon) and cell_km.
       Scraper iterates cells internally in JS mode (much richer, 4-5x more
       businesses than a curated ZIP sweep, per 2026-07-20 experiment).
       -fast-mode is dropped; scraper rejects it with -grid-bbox.
+    - Multi-query mode: pass `queries=[q1, q2, ...]`. All are written to
+      the scraper's -input file (one per line as "{q} in {location}"), so
+      the scraper reuses its browser context across queries. More
+      efficient than N separate invocations (Am vs As in the 2026-07-20
+      experiment: ~2x faster at same coverage). Compatible with either
+      grid or single-centroid mode.
+
+    fast_mode override:
+      - None (default) => True for single-centroid, False for grid.
+      - True/False => explicit; caller responsible for compatibility
+        (scraper rejects fast_mode=True + bbox).
     """
     session = Session()
 
@@ -197,10 +211,16 @@ def execute_scrape_and_ingest(
     fd_results, results_file_path = tempfile.mkstemp(suffix=".json", prefix="results_")
     
     try:
-        # Write query to input file
+        # Resolve query list. Multi-query mode passes several queries in one
+        # input file so the scraper reuses its browser context across them.
+        query_list = [q for q in (queries or []) if q and q.strip()]
+        if not query_list:
+            query_list = [query]
+
         with os.fdopen(fd_query, 'w', encoding='utf-8') as qf:
-            qf.write(f"{query} in {location}\n")
-        
+            for q in query_list:
+                qf.write(f"{q} in {location}\n")
+
         # Close the results file descriptor so the scraper can write to it
         os.close(fd_results)
 
@@ -215,6 +235,14 @@ def execute_scrape_and_ingest(
                 f"and place it at that path (chmod +x on unix)."
             )
 
+        # Resolve fast_mode: explicit param wins; else default True unless grid.
+        use_fast_mode = fast_mode if fast_mode is not None else (bbox is None)
+        if use_fast_mode and bbox is not None:
+            raise ValueError(
+                "fast_mode=True is incompatible with grid mode (bbox). "
+                "Scraper rejects the combination."
+            )
+
         cmd = [
             binary_path,
             "-input", query_file_path,
@@ -222,6 +250,7 @@ def execute_scrape_and_ingest(
             "-json",
             "-depth", str(depth),
             "-pages-per-browser", "2",
+            "-lang", lang,
             "-email",
         ]
         if bbox is not None:
@@ -234,8 +263,9 @@ def execute_scrape_and_ingest(
                 "-grid-cell", str(cell),
             ])
         else:
-            # Single-centroid legacy mode.
-            cmd.append("-fast-mode")
+            # Single-centroid mode.
+            if use_fast_mode:
+                cmd.append("-fast-mode")
             if lat is not None and lon is not None:
                 cmd.extend(["-geo", f"{lat},{lon}"])
         cmd.extend(_scraper_proxy_args(disable_proxy=disable_proxy))

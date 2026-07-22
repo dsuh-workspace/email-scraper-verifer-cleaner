@@ -217,3 +217,120 @@ class TestExecuteScrapeGridCli:
         assert "-geo" in cmd
         assert "-grid-bbox" not in cmd
         assert "-grid-cell" not in cmd
+
+
+class TestExecuteScrapeMultiQuery:
+    """Multi-query mode: N queries in one input file, browser context reuse."""
+
+    def _stub_all(self, monkeypatch, captured: list, query_files: list):
+        class _FakeSession:
+            def add(self, *_): pass
+            def commit(self): pass
+            def query(self, *_): return self
+            def filter_by(self, **_): return self
+            def first(self): return None
+            def close(self): pass
+        monkeypatch.setattr(run_scraper, "Session", lambda: _FakeSession())
+        monkeypatch.setattr(
+            run_scraper, "geocode_location",
+            lambda location: (None, None, None),
+        )
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+
+        # Capture cmd AND the query-file contents (subprocess.run picks the
+        # -input arg out of cmd, we snapshot it here before tmpfile is cleaned).
+        real_open = open
+        def fake_run(cmd, *args, **kwargs):
+            captured.append(cmd)
+            # cmd is [binary, "-input", <path>, "-results", ...]
+            try:
+                idx = cmd.index("-input")
+                query_path = cmd[idx + 1]
+                with real_open(query_path, "r", encoding="utf-8") as f:
+                    query_files.append(f.read())
+            except (ValueError, FileNotFoundError):
+                query_files.append(None)
+            return _Completed()
+        import subprocess as _sp
+        monkeypatch.setattr(_sp, "run", fake_run)
+
+        monkeypatch.setattr(run_scraper, "_scraper_binary_path", lambda: "/tmp/fake-scraper-bin")
+        import os as _os
+        real_exists = _os.path.exists
+        def _fake_exists(p):
+            if p == "/tmp/fake-scraper-bin":
+                return True
+            if isinstance(p, str) and p.endswith(".json"):
+                return False
+            return real_exists(p)
+        monkeypatch.setattr(_os.path, "exists", _fake_exists)
+
+    def test_multi_query_writes_all_lines_to_input(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+            queries=["Plumbing", "Plumber", "Leak repair"],
+            fast_mode=False,
+            depth=10,
+        )
+        assert len(captured) == 1, "expected exactly one subprocess call"
+        assert files[0] is not None
+        lines = [ln for ln in files[0].splitlines() if ln.strip()]
+        assert lines == [
+            "Plumbing in San Jose, CA",
+            "Plumber in San Jose, CA",
+            "Leak repair in San Jose, CA",
+        ]
+        cmd = captured[0]
+        # fast_mode=False should NOT add -fast-mode.
+        assert "-fast-mode" not in cmd
+        # -geo present since bbox is None.
+        assert "-geo" in cmd
+        # -lang defaulted to 'en'.
+        assert "-lang" in cmd
+        assert cmd[cmd.index("-lang") + 1] == "en"
+
+    def test_fast_mode_true_with_bbox_raises(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        with pytest.raises(ValueError, match="incompatible"):
+            run_scraper.execute_scrape_and_ingest(
+                query="Plumbing",
+                location="San Jose, CA",
+                bbox=(37.21, -122.05, 37.47, -121.75),
+                cell_km=2.0,
+                fast_mode=True,   # explicit conflict
+            )
+
+    def test_lang_flag_customizable(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+            lang="es",
+        )
+        cmd = captured[0]
+        assert cmd[cmd.index("-lang") + 1] == "es"
+
+    def test_empty_queries_list_falls_back_to_query_arg(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+            queries=[],   # empty
+        )
+        lines = [ln for ln in files[0].splitlines() if ln.strip()]
+        assert lines == ["Plumbing in San Jose, CA"]

@@ -282,6 +282,7 @@ class TestMain:
             query, location, min_contacts, max_depth,
             use_grid=False, cell_km=2.0, bbox=None,
             disable_scraper_proxy=False, disable_crawler_proxy=False,
+            strategy="single-centroid", queries=None, zip_csv=None,
         ):
             called["query"] = query
             called["location"] = location
@@ -292,6 +293,9 @@ class TestMain:
             called["bbox"] = bbox
             called["disable_scraper_proxy"] = disable_scraper_proxy
             called["disable_crawler_proxy"] = disable_crawler_proxy
+            called["strategy"] = strategy
+            called["queries"] = queries
+            called["zip_csv"] = zip_csv
 
         monkeypatch.setattr(run_pipeline, "run_end_to_end_pipeline", fake_run_end_to_end_pipeline)
 
@@ -307,6 +311,9 @@ class TestMain:
             "bbox": None,
             "disable_scraper_proxy": False,
             "disable_crawler_proxy": False,
+            "strategy": "single-centroid",
+            "queries": None,
+            "zip_csv": None,
         }
 
     def test_legacy_pipeline_keeps_increasing_depth_until_target(self, monkeypatch, modules):
@@ -319,7 +326,7 @@ class TestMain:
         monkeypatch.setattr(
             run_pipeline,
             "execute_scrape_and_ingest",
-            lambda query, location, lat=None, lon=None, depth=1: depths.append(depth),
+            lambda query, location, lat=None, lon=None, depth=1, **_kw: depths.append(depth),
         )
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
@@ -353,7 +360,7 @@ class TestMain:
 
         calls = []
 
-        def fake_scrape(query, location, lat=None, lon=None, depth=1, bbox=None, cell_km=None):
+        def fake_scrape(query, location, lat=None, lon=None, depth=1, bbox=None, cell_km=None, **_kw):
             calls.append({"bbox": bbox, "cell_km": cell_km, "depth": depth, "lat": lat, "lon": lon})
 
         monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
@@ -389,7 +396,7 @@ class TestMain:
 
         received = {}
 
-        def fake_scrape(query, location, lat=None, lon=None, depth=1, bbox=None, cell_km=None):
+        def fake_scrape(query, location, lat=None, lon=None, depth=1, bbox=None, cell_km=None, **_kw):
             received["bbox"] = bbox
             received["cell_km"] = cell_km
 
@@ -455,6 +462,137 @@ class TestMain:
         assert run_pipeline._parse_bbox("37.21,-122.05,37.47,-121.75") == (
             37.21, -122.05, 37.47, -121.75,
         )
+
+
+class TestFullHarvestStrategy:
+    """Full-harvest = grid pass + multi-query slow pass + optional fast ZIP pass."""
+
+    def _wire(self, monkeypatch, run_pipeline, calls):
+        monkeypatch.setattr(run_pipeline, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_pipeline, "init_db", lambda: None)
+        monkeypatch.setattr(
+            run_pipeline, "geocode_location",
+            lambda location: (37.3, -121.8, (37.21, -122.05, 37.47, -121.75)),
+        )
+
+        def fake_scrape(query, location, lat=None, lon=None, depth=1,
+                        bbox=None, cell_km=None, disable_proxy=False,
+                        queries=None, fast_mode=None, lang="en"):
+            calls.append({
+                "query": query, "location": location,
+                "lat": lat, "lon": lon, "depth": depth,
+                "bbox": bbox, "cell_km": cell_km,
+                "queries": tuple(queries) if queries else None,
+                "fast_mode": fast_mode,
+            })
+
+        monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", fake_scrape)
+        monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites",
+                            lambda **_: None)
+        monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+
+    def test_full_harvest_runs_grid_then_multi_query(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            cell_km=2.0,
+        )
+
+        # No zip-csv → 2 passes: grid, then multi-query.
+        assert len(calls) == 2
+
+        # PASS 1: grid single query
+        assert calls[0]["bbox"] == (37.21, -122.05, 37.47, -121.75)
+        assert calls[0]["cell_km"] == 2.0
+        assert calls[0]["queries"] is None
+        assert calls[0]["depth"] == 3
+
+        # PASS 2: multi-query slow at centroid
+        assert calls[1]["bbox"] is None
+        assert calls[1]["lat"] == 37.3
+        assert calls[1]["lon"] == -121.8
+        assert calls[1]["depth"] == 10
+        assert calls[1]["fast_mode"] is False
+        assert calls[1]["queries"] == tuple(run_pipeline.DEFAULT_HARVEST_QUERIES)
+
+    def test_full_harvest_uses_custom_queries(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            queries=("Plumbing", "Plumber", "Leak repair"),
+        )
+        assert calls[1]["queries"] == ("Plumbing", "Plumber", "Leak repair")
+
+    def test_full_harvest_zip_pass_optional(self, monkeypatch, tmp_path, modules):
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        zip_csv = tmp_path / "zips.csv"
+        zip_csv.write_text(
+            "zip,city,state\n95112,San Jose,CA\n95123,San Jose,CA\n",
+            encoding="utf-8",
+        )
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            zip_csv=str(zip_csv),
+        )
+
+        # 4 passes: grid, multi-query, 2×zip
+        assert len(calls) == 4
+        # Last two are fast-mode single-centroid at ZIP centroids.
+        assert calls[2]["fast_mode"] is True
+        assert calls[2]["bbox"] is None
+        assert calls[3]["fast_mode"] is True
+        assert calls[3]["bbox"] is None
+
+    def test_full_harvest_errors_without_bbox(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(run_pipeline, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_pipeline, "init_db", lambda: None)
+        # Nominatim returns no bbox.
+        monkeypatch.setattr(
+            run_pipeline, "geocode_location",
+            lambda location: (37.3, -121.8, None),
+        )
+        monkeypatch.setattr(run_pipeline, "execute_scrape_and_ingest", lambda *a, **kw: None)
+        monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
+        monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **_: None)
+        monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda: None)
+
+        import pytest
+        with pytest.raises(SystemExit):
+            run_pipeline.run_end_to_end_pipeline(
+                query="Plumbing",
+                location="unmappable",
+                strategy="full-harvest",
+            )
+
+    def test_resolve_strategy_from_flags(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        import argparse
+        ns = argparse.Namespace(strategy=None, grid=True)
+        assert run_pipeline._resolve_strategy(ns) == "grid"
+        ns2 = argparse.Namespace(strategy=None, grid=False)
+        assert run_pipeline._resolve_strategy(ns2) == "single-centroid"
+        ns3 = argparse.Namespace(strategy="full-harvest", grid=False)
+        assert run_pipeline._resolve_strategy(ns3) == "full-harvest"
 
 
 class TestZipBatchHelpers:

@@ -152,6 +152,32 @@ Nominatim-derived bbox when you want a specific region.
 Grid mode ignores `--max-depth` (single scrape) and typically saturates
 before `--min-contacts`.
 
+### Full-harvest strategy (max coverage)
+
+```bash
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --strategy full-harvest \
+  --cell-km 2.0 \
+  --zip-csv san_jose_zips.csv
+```
+
+Three passes over the market, each ingesting into `raw_leads`:
+
+1. **Grid** — cells over Nominatim bbox (or `--bbox`), JS mode, depth 3.
+2. **Multi-query slow at centroid** — 8 semantic variants of the query
+   (Plumbing, Plumber, Emergency plumber, Drain cleaning, Water heater
+   repair, Leak repair, Sewer service, etc.), depth 10, one input file so
+   the scraper's browser context is reused. Override with
+   `--queries "a,b,c"`.
+3. **Fast ZIP top-up** *(optional)* — one fast-mode scrape per ZIP in
+   `--zip-csv` (`zip,city,state` columns). ~2 s each.
+
+Empirically 39% more unique businesses than grid alone (SJ 2026-07-20:
+grid=362 → +multi-query=473 → +ZIP=504). See
+`plans/scrape-strategy-experiments-2026-07-20.md`.
+
 ### Batch zip-file mode
 
 Use `run_zip_batch.py` when you want one CSV of zips/locations and a per-zip
