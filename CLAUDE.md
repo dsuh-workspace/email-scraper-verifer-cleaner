@@ -78,15 +78,31 @@ harvest_emails_from_websites()                    # one crawl at end
 export_new_leads()
 ```
 
-Verification (`app/pipeline/verify_emails.py`) is NOT auto-wired into the
-loop. Runs manually via `python -m app.pipeline.verify_emails` or
-imported into `run_pipeline` on demand. Archived predecessor:
+Verification (`app/pipeline/verify_emails.py`) is now opt-in via
+`--verify` on `run_pipeline.py`. When set, it runs after crawl and
+before export. Export can be gated by `--min-score N` (Reacher scores:
+safe=100, risky=50, unknown=25, invalid=0). Archived predecessor:
 `verify_emails_ARCHIVE.py` (BillionVerify — kept for reference).
 
 ---
 
 ## Recently closed
 
+- ✅ **Data-quality fixes** (2026-07-21, commit `393a10c`) — 4 review
+  findings from lewis-test post-v2:
+  - `run_scraper.py` derives `ScrapeRun.category` + `RawLead.category`
+    from the query instead of hard-coding "HVAC/Plumbing". Optional
+    `category=` kwarg override.
+  - `process_leads.py` dedup dict skips domain rows in
+    `{"http:", "https:", ""}` (legacy garbage seed that used to collapse
+    website-less businesses onto one row).
+  - `extract_emails.py` + `process_leads.py` expanded placeholder-email
+    blocklist (mysite.com, gami.com, example.{com,org,net},
+    yourdomain.com, wix*, sentry.io, godaddy.com, cloudflare/cloudfront/cdn).
+    Filtered on BOTH scraper-side and crawler-side paths.
+  - `run_pipeline.py` `--verify` flag wires Reacher between harvest and
+    export. `--min-score N` gates export by verification score. Verifier
+    failures are warnings, pipeline continues.
 - ✅ **Coverage v2** (2026-07-21) `--strategy full-harvest`: grid + multi-query
   slow at centroid + optional fast ZIP top-up. SJ 2026-07-20 experiment showed
   504 unique biz vs 362 for grid alone (+39%). Default 8-query variant list
@@ -126,11 +142,57 @@ imported into `run_pipeline` on demand. Archived predecessor:
 
 ## Still open (intentional deferrals)
 
+### Review 2026-07-21 (commit 393a10c) — remaining backlog
+
+Ordered by priority. Findings not covered by 393a10c.
+
+- **#R1 SPREADSHEET_ID=`mock` still tries Sheets first** — `export_sheets.py`
+  always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
+  "mock", fails auth, then falls through to CSV. Short-circuit when
+  destination is the mock literal.
+- **#R2 `--queries` warning fires but arg still parsed + passed** — set
+  `query_variants=None` when strategy ≠ full-harvest. Currently ignored
+  downstream but misleading.
+- **#R3 Full-harvest Pass 3 no per-ZIP logging** — silent for-loop over
+  ZIPs. Add `logger.info("[%d/%d] %s", i, len(zip_rows), zip_loc)` before
+  each scrape call.
+- **#R4 `min_contacts` still cumulative + dead in grid/full-harvest** —
+  in non-legacy strategies it's only logged, never gates. Either rename
+  to `--target-new-exportable` (matches `run_zip_batch.py`) and apply
+  consistently, or delete flag from non-legacy strategies + document.
+- **#R5 `DEFAULT_HARVEST_QUERIES` plumbing-only** — HVAC / other
+  industries need different variants. Options: key by industry, require
+  `--queries` when strategy=full-harvest, or move defaults to a config
+  file.
+- **#R6 `run_zip_batch.py` still on legacy `run_location_pipeline`** —
+  no `--strategy` support. Metro-wide full-harvest via batch is the real
+  coverage play; without it, `run_zip_batch.py` = orphaned path.
+- **#R7 Single-centroid crawls every depth iteration; grid/full-harvest
+  crawl once at end** — inconsistent + wasted HTTP. Match single-centroid
+  to the grid/full-harvest shape (crawl once after loop breaks).
+- **#R8 `harvest_best.py` diverges from pipeline** — same 3-pass strategy
+  but no DB, no dedup, no crawl. Either delete (now that
+  `--strategy full-harvest` exists in `run_pipeline.py`) or move to
+  `scripts/experiments/` + document as offline-only.
+- **#R9 Crawler proxy = only proxy[0] from file** — 10 workers × 1 IP
+  across ~350 domains = fingerprint risk. Deferred until block signals
+  appear (per existing #22). Rotate sticky-per-host when the time comes:
+  `proxies[hash(host) % len(proxies)]`.
+- **#R10 Untracked cruft to clean before merge** —
+  `proxies_old.txt`, `query.txt`, `run_tests.sh`, `sql_add_columns2.sql`,
+  `test_output.json`, `test_query.txt`, `test_results.json`. Delete or
+  `.gitignore`.
+
 ### #12 — Export pushes empty-email rows to Sheets *(deferred by request)*
 
 `export_sheets.py:129` — no `Contact.email IS NOT NULL` filter, so
 phone-only placeholder contacts (`email = NULL`) get exported with a
 blank Email column. Left as-is per project decision.
+
+⚠ Reconcile inconsistency: `run_pipeline.get_exportable_contact_count()`
+does filter `Contact.email.isnot(None)`, but the actual export query in
+`export_new_leads()` matches now (post-Round 2 fix). Verify the count
+and export queries agree before next release.
 
 ### #14 — Dead imports in `create_tables.py`
 
