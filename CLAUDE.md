@@ -1,6 +1,6 @@
 # email-scraper-verifer-cleaner — Review Notes
 
-Living review + backlog. Updated 2026-07-21.
+Living review + backlog. Updated 2026-07-22.
 
 Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
 dedupes → crawls sites for emails → optionally verifies via self-hosted
@@ -146,6 +146,22 @@ safe=100, risky=50, unknown=25, invalid=0). Archived predecessor:
 
 Ordered by priority. Findings not covered by 393a10c.
 
+- **#R0 🔴 `run_location_pipeline` NameError — pipeline broken**
+  (uncommitted, introduced by S1092 tuning-knobs mid-turn edit). Lines
+  ~116–119 of `run_pipeline.py` pass `concurrency=scraper_concurrency`,
+  `browser_pool_size=scraper_browser_pool_size`,
+  `pages_per_browser=scraper_pages_per_browser`,
+  `proxy_limit=scraper_proxy_limit` into `execute_scrape_and_ingest()`,
+  but those names are not function parameters and not module globals →
+  `NameError` on every legacy single-centroid run (all paths through
+  `run_zip_batch.py` + any `run_pipeline.py --strategy single-centroid`
+  invocation). Two fixes:
+  1. Add matching kwargs to `run_location_pipeline` signature + thread
+     them through from callers (`run_zip_batch.py`, plus `main()` +
+     `run_end_to_end_pipeline()` if the same knobs should exist there).
+  2. Or revert the four-line block until the tuning-knobs plan lands
+     end-to-end.
+  Blocks release. Do this before any of R1–R10.
 - **#R1 SPREADSHEET_ID=`mock` still tries Sheets first** — `export_sheets.py`
   always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
   "mock", fails auth, then falls through to CSV. Short-circuit when
