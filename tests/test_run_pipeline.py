@@ -663,6 +663,40 @@ class TestFullHarvestStrategy:
         ns3 = argparse.Namespace(strategy="full-harvest", grid=False)
         assert run_pipeline._resolve_strategy(ns3) == "full-harvest"
 
+    def test_default_harvest_queries_hvac(self, modules):
+        run_pipeline, _ = modules
+        assert run_pipeline._default_harvest_queries("HVAC") == \
+            run_pipeline.DEFAULT_HVAC_HARVEST_QUERIES
+        assert run_pipeline._default_harvest_queries("Heating and cooling") == \
+            run_pipeline.DEFAULT_HVAC_HARVEST_QUERIES
+
+    def test_default_harvest_queries_plumbing(self, modules):
+        run_pipeline, _ = modules
+        assert run_pipeline._default_harvest_queries("Plumbing") == \
+            run_pipeline.DEFAULT_HARVEST_QUERIES
+        assert run_pipeline._default_harvest_queries("Drain cleaning") == \
+            run_pipeline.DEFAULT_HARVEST_QUERIES
+
+    def test_default_harvest_queries_unknown_falls_back_to_single(self, modules):
+        run_pipeline, _ = modules
+        # Unknown industry: no plumbing bias — just returns the base query.
+        assert run_pipeline._default_harvest_queries("Roofing") == ("Roofing",)
+
+    def test_full_harvest_uses_hvac_defaults_when_query_is_hvac(
+        self, monkeypatch, modules
+    ):
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="HVAC",
+            location="Plano, TX",
+            strategy="full-harvest",
+        )
+        # Pass 2 = multi-query. Should be HVAC set, not plumbing.
+        assert calls[1]["queries"] == run_pipeline.DEFAULT_HVAC_HARVEST_QUERIES
+
 
 class TestZipBatchHelpers:
     def test_row_location_prefers_explicit_location(self, modules):

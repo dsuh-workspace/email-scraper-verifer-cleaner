@@ -42,6 +42,44 @@ DEFAULT_HARVEST_QUERIES = (
     "Sewer service",
 )
 
+# HVAC variants — analogous breadth-over-redundancy set. No empirical
+# per-variant lift table yet; refine after first HVAC full-harvest run.
+DEFAULT_HVAC_HARVEST_QUERIES = (
+    "HVAC",
+    "Heating and cooling",
+    "Air conditioning repair",
+    "Furnace repair",
+    "AC installation",
+    "Heat pump service",
+    "Ductwork",
+    "HVAC contractor",
+)
+
+_PLUMBING_KEYWORDS = ("plumb", "drain", "sewer", "leak", "water heater")
+_HVAC_KEYWORDS = ("hvac", "heating", "cooling", "furnace", "air condition", "heat pump")
+
+
+def _default_harvest_queries(query: str) -> tuple[str, ...]:
+    """Pick default multi-query set from `query`.
+
+    Plumbing-ish → DEFAULT_HARVEST_QUERIES.
+    HVAC-ish     → DEFAULT_HVAC_HARVEST_QUERIES.
+    Anything else → single-element `(query,)` + warning, so full-harvest
+    still runs but doesn't silently apply plumbing bias.
+    """
+    q = (query or "").lower()
+    if any(k in q for k in _PLUMBING_KEYWORDS):
+        return DEFAULT_HARVEST_QUERIES
+    if any(k in q for k in _HVAC_KEYWORDS):
+        return DEFAULT_HVAC_HARVEST_QUERIES
+    logger.warning(
+        "No built-in harvest query set for %r; multi-query pass will run "
+        "with only the base query. Supply --queries \"q1,q2,...\" for "
+        "richer coverage.",
+        query,
+    )
+    return (query,)
+
 
 @dataclass(frozen=True)
 class LocationRunMetrics:
@@ -209,7 +247,10 @@ def parse_args() -> argparse.Namespace:
         "--min-contacts",
         type=int,
         default=500,
-        help="Stop once DB has at least this many contacts",
+        help=(
+            "Stop once DB has at least this many contacts. "
+            "single-centroid strategy only; ignored by grid/full-harvest."
+        ),
     )
     parser.add_argument(
         "--max-depth",
@@ -460,9 +501,8 @@ def run_end_to_end_pipeline(
             harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
             current_contacts = get_contact_count()
             logger.info(
-                "Grid scrape complete. Contacts in DB: %d (target %d).",
+                "Grid scrape complete. Contacts in DB: %d.",
                 current_contacts,
-                min_contacts,
             )
         elif strategy == "full-harvest":
             effective_bbox = bbox if bbox is not None else geo_bbox
@@ -471,7 +511,7 @@ def run_end_to_end_pipeline(
                     f"full-harvest requires a bounding box for the grid pass. "
                     f"Nominatim returned none for {location!r}; supply --bbox."
                 )
-            query_variants = list(queries or DEFAULT_HARVEST_QUERIES)
+            query_variants = list(queries or _default_harvest_queries(query))
 
             # Pass 1 — grid over bbox (single query, JS mode, depth 3).
             logger.info("--- Full-harvest PASS 1: grid (bbox=%s cell_km=%.2f) ---",
@@ -525,6 +565,7 @@ def run_end_to_end_pipeline(
                         logger.warning("  [%d/%d zip %s] geocode failed, skipping.",
                                        i, len(zip_rows), row["zip"])
                         continue
+                    logger.info("  [%d/%d] scraping %s", i, len(zip_rows), zip_loc)
                     execute_scrape_and_ingest(
                         query,
                         zip_loc,
@@ -546,9 +587,8 @@ def run_end_to_end_pipeline(
             harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
             current_contacts = get_contact_count()
             logger.info(
-                "Full-harvest complete. Contacts in DB: %d (target %d).",
+                "Full-harvest complete. Contacts in DB: %d.",
                 current_contacts,
-                min_contacts,
             )
         else:
             # single-centroid legacy
@@ -621,12 +661,22 @@ def main() -> None:
         logger.warning("--zip-csv supplied but strategy is %s; zip-csv ignored.", strategy)
     if args.queries and strategy != "full-harvest":
         logger.warning("--queries supplied but strategy is %s; queries ignored.", strategy)
+    # --min-contacts only gates the single-centroid depth loop. Warn if a
+    # non-default value was passed with a strategy that ignores it, so
+    # users don't think they're capping grid/full-harvest.
+    if args.min_contacts != 500 and strategy != "single-centroid":
+        logger.warning(
+            "--min-contacts=%d supplied but strategy is %s; ignored "
+            "(only single-centroid gates on --min-contacts).",
+            args.min_contacts,
+            strategy,
+        )
 
     disable_scraper_proxy = args.no_proxy or args.no_scraper_proxy
     disable_crawler_proxy = args.no_proxy or args.no_crawler_proxy
 
     query_variants: tuple[str, ...] | None = None
-    if args.queries:
+    if args.queries and strategy == "full-harvest":
         variants = tuple(q.strip() for q in args.queries.split(",") if q.strip())
         query_variants = variants or None
 
