@@ -33,3 +33,7 @@ temp-*/
 
 # Pytest
 .pytest_cache/
+
+# Runtime logs
+logs/
+.claude/worktrees/experiment-google_maps_scraper/

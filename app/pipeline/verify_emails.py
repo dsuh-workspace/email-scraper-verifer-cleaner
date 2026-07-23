@@ -22,18 +22,12 @@ import time
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy.orm import sessionmaker
-
-from app.db.database import engine
-from app.db.create_tables import Contact, EmailVerification
 
 from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
 load_dotenv()
-
-Session = sessionmaker(bind=engine)
 
 # Reacher backend on Kamatera. Override in .env for local dev / new deploys.
 REACHER_API_URL = os.getenv(
@@ -123,6 +117,12 @@ def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
     small delay reduces the chance of getting our IP greylisted by target
     mail providers during a large run.
     """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import engine
+    from app.db.create_tables import Contact, EmailVerification
+
+    Session = sessionmaker(bind=engine)
     session = Session()
     try:
         contacts = (

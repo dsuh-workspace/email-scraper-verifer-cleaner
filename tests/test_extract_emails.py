@@ -116,3 +116,21 @@ class TestBuildCrawlerProxies:
             "http": "http://proxy1.example.com:8080",
             "https": "http://proxy1.example.com:8080",
         }
+
+    def test_uses_compact_webshare_proxy_file(self, monkeypatch, tmp_path):
+        proxy_file = tmp_path / "proxies.txt"
+        proxy_file.write_text(
+            "p.webshare.io:80:user1:pass1\np.webshare.io:80:user2:pass2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CRAWLER_PROXY_FILE", str(proxy_file))
+
+        assert _build_crawler_proxies() == {
+            "http": "http://user1:pass1@p.webshare.io:80",
+            "https": "http://user1:pass1@p.webshare.io:80",
+        }
+
+    def test_disable_proxy_short_circuits(self, monkeypatch):
+        monkeypatch.setenv("CRAWLER_PROXY", "http://proxy.example.com:8080")
+
+        assert _build_crawler_proxies(disable_proxy=True) is None

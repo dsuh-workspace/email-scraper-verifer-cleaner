@@ -28,16 +28,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Set
 
 import requests
-from sqlalchemy.orm import sessionmaker
-
-from app.db.database import engine
-from app.db.create_tables import Business, Contact, ExportHistory
 
 from app.logging_config import get_logger
+from app.proxy_utils import load_proxy_file, validate_proxy_url
 
 logger = get_logger(__name__)
-
-Session = sessionmaker(bind=engine)
 
 # TLD length {2,} — the old {2,4} bound rejected legitimate industry TLDs
 # like .plumbing, .services, .contractors, .museum which show up on
@@ -50,12 +45,40 @@ EXCLUDE_EXTENSIONS = (
     ".webp", ".css", ".js",
 )
 
-# Also exclude obvious CDN/tracking noise found in scraped HTML.
+# Substring match against the full email. Blocks CDN/tracking noise plus
+# well-known template-site placeholders that regex-match but never
+# resolve to real inboxes. Verifier catches most of these too, but
+# pre-filtering saves API calls + keeps junk out of the DB.
 EXCLUDE_DOMAINS = (
+    # tracking / CDN / build-tool noise
     "sentry.io",
+    "sentry-next.wixpress.com",
     "wixpress.com",
+    "wix.com",
+    "cloudflare.com",
+    "cloudfront.net",
+    "googleusercontent.com",
+    "gstatic.com",
+    "cdn.",
+    # documentation / spec placeholders
     "example.com",
+    "example.org",
+    "example.net",
     "domain.com",
+    "yourdomain.com",
+    "your-domain.com",
+    "mysite.com",
+    "your-email.com",
+    "youremail.com",
+    "yoursite.com",
+    "email.com",
+    # frequent template-site junk seen in scraped SJ/SC data
+    "gami.com",
+    "test.com",
+    "sample.com",
+    # registrar / host placeholder shown by parked pages
+    "godaddy.com",
+    "sentry-cdn.com",
 )
 
 # Paths to try in order. First hit that returns emails short-circuits.
@@ -83,11 +106,7 @@ _host_locks_guard = threading.Lock()
 def _host_lock(host: str) -> threading.Lock:
     """Return a per-host lock so parallel workers on the same domain serialize."""
     with _host_locks_guard:
-        lock = _host_locks.get(host)
-        if lock is None:
-            lock = threading.Lock()
-            _host_locks[host] = lock
-        return lock
+        return _host_locks.setdefault(host, threading.Lock())
 
 
 def extract_emails_from_html(html_text: str) -> List[str]:
@@ -113,33 +132,11 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def _validate_proxy_url(proxy_url: str) -> str:
-    proxy_url = proxy_url.strip()
-    if not proxy_url:
-        raise ValueError("Crawler proxy URL cannot be empty.")
+def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, str]]:
+    if disable_proxy:
+        logger.info("Crawler proxies disabled for this run.")
+        return None
 
-    parsed = urllib.parse.urlparse(proxy_url)
-    if parsed.scheme not in ALLOWED_PROXY_SCHEMES:
-        allowed = ", ".join(sorted(ALLOWED_PROXY_SCHEMES))
-        raise ValueError(f"Unsupported crawler proxy scheme {parsed.scheme!r}. Allowed: {allowed}")
-    if not parsed.hostname or not parsed.port:
-        raise ValueError(f"Crawler proxy URL must include host and port: {proxy_url!r}")
-
-    return proxy_url
-
-
-def _load_proxy_file(file_path: str) -> List[str]:
-    proxies = []
-    with open(file_path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            proxies.append(line)
-    return proxies
-
-
-def _build_crawler_proxies() -> Optional[dict[str, str]]:
     http_proxy = os.getenv("CRAWLER_HTTP_PROXY", "").strip()
     https_proxy = os.getenv("CRAWLER_HTTPS_PROXY", "").strip()
     fallback_proxy = os.getenv("CRAWLER_PROXY", "").strip()
@@ -147,22 +144,47 @@ def _build_crawler_proxies() -> Optional[dict[str, str]]:
 
     file_proxy = None
     if proxy_file:
-        file_proxies = _load_proxy_file(proxy_file)
+        file_proxies = load_proxy_file(proxy_file)
         if file_proxies:
-            file_proxy = _validate_proxy_url(file_proxies[0])
+            file_proxy = validate_proxy_url(
+                file_proxies[0],
+                error_prefix="Crawler",
+                allowed_schemes=ALLOWED_PROXY_SCHEMES,
+                unsupported_message="Unsupported crawler proxy scheme",
+            )
 
     proxies = {}
     if http_proxy:
-        proxies["http"] = _validate_proxy_url(http_proxy)
+        proxies["http"] = validate_proxy_url(
+            http_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif fallback_proxy:
-        proxies["http"] = _validate_proxy_url(fallback_proxy)
+        proxies["http"] = validate_proxy_url(
+            fallback_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif file_proxy:
         proxies["http"] = file_proxy
 
     if https_proxy:
-        proxies["https"] = _validate_proxy_url(https_proxy)
+        proxies["https"] = validate_proxy_url(
+            https_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif fallback_proxy:
-        proxies["https"] = _validate_proxy_url(fallback_proxy)
+        proxies["https"] = validate_proxy_url(
+            fallback_proxy,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
     elif file_proxy:
         proxies["https"] = file_proxy
 
@@ -190,7 +212,7 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
             try:
                 resp = requests.get(
                     target, headers=_HEADERS, timeout=REQUEST_TIMEOUT_SEC,
-                    allow_redirects=True, proxies=proxies,
+                    proxies=proxies,
                 )
                 if resp.status_code != 200 or not resp.text:
                     continue
@@ -210,7 +232,7 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
     return sorted(found)
 
 
-def _persist_emails_for_business(session, biz: Business, emails: List[str]) -> int:
+def _persist_emails_for_business(session, biz, emails: List[str]) -> int:
     """
     Add new Contact rows for each found email; remove phone-only placeholders
     once we have at least one real email for the business. Returns count added.
@@ -252,14 +274,20 @@ def _persist_emails_for_business(session, biz: Business, emails: List[str]) -> i
     return added
 
 
-def harvest_emails_from_websites() -> None:
+def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
     """
     Fan out across all businesses that have a website but no email contact yet.
     Persists results in the main thread — SQLAlchemy sessions are not thread-safe.
     """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import engine
+    from app.db.create_tables import Business, Contact, ExportHistory
+
+    Session = sessionmaker(bind=engine)
     session = Session()
     try:
-        crawler_proxies = _build_crawler_proxies()
+        crawler_proxies = _build_crawler_proxies(disable_proxy=disable_proxy)
         if crawler_proxies:
             logger.info("Crawler proxies enabled for %s.", ", ".join(sorted(crawler_proxies)))
         # Preload the set of business_ids that already have at least one

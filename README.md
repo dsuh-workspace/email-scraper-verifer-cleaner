@@ -34,10 +34,25 @@ in explicitly when you want it — see [Verification](#verification) below.
 - macOS or Linux (Windows works too, use the `.exe` binary variant)
 - Google Maps scraper binary (see below)
 
+### Python version / virtualenv
+
+Preferred local setup:
+
+```bash
+pyenv shell 3.12.9
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+This repo now includes `.python-version` with `3.12.9`, so `pyenv`
+should auto-select the right interpreter when you `cd` into the repo.
+Run tests and CLI entrypoints inside `.venv`.
+
 ### 2. Install
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
@@ -84,6 +99,12 @@ REACHER_TIMEOUT_SEC=30
 # Optional proxy config
 SCRAPER_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://proxy2.example.com:1080
 SCRAPER_PROXIES_FILE=proxies.txt
+# Optional scraper tuning defaults
+# SCRAPER_CONCURRENCY=3
+# SCRAPER_BROWSER_POOL_SIZE=1
+# SCRAPER_PAGES_PER_BROWSER=1
+# SCRAPER_PROXY_LIMIT=3
+# SCRAPER_DISABLE_PAGE_REUSE=1   # not read by wrapper; use CLI flag today
 CRAWLER_PROXY=http://user:pass@proxy3.example.com:8080
 CRAWLER_PROXY_FILE=proxies.txt
 # Or split crawler proxies by scheme
@@ -106,11 +127,40 @@ KAMATERA_SECRET_KEY=...
 
 ```bash
 python run_pipeline.py --query "Plumbing" --location "San Francisco, CA"
+# Disable both scraper + crawler proxies for this run
+python run_pipeline.py --query "Plumbing" --location "San Francisco, CA" --no-proxy
+# Conservative scraper tuning: 3 proxies, 1 page/browser, low concurrency
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --scraper-proxy-limit 3 \
+  --scraper-pages-per-browser 1 \
+  --scraper-browser-pool-size 1 \
+  --scraper-concurrency 3
 ```
+
+`run_zip_batch.py` now exposes same scraper tuning knobs, including
+`--scraper-disable-page-reuse`, and forwards them into
+`run_location_pipeline(...)` for each ZIP.
 
 Defaults:
 - `--min-contacts 500`
 - `--max-depth 20`
+- scraper concurrency/browser pool use upstream defaults unless overridden
+- scraper pages per browser defaults to current wrapper value `2`
+- scraper forwards first `3` validated proxies by default unless overridden
+
+Scraper runtime knobs exposed by this wrapper:
+- `--scraper-concurrency` → upstream `-c`
+- `--scraper-browser-pool-size` → upstream `-browser-pool-size`
+- `--scraper-pages-per-browser` → upstream `-pages-per-browser`
+- `--scraper-proxy-limit` → wrapper-side cap; forwards first `N` validated proxies
+- `--scraper-disable-page-reuse` → upstream `-disable-page-reuse`
+
+Not exposed here today:
+- per-action delay / jitter
+- scroll timing or human-ish cadence
+- sticky proxy/session policies
 
 ### Override campaign settings
 
@@ -124,6 +174,57 @@ python run_pipeline.py \
 
 `run_pipeline.py` keeps legacy semantics: `--min-contacts` is total DB
 contacts, not new contacts from current run.
+
+### Grid-mode scraping (recommended for coverage)
+
+```bash
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --grid \
+  --cell-km 2.0
+```
+
+Uses the scraper's native `-grid-bbox` mode (JS mode via Playwright).
+Iterates cells over the location's Nominatim-derived bounding box in one
+scraper invocation. Empirically **4-25× more unique businesses** than
+single-centroid mode (see `plans/generalized-city-coverage-method-2026-07-20.md`).
+
+One-time setup: run `./scripts/setup_scraper_playwright.sh` to install the
+Playwright driver + Chromium + FFmpeg (~265 MB). Also handles the
+mxschmitt/playwright-go v0.6100.0 version-mismatch workaround.
+
+Optional: `--bbox min_lat,min_lon,max_lat,max_lon` overrides the
+Nominatim-derived bbox when you want a specific region.
+
+Grid mode ignores `--max-depth` (single scrape) and typically saturates
+before `--min-contacts`.
+
+### Full-harvest strategy (max coverage)
+
+```bash
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --strategy full-harvest \
+  --cell-km 2.0 \
+  --zip-csv san_jose_zips.csv
+```
+
+Three passes over the market, each ingesting into `raw_leads`:
+
+1. **Grid** — cells over Nominatim bbox (or `--bbox`), JS mode, depth 3.
+2. **Multi-query slow at centroid** — 8 semantic variants of the query
+   (Plumbing, Plumber, Emergency plumber, Drain cleaning, Water heater
+   repair, Leak repair, Sewer service, etc.), depth 10, one input file so
+   the scraper's browser context is reused. Override with
+   `--queries "a,b,c"`.
+3. **Fast ZIP top-up** *(optional)* — one fast-mode scrape per ZIP in
+   `--zip-csv` (`zip,city,state` columns). ~2 s each.
+
+Empirically 39% more unique businesses than grid alone (SJ 2026-07-20:
+grid=362 → +multi-query=473 → +ZIP=504). See
+`plans/scrape-strategy-experiments-2026-07-20.md`.
 
 ### Batch zip-file mode
 
@@ -168,12 +269,16 @@ The scraper depth starts at 1 and grows by 2 each iteration up to
 into every subsequent scrape iteration — Nominatim ToS friendly.
 
 Proxy notes:
+- `--no-proxy` disables both scraper and crawler proxies for one run.
+- `--no-scraper-proxy` disables only scraper proxies for one run.
+- `--no-crawler-proxy` disables only crawler proxies for one run.
 - `SCRAPER_PROXIES` passes comma-separated proxies straight to gosom `-proxies`.
-- `SCRAPER_PROXIES_FILE` loads one proxy URL per line and appends them to `SCRAPER_PROXIES`.
+- `SCRAPER_PROXIES_FILE` loads one proxy per line and appends them to `SCRAPER_PROXIES`.
 - `CRAWLER_PROXY` applies one HTTP/HTTPS proxy to website crawling.
-- `CRAWLER_PROXY_FILE` loads one proxy URL per line; crawler uses first valid entry.
+- `CRAWLER_PROXY_FILE` loads one proxy per line; crawler uses first valid entry.
 - `CRAWLER_HTTP_PROXY` and `CRAWLER_HTTPS_PROXY` override `CRAWLER_PROXY` / `CRAWLER_PROXY_FILE` per scheme.
-- Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h`.
+- Proxy file lines may be full URLs (`http://user:pass@host:port`) or compact Webshare-style lines (`host:port:user:password`).
+- Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h` when provided as full proxy URLs. Compact proxy-file lines normalize to `http://...` URLs.
 
 ---
 

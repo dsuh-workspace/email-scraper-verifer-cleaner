@@ -26,18 +26,37 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Dict, Tuple
 
-from sqlalchemy.orm import sessionmaker
-from app.db.database import engine
-from app.db.create_tables import RawLead, Business, Contact
-
 from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
-Session = sessionmaker(bind=engine)
-
 # Same regex as extract_emails.py so validation is consistent across the pipeline.
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+
+# Substring match — same blocklist rationale as extract_emails.EXCLUDE_DOMAINS.
+# Keep the two lists loosely in sync; duplication here is deliberate so the
+# scraper-side email field is filtered before insert (crawler-side is
+# handled in extract_emails.py).
+_PLACEHOLDER_EMAIL_SUBSTRINGS = (
+    "sentry.io",
+    "wixpress.com",
+    "wix.com",
+    "example.com",
+    "example.org",
+    "example.net",
+    "domain.com",
+    "yourdomain.com",
+    "your-domain.com",
+    "mysite.com",
+    "yoursite.com",
+    "youremail.com",
+    "your-email.com",
+    "email.com",
+    "gami.com",
+    "test.com",
+    "sample.com",
+    "godaddy.com",
+)
 
 # Raw scraper output separates emails with any of these — treat them all.
 _EMAIL_SPLIT_RE = re.compile(r'[,;\s]+')
@@ -57,12 +76,9 @@ def extract_domain(url_str):
         if not re.match(r'^https?://', url_str, re.IGNORECASE):
             url_str = 'http://' + url_str
         parsed = urllib.parse.urlparse(url_str)
-        domain = parsed.netloc.lower()
+        domain = (parsed.hostname or "").lower()
         if domain.startswith('www.'):
             domain = domain[4:]
-        # Remove port if present
-        if ':' in domain:
-            domain = domain.split(':')[0]
         return domain or None
     except Exception:
         return None
@@ -101,9 +117,12 @@ def _parse_and_validate_emails(raw_email_field: str):
         email = part.strip().lower().rstrip('.,;')
         if not email or email in seen:
             continue
-        if EMAIL_REGEX.match(email):
-            seen.add(email)
-            valid.append(email)
+        if not EMAIL_REGEX.match(email):
+            continue
+        if any(bad in email for bad in _PLACEHOLDER_EMAIL_SUBSTRINGS):
+            continue
+        seen.add(email)
+        valid.append(email)
     return valid
 
 
@@ -112,6 +131,12 @@ def process_and_deduplicate_leads() -> None:
     Main entrypoint. Processes unprocessed raw leads and promotes to
     businesses + contacts, deduping in memory to avoid N+1 queries.
     """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.database import engine
+    from app.db.create_tables import RawLead, Business, Contact
+
+    Session = sessionmaker(bind=engine)
     session = Session()
     try:
         # -- Load unprocessed raw leads (skip anything with processed_at set) --
@@ -122,21 +147,26 @@ def process_and_deduplicate_leads() -> None:
         )
         logger.info(f"Loaded {len(raw_leads)} unprocessed raw leads for processing.")
         # -- Pre-load existing businesses into fast lookup dicts (one SELECT total) --
+        # Skip garbage domain rows ('http:', 'https:', '') left by the legacy
+        # case-sensitive scheme-check bug. Seeding those into the dedup map
+        # collapses every subsequent website-less biz onto whichever row
+        # happened to hold that key.
+        _BAD_DOMAINS = {"http:", "https:", ""}
         existing_by_domain: Dict[str, Business] = {}
         existing_by_name_phone: Dict[Tuple[str, str], Business] = {}
         for biz in session.query(Business).all():
-            if biz.domain:
+            if biz.domain and biz.domain not in _BAD_DOMAINS:
                 existing_by_domain[biz.domain] = biz
             if biz.business_name and biz.phone:
                 existing_by_name_phone[(biz.business_name, biz.phone)] = biz
 
         # -- Pre-load contact fingerprints so we don't re-add duplicates --
         # keyed by (business_id, email) and (business_id, phone)
-        existing_emails: set = set(
+        existing_emails: set = {
             (row[0], row[1])
             for row in session.query(Contact.business_id, Contact.email)
             .filter(Contact.email.isnot(None))
-        )
+        }
         existing_phones: set = set(
             (row[0], row[1])
             for row in session.query(Contact.business_id, Contact.phone)

@@ -1,71 +1,149 @@
 # email-scraper-verifer-cleaner — Review Notes
 
-Living review + backlog. Updated 2026-07-20.
+Living review + backlog. Updated 2026-07-22.
 
 Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
 dedupes → crawls sites for emails → optionally verifies via self-hosted
 Reacher on Kamatera → exports Sheets/CSV.
 Now captures rich map details (Review Count, Review Rating, Address, Status, Description, Place ID).
 
+**2026-07-21 (v1)**: pipeline supports native grid-mode scraping via
+`--grid --cell-km <km>` on `run_pipeline.py`. Empirically 4-25× coverage
+of single-centroid mode. Requires Playwright driver installed via
+`./scripts/setup_scraper_playwright.sh` (one-time, ~265 MB). See
+`plans/generalized-city-coverage-method-2026-07-20.md` for the full
+strategy write-up + n=2 SJ/SC empirical results.
+
+**2026-07-21 (v2)**: pipeline adds `--strategy full-harvest` = grid +
+multi-query slow at centroid + optional fast ZIP top-up (via
+`--zip-csv`). On SJ 2026-07-20 experiment: grid alone = 362 biz, full
+harvest = 504 biz (+39%). Default queries = 8 plumbing variants; override
+with `--queries "a,b,c"`. See
+`plans/scrape-strategy-experiments-2026-07-20.md` for full n=1 evidence.
+
 ---
 
 ## Pipeline flow (as-built)
 
+Three strategies via `--strategy {single-centroid, grid, full-harvest}`
+on `run_pipeline.py`. Default = `single-centroid` (legacy). Selection
+sugar: `--grid` == `--strategy grid`.
+
+**Single-centroid** (legacy depth-loop):
 ```
-run_pipeline.run_end_to_end_pipeline(query, location, min_contacts)
-  init_db()                              # bootstrap schema once
-  lat, lon = geocode_location(location)  # ONCE via Nominatim, cached
-  loop (depth 1 → max 20, step +2):
-    run_scraper.execute_scrape_and_ingest(query, location, lat, lon)  # subprocess → raw_leads
-    process_leads.process_and_deduplicate  # unprocessed raw_leads → businesses + contacts
-    extract_emails.harvest_emails_from_websites  # concurrent crawl /contact,/about,... → contacts
-    if contact_count >= min_contacts: break
-  export_sheets.export_new_leads         # Sheets → fallback CSV
+init_db()
+lat, lon = geocode_location(location)             # ONCE via Nominatim
+loop (depth 1 → max_depth, step +2):
+  execute_scrape_and_ingest(query, location, lat, lon, depth)
+  process_and_deduplicate_leads()
+  harvest_emails_from_websites()
+  if contact_count >= min_contacts: break
+export_new_leads()
 ```
 
-Verification (`app/pipeline/verify_emails.py`) is NOT auto-wired into the
-loop. Runs manually via `python -m app.pipeline.verify_emails` or
-imported into `run_pipeline` on demand. Archived predecessor:
+**Grid** (v1, JS mode, requires Playwright):
+```
+init_db()
+lat, lon, bbox = geocode_location(location)       # bbox from Nominatim
+                                                  # or --bbox override
+execute_scrape_and_ingest(query, location,
+                          bbox=bbox, cell_km=2.0, depth=3)
+process_and_deduplicate_leads()
+harvest_emails_from_websites()
+export_new_leads()
+```
+
+**Full-harvest** (v2, three passes):
+```
+init_db()
+lat, lon, bbox = geocode_location(location)
+
+# PASS 1: grid single-query
+execute_scrape_and_ingest(query, location, bbox=bbox, cell_km, depth=3)
+process_and_deduplicate_leads()
+
+# PASS 2: multi-query slow at centroid (8 variants in one input file)
+execute_scrape_and_ingest(query, location, lat, lon, depth=10,
+                          queries=DEFAULT_HARVEST_QUERIES, fast_mode=False)
+process_and_deduplicate_leads()
+
+# PASS 3 (optional): fast ZIP top-up
+for row in load_zip_csv(zip_csv):
+  zlat, zlon, _ = geocode_location(f"{city}, {state}, {zip}")
+  execute_scrape_and_ingest(query, zip_loc, lat=zlat, lon=zlon,
+                            depth=3, fast_mode=True)
+process_and_deduplicate_leads()
+
+harvest_emails_from_websites()                    # one crawl at end
+export_new_leads()
+```
+
+Verification (`app/pipeline/verify_emails.py`) is now opt-in via
+`--verify` on `run_pipeline.py`. When set, it runs after crawl and
+before export. Export can be gated by `--min-score N` (Reacher scores:
+safe=100, risky=50, unknown=25, invalid=0). Archived predecessor:
 `verify_emails_ARCHIVE.py` (BillionVerify — kept for reference).
 
 ---
 
-## Recently closed
-
-- ✅ **Critical #1** OS-aware scraper binary path (`.exe` on Windows, bare on unix)
-- ✅ **Critical #2** `create_all()` moved into `init_db()`, called from `run_pipeline`
-- ✅ **Critical #3** `processed_at` flag on `raw_leads` — no more quadratic reprocessing
-- ✅ **Critical #4** `requirements.txt` rewritten as UTF-8, garbage pkgs dropped, `google-api-python-client` added
-- ✅ **Critical #5** Email regex TLD loosened from `{2,4}` → `{2,}`
-- ✅ **Verifier** Old BillionVerify code archived; new `verify_emails.py` calls
-  self-hosted Reacher at `http://104.128.66.74:8080/v0/check_email`. Deploy
-  scripts + `KAMATERA_ACCESS_KEY`/`KAMATERA_SECRET_KEY` live in sibling repo
-  `autopilotlocal/email-verifier` (see its `CLAUDE.md`).
-- ✅ **Medium #6** `database.py` raises clear `RuntimeError` if `DATABASE_URL` unset
-- ✅ **Medium #7** `extract_emails` now crawls `/contact`, `/contact-us`, `/about`, `/about-us`, `/team` in addition to homepage
-- ✅ **Medium #8** `ThreadPoolExecutor(max_workers=10)` with per-host lock + 0.75s intra-host delay
-- ✅ **Medium #9** `geocode_location` called ONCE from `run_pipeline`, lat/lon threaded into every scrape iteration
-- ✅ **Medium #10** N+1 queries killed — `process_leads` preloads businesses + contact fingerprints into dicts up front
-- ✅ **Medium #11** Raw email field split on `[,;\s]+` and validated against `EMAIL_REGEX` before insert
-- ✅ **Medium #13** DB constraints + indexes:
-  - `businesses.domain` UNIQUE
-  - `(contacts.business_id, contacts.email)` composite UNIQUE
-  - Indexes on all FK columns + `raw_leads.processed_at`, `contacts.lead_status`, `export_history` composite
-- ✅ **Cleanup #15** Old BillionVerify verifier archived; new Reacher-based `verify_emails.py` runs against Kamatera instance
-- ✅ **Cleanup #17** Central logging (`app/logging_config.py`) — every module uses `logger` instead of `print()`; `LOG_LEVEL` env var controls verbosity
-- ✅ **Cleanup #19** `tests/` suite added — 48 passing unit tests covering `extract_domain`, `normalize_phone`, `_parse_and_validate_emails`, `extract_emails_from_html`, and Reacher response handling. Caught a real bug: `extract_domain` was case-sensitive on the scheme check (fixed inline).
-- ✅ **Cleanup #21** `os.makedirs` guarded against empty `dirname` for bare-filename CSV paths
-- ✅ **Cleanup #23** Scraper subprocess now has a 30-min hard timeout (override via `SCRAPER_TIMEOUT_SEC` env var); `TimeoutExpired` logs and propagates
-
----
+Closed review items and shipped fixes now live in `CHANGELOG.md` (not
+auto-loaded into context — read it on demand).
 
 ## Still open (intentional deferrals)
+
+### Review 2026-07-21 (commit 393a10c) — remaining backlog
+
+Ordered by priority. Findings not covered by 393a10c.
+
+- **#R0 🔴 `run_location_pipeline` NameError — pipeline broken**
+  (uncommitted, introduced by S1092 tuning-knobs mid-turn edit). Lines
+  ~116–119 of `run_pipeline.py` pass `concurrency=scraper_concurrency`,
+  `browser_pool_size=scraper_browser_pool_size`,
+  `pages_per_browser=scraper_pages_per_browser`,
+  `proxy_limit=scraper_proxy_limit` into `execute_scrape_and_ingest()`,
+  but those names are not function parameters and not module globals →
+  `NameError` on every legacy single-centroid run (all paths through
+  `run_zip_batch.py` + any `run_pipeline.py --strategy single-centroid`
+  invocation). Two fixes:
+  1. Add matching kwargs to `run_location_pipeline` signature + thread
+     them through from callers (`run_zip_batch.py`, plus `main()` +
+     `run_end_to_end_pipeline()` if the same knobs should exist there).
+  2. Or revert the four-line block until the tuning-knobs plan lands
+     end-to-end.
+  Blocks release. Do this before any of R1–R10.
+- **#R1 SPREADSHEET_ID=`mock` still tries Sheets first** — `export_sheets.py`
+  always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
+  "mock", fails auth, then falls through to CSV. Short-circuit when
+  destination is the mock literal.
+- **#R6 `run_zip_batch.py` still on legacy `run_location_pipeline`** —
+  no `--strategy` support. Metro-wide full-harvest via batch is the real
+  coverage play; without it, `run_zip_batch.py` = orphaned path.
+- **#R7 Single-centroid crawls every depth iteration; grid/full-harvest
+  crawl once at end** — inconsistent + wasted HTTP. Match single-centroid
+  to the grid/full-harvest shape (crawl once after loop breaks).
+- **#R8 `harvest_best.py` diverges from pipeline** — same 3-pass strategy
+  but no DB, no dedup, no crawl. Either delete (now that
+  `--strategy full-harvest` exists in `run_pipeline.py`) or move to
+  `scripts/experiments/` + document as offline-only.
+- **#R9 Crawler proxy = only proxy[0] from file** — 10 workers × 1 IP
+  across ~350 domains = fingerprint risk. Deferred until block signals
+  appear (per existing #22). Rotate sticky-per-host when the time comes:
+  `proxies[hash(host) % len(proxies)]`.
+- **#R10 Untracked cruft to clean before merge** —
+  `proxies_old.txt`, `query.txt`, `run_tests.sh`, `sql_add_columns2.sql`,
+  `test_output.json`, `test_query.txt`, `test_results.json`. Delete or
+  `.gitignore`.
 
 ### #12 — Export pushes empty-email rows to Sheets *(deferred by request)*
 
 `export_sheets.py:129` — no `Contact.email IS NOT NULL` filter, so
 phone-only placeholder contacts (`email = NULL`) get exported with a
 blank Email column. Left as-is per project decision.
+
+⚠ Reconcile inconsistency: `run_pipeline.get_exportable_contact_count()`
+does filter `Contact.email.isnot(None)`, but the actual export query in
+`export_new_leads()` matches now (post-Round 2 fix). Verify the count
+and export queries agree before next release.
 
 ### #14 — Dead imports in `create_tables.py`
 
@@ -102,6 +180,19 @@ Reasonable given we're crawling only shortlisted contact pages.
 ---
 
 ## Environment / operational
+
+### Python / venv conventions
+
+- Repo pins Python via `.python-version` = `3.12.9`.
+- Run Python commands inside `.venv`.
+- Canonical setup:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  ```
+- Tests and CLI entrypoints (`run_pipeline.py`, `run_zip_batch.py`) should
+  be run from activated `.venv`, not arbitrary system Python.
 
 ### Kamatera Reacher instance
 
@@ -161,11 +252,14 @@ everything.
 
 3. **`min_contacts` semantics** — total DB contacts vs new-this-run?
    Currently total, so re-running on a full DB never scrapes anything.
-   Probably wants "new this run".
+   Probably wants "new this run". Only affects `single-centroid`
+   strategy; `grid` and `full-harvest` don't loop on depth.
 
-4. **`max_depth=20`** — no evidence 20 is a rational upper bound. What
-   does depth=20 mean to the Go scraper (results count? radius?
-   Playwright pages loaded?). Needs research.
+4. **`max_depth=20`** — largely obsolete after 2026-07-20 experiment.
+   Fast-mode caps at ~19 results per invocation regardless of depth (see
+   `plans/scrape-strategy-experiments-2026-07-20.md`). Slow mode saturates
+   ~depth 10 (~110 leads). Grid mode uses depth 3 per cell. Flag retained
+   only for legacy `single-centroid` strategy compatibility.
 
 5. **Verifier exists but is not wired into `run_pipeline`** — deliberate
    as of now. `app/pipeline/verify_emails.py` is implemented and runnable
