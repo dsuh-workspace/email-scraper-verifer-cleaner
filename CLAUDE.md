@@ -95,22 +95,6 @@ auto-loaded into context — read it on demand).
 
 Ordered by priority. Findings not covered by 393a10c.
 
-- **#R0 🔴 `run_location_pipeline` NameError — pipeline broken**
-  (uncommitted, introduced by S1092 tuning-knobs mid-turn edit). Lines
-  ~116–119 of `run_pipeline.py` pass `concurrency=scraper_concurrency`,
-  `browser_pool_size=scraper_browser_pool_size`,
-  `pages_per_browser=scraper_pages_per_browser`,
-  `proxy_limit=scraper_proxy_limit` into `execute_scrape_and_ingest()`,
-  but those names are not function parameters and not module globals →
-  `NameError` on every legacy single-centroid run (all paths through
-  `run_zip_batch.py` + any `run_pipeline.py --strategy single-centroid`
-  invocation). Two fixes:
-  1. Add matching kwargs to `run_location_pipeline` signature + thread
-     them through from callers (`run_zip_batch.py`, plus `main()` +
-     `run_end_to_end_pipeline()` if the same knobs should exist there).
-  2. Or revert the four-line block until the tuning-knobs plan lands
-     end-to-end.
-  Blocks release. Do this before any of R1–R10.
 - **#R1 SPREADSHEET_ID=`mock` still tries Sheets first** — `export_sheets.py`
   always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
   "mock", fails auth, then falls through to CSV. Short-circuit when
@@ -140,10 +124,9 @@ Ordered by priority. Findings not covered by 393a10c.
 phone-only placeholder contacts (`email = NULL`) get exported with a
 blank Email column. Left as-is per project decision.
 
-⚠ Reconcile inconsistency: `run_pipeline.get_exportable_contact_count()`
-does filter `Contact.email.isnot(None)`, but the actual export query in
-`export_new_leads()` matches now (post-Round 2 fix). Verify the count
-and export queries agree before next release.
+`run_pipeline.get_exportable_contact_count()` and the export query were
+reconciled in a later fix; the remaining issue is the deliberate project
+decision to allow blank-email rows to export.
 
 ### #14 — Dead imports in `create_tables.py`
 
