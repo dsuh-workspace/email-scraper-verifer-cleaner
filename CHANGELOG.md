@@ -6,6 +6,49 @@ demand.
 
 ## Recently closed
 
+- ✅ **#R7 crawl-attempt ledger** (2026-07-29) — `harvest_emails_from_websites()`
+  no longer re-crawls businesses that previously yielded no email. Two new
+  columns on `businesses`: `last_crawled_at` (stamped on every attempt,
+  including ones that error) and `crawl_attempts` (count of *consecutive*
+  no-email attempts, reset to 0 on success so a site that starts publishing
+  an address isn't pinned at the give-up threshold). The pending set is a
+  three-way split — has-email / given-up / in-cooldown / crawl — and the log
+  line reports all four buckets. Tunable via `CRAWL_RETRY_AFTER_HOURS`
+  (default 720h; `0` and non-integers rejected back to the default, since a
+  zero-hour cooldown restores the original bug) and `CRAWL_MAX_ATTEMPTS`
+  (default 3; `0` legitimately means no cap). See CLAUDE.md
+  "Crawl-attempt ledger" for the full contract.
+  - Crawl errors deliberately count as spent attempts — a domain that
+    reliably times out would otherwise be retried forever, which is the
+    same failure mode the ledger exists to fix.
+  - `init_db()` gained `_apply_additive_columns()`: `create_all()` creates
+    missing tables but never alters existing ones, so an older DB file
+    would raise "no such column" on the first harvest. Idempotent,
+    additive-only. Verified against a copy of the live 95-row
+    `hvac_leads.db` — columns added, rows preserved, no-op on re-run.
+  - The crawl stays inside the depth loop. It has to: `--min-contacts`
+    counts new *exportable* contacts, exportability requires an email, and
+    an email requires the crawl — a loop gating on that count that doesn't
+    crawl each iteration never advances and burns all `max_depth`
+    iterations. The ledger makes staying in the loop cheap instead of
+    moving the crawl out.
+  - Tests: 14 new (28 → 42 in `tests/test_extract_emails.py`), including 7
+    that run `harvest_emails_from_websites()` against a real throwaway
+    SQLite file with the network stubbed. The regression guard for #R7 is
+    `test_second_harvest_skips_email_less_businesses`. Full suite: 166
+    passing under `.venv/bin/python -m pytest`.
+- ✅ **`Contact`/`ExportHistory` NameError in `_persist_emails_for_business`**
+  (2026-07-29) — **pre-existing live bug**, unrelated to #R7, found while
+  verifying it. Both names were imported only inside
+  `harvest_emails_from_websites()`; a function-local import does not enter a
+  sibling function's scope, so `_persist_emails_for_business()` raised
+  `NameError` on the **first crawl that actually found an email**. The
+  harvest's `except` clause logged it and re-raised, so every successful
+  crawl aborted the harvest. Fixed with a function-local import matching the
+  module's existing deferred-import convention (module-level `app.db` import
+  would fire `DATABASE_URL` validation on every worker import). Not caught
+  earlier because no test exercised the persist path against a real DB — the
+  new ledger tests do.
 - ✅ **Architecture/doc alignment** (2026-07-28) — follow-up pass after the
   2026-07-23 review, per project decisions of the same date:
   - **One vertical per run.** `_default_harvest_queries()` returns `None`
@@ -42,11 +85,12 @@ demand.
     verification is unwired (it runs via `--verify`). CLAUDE.md's
     "`HVAC/Plumbing` hardcoded" claim was stale — `run_scraper.py:220`
     has been scraper-category-first-with-query-fallback since `393a10c`.
-  - **#R7 re-scoped, still open.** The crawl cannot leave the depth loop:
-    exportability requires an email, which requires the crawl, so a loop
-    gating on new-exportable contacts must crawl each iteration. The real
-    waste is `extract_emails.py` re-crawling businesses that previously
-    yielded no email — needs a crawl-attempt ledger (schema change).
+  - **#R7 re-scoped** — the original "move the crawl out of the depth loop"
+    framing was wrong; the crawl cannot leave the loop (exportability
+    requires an email, which requires the crawl). Re-scoped to the real
+    waste — `extract_emails.py` re-crawling businesses that previously
+    yielded no email — and closed the next day by the crawl-attempt ledger
+    entry above.
   - **#R10 dropped** from the backlog — untracked working files are
     handled manually by the operator and are not tracked here.
 - ✅ **Review 2026-07-23 items #1–#15** (2026-07-28) — 15 findings from the

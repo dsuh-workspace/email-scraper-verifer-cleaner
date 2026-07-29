@@ -1,6 +1,6 @@
 # email-scraper-verifer-cleaner — Review Notes
 
-Living review + backlog. Updated 2026-07-28.
+Living review + backlog. Updated 2026-07-29.
 
 Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
 dedupes → crawls sites for emails → optionally verifies via self-hosted
@@ -130,6 +130,43 @@ reference).
 
 ---
 
+## Crawl-attempt ledger (review #R7, shipped 2026-07-29)
+
+`harvest_emails_from_websites()` builds its skip-set from contacts with a
+non-null email. Before the ledger, a business that was crawled and yielded
+*nothing* left no trace, so it was indistinguishable from one never
+crawled — re-fetched on every depth iteration and on every re-run against
+the same DB. Two columns on `businesses` fix that:
+
+| Column | Meaning |
+|---|---|
+| `last_crawled_at` | Stamped on **every** attempt — success, no-email, or exception. |
+| `crawl_attempts` | Count of *consecutive* no-email attempts. Reset to 0 the moment a crawl yields an email. |
+
+The pending set is now a three-way split in `extract_emails.py`: already
+has an email → done; `crawl_attempts >= max_attempts` → given up;
+`last_crawled_at` inside the cooldown → skip this round; else crawl. The
+log line reports all four buckets.
+
+Tuning (env, both optional):
+
+- `CRAWL_RETRY_AFTER_HOURS` — cooldown before retrying a domain that
+  yielded nothing. Default `720` (30 days): long enough that the depth
+  loop within one run never re-crawls, short enough that a site which
+  later publishes an address is picked up on a future run. `0` and
+  non-integers are **invalid** here and fall back to the default — a
+  zero-hour cooldown would restore the exact bug this prevents.
+- `CRAWL_MAX_ATTEMPTS` — give up after N consecutive no-email attempts.
+  Default `3`. `0` is valid and means no cap (cooldown still applies).
+
+Crawl errors count as spent attempts on purpose — a domain that reliably
+times out would otherwise be retried forever.
+
+To force a full re-crawl:
+`UPDATE businesses SET last_crawled_at = NULL, crawl_attempts = 0;`
+
+---
+
 Closed review items and shipped fixes now live in `CHANGELOG.md` (not
 auto-loaded into context — read it on demand).
 
@@ -137,18 +174,14 @@ auto-loaded into context — read it on demand).
 
 Ordered. Top item is the one to pick up first.
 
-1. **#R7 Kill the redundant re-crawl** (blocked on a schema decision — see
-   the entry below). Real cost is in `extract_emails.py`, not the depth
-   loop: businesses crawled with no email found are never recorded, so
-   every subsequent `harvest_emails_from_websites()` call re-crawls them.
-2. **#R6 Give `run_zip_batch.py` `--strategy` support** — metro-wide
+1. **#R6 Give `run_zip_batch.py` `--strategy` support** — metro-wide
    full-harvest via batch is the coverage play; without it the batch path
    is single-centroid-only.
-3. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
+2. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
    Sheets auth before falling back to CSV.
-4. **#R9 Sticky-per-host crawler proxy rotation** — deferred until block
+3. **#R9 Sticky-per-host crawler proxy rotation** — deferred until block
    signals appear. `proxies[hash(host) % len(proxies)]`.
-5. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
+4. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
 
 ## Still open (intentional deferrals)
 
@@ -163,26 +196,12 @@ Findings not covered by 393a10c.
 - **#R6 `run_zip_batch.py` still on legacy `run_location_pipeline`** —
   no `--strategy` support. Metro-wide full-harvest via batch is the real
   coverage play; without it, `run_zip_batch.py` = orphaned path.
-- **#R7 Redundant re-crawl of email-less businesses** *(open — original
-  framing was wrong)*. The original claim was "single-centroid crawls
-  every depth iteration; grid/full-harvest crawl once at end — move the
-  crawl out of the loop." **The crawl cannot move out of the loop**:
-  `--min-contacts` now means *new exportable contacts produced by this
-  run* (2026-07-28), and `get_exportable_contact_count()` filters
-  `Contact.email IS NOT NULL`, so a contact only becomes exportable after
-  the crawl finds its address. A loop that gates on that count must crawl
-  each iteration or the count never moves and every run burns
-  `max_depth` iterations.
-
-  The actual waste is in `extract_emails.py:277-322`:
-  `harvest_emails_from_websites()` builds `already_contacted` from
-  contacts *with a non-null email*, so a business that was crawled and
-  yielded nothing is indistinguishable from one never crawled — it gets
-  re-fetched on every call, in every depth iteration, and on every
-  re-run of the pipeline against the same DB. Fixing it needs a
-  crawl-attempt ledger (`businesses.crawled_at` / `crawl_attempts`, or a
-  `crawl_attempts` table) so the pending set can exclude
-  recently-attempted domains. That is a schema change, hence deferred.
+- **#R7 Redundant re-crawl of email-less businesses** — ✅ resolved
+  2026-07-29 via a crawl-attempt ledger. See the "Crawl-attempt ledger"
+  section below for the shipped behavior. Note the crawl still lives
+  *inside* the depth loop and has to: `--min-contacts` means new
+  exportable contacts, and exportability requires an email, which
+  requires the crawl. The ledger is what makes staying in the loop cheap.
 - **#R8 `harvest_best.py`** — ✅ resolved 2026-07-28 by moving to
   `scripts/experiments/harvest_best.py` and documenting it as
   offline-only (no DB, no dedupe, no crawl). Production equivalent is
@@ -259,7 +278,16 @@ Reasonable given we're crawling only shortlisted contact pages.
 
 ### DB migration for `processed_at` + new constraints
 
-If you have an existing SQLite `hvac_leads.db`:
+**Automatic, as of 2026-07-29:** `init_db()` now runs
+`_apply_additive_columns()` after `create_all()`, which `ALTER TABLE ... ADD
+COLUMN`s any missing entry in `_ADDITIVE_COLUMNS` — currently
+`businesses.last_crawled_at` and `businesses.crawl_attempts`. `create_all()`
+creates missing *tables* but never alters existing ones, so without this an
+older DB file would raise "no such column" on the first harvest. It is
+idempotent and additive-only; anything that drops, renames, or backfills
+still belongs in the manual SQL below.
+
+The rest is **manual**. If you have an existing SQLite `hvac_leads.db`:
 
 ```sql
 -- Add processed_at column
@@ -310,7 +338,8 @@ everything.
    depth loop, so re-running against a populated DB still scrapes.
    Single-centroid only — `grid` and `full-harvest` don't loop on depth
    and warn if the flag is passed. Note this forces the email crawl to
-   stay inside the depth loop (see #R7).
+   stay inside the depth loop — the crawl-attempt ledger (#R7) is what
+   keeps that affordable.
 
 4. **One vertical per run.** A run is "plumbing in San Jose" *or* "HVAC
    in San Jose", never both. `_default_harvest_queries()` returns `None`

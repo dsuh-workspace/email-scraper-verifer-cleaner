@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Set
 
 import requests
@@ -88,6 +89,21 @@ CONTACT_PATHS = ("", "/contact", "/contact-us", "/about", "/about-us", "/team")
 REQUEST_TIMEOUT_SEC = 7
 MAX_WORKERS = 10
 PER_HOST_DELAY_SEC = 0.75  # gap between requests hitting the same host
+
+# --- crawl-attempt ledger tuning (review #R7) ------------------------------
+# A crawl that finds no email leaves no trace in `contacts`, so without a
+# ledger the same email-less domains are re-fetched on every depth iteration
+# and every re-run. `businesses.last_crawled_at` / `.crawl_attempts` record
+# the attempt; these two knobs decide when it's worth trying again.
+#
+# CRAWL_RETRY_AFTER_HOURS: cooldown before re-attempting a domain that
+#   yielded nothing. Defaults to 720h (30 days) — long enough that the
+#   depth loop within one run never re-crawls, short enough that a site
+#   which later publishes an address gets picked up on a future run.
+# CRAWL_MAX_ATTEMPTS: give up on a domain after this many consecutive
+#   no-email attempts. 0 disables the cap (cooldown still applies).
+DEFAULT_CRAWL_RETRY_AFTER_HOURS = 720
+DEFAULT_CRAWL_MAX_ATTEMPTS = 3
 ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 
 _HEADERS = {
@@ -240,6 +256,15 @@ def _persist_emails_for_business(session, biz, emails: List[str]) -> int:
     if not emails:
         return 0
 
+    # Imported here, not at module scope, to match the deferred-import
+    # convention the rest of this module uses (importing app.db at module
+    # level fires DATABASE_URL validation on every worker import).
+    # These were previously only imported inside
+    # harvest_emails_from_websites(), which does not put them in this
+    # function's scope — so this raised NameError on the first crawl that
+    # actually found an email.
+    from app.db.create_tables import Contact, ExportHistory
+
     added = 0
     # Load existing contacts for this business ONCE (batch, not N+1).
     existing = (
@@ -274,6 +299,61 @@ def _persist_emails_for_business(session, biz, emails: List[str]) -> int:
     return added
 
 
+def _crawl_retry_policy() -> tuple[int, int]:
+    """Resolve (retry_after_hours, max_attempts) from env, with defaults.
+
+    Invalid or negative values fall back to the defaults rather than
+    disabling the ledger — a typo in a cron env shouldn't silently restore
+    the re-crawl-everything behavior this exists to prevent. `0` for
+    max_attempts is a legitimate value meaning "no give-up cap".
+    """
+    def _int_env(name: str, default: int, allow_zero: bool) -> int:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning("%s=%r is not an integer; using %d.", name, raw, default)
+            return default
+        if value < 0 or (value == 0 and not allow_zero):
+            logger.warning("%s=%d is out of range; using %d.", name, value, default)
+            return default
+        return value
+
+    return (
+        _int_env("CRAWL_RETRY_AFTER_HOURS", DEFAULT_CRAWL_RETRY_AFTER_HOURS,
+                 allow_zero=False),
+        _int_env("CRAWL_MAX_ATTEMPTS", DEFAULT_CRAWL_MAX_ATTEMPTS,
+                 allow_zero=True),
+    )
+
+
+def _is_within_cooldown(last_crawled_at, cutoff: datetime) -> bool:
+    """True if `last_crawled_at` is recent enough to skip this business.
+
+    SQLite hands back naive datetimes even for values written as aware, so
+    normalize before comparing — a naive/aware comparison raises TypeError.
+    A null timestamp means never crawled, which is never in cooldown.
+    """
+    if last_crawled_at is None:
+        return False
+    if last_crawled_at.tzinfo is None:
+        last_crawled_at = last_crawled_at.replace(tzinfo=timezone.utc)
+    return last_crawled_at > cutoff
+
+
+def _record_crawl_attempt(biz, attempted_at: datetime, *, found_email: bool) -> None:
+    """Stamp the ledger for one crawl attempt.
+
+    Finding an email resets the counter: the field tracks *consecutive*
+    no-email attempts, so a site that starts publishing an address isn't
+    left pinned at the give-up threshold by its past misses.
+    """
+    biz.last_crawled_at = attempted_at
+    biz.crawl_attempts = 0 if found_email else (biz.crawl_attempts or 0) + 1
+
+
 def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
     """
     Fan out across all businesses that have a website but no email contact yet.
@@ -304,14 +384,39 @@ def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
             .filter(Business.website.isnot(None))
             .all()
         )
-        pending = [b for b in businesses if b.id not in already_contacted]
+
+        # Three-way split (review #R7). Businesses that already have an email
+        # are done. The rest are only worth crawling if the ledger says we
+        # haven't just tried them and haven't given up on them — otherwise
+        # every depth iteration re-fetches the same email-less domains.
+        retry_after_hours, max_attempts = _crawl_retry_policy()
+        cooldown_cutoff = datetime.now(timezone.utc) - timedelta(hours=retry_after_hours)
+
+        pending, cooling_down, exhausted = [], 0, 0
+        for b in businesses:
+            if b.id in already_contacted:
+                continue
+            if max_attempts and (b.crawl_attempts or 0) >= max_attempts:
+                exhausted += 1
+                continue
+            if _is_within_cooldown(b.last_crawled_at, cooldown_cutoff):
+                cooling_down += 1
+                continue
+            pending.append(b)
+
         logger.info(
             "Checking %d businesses for website email extraction "
-            "(%d already have emails).",
-            len(pending), len(businesses) - len(pending),
+            "(%d already have emails, %d in crawl cooldown, %d past %d "
+            "no-email attempts).",
+            len(pending),
+            len(businesses) - len(pending) - cooling_down - exhausted,
+            cooling_down,
+            exhausted,
+            max_attempts,
         )
 
         emails_harvested = 0
+        attempted_at = datetime.now(timezone.utc)
 
         # Fan out crawls in worker threads. Persistence happens serially in
         # this thread as results come back.
@@ -327,12 +432,18 @@ def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
                     emails = fut.result()
                 except Exception as e:
                     logger.error(f"  -> Crawl error for {biz.website}: {e}")
+                    # Still a spent attempt — a domain that reliably errors
+                    # would otherwise be retried on every iteration forever,
+                    # which is the same bug the ledger exists to fix.
+                    _record_crawl_attempt(biz, attempted_at, found_email=False)
                     continue
 
                 if emails:
                     logger.info(f"[{i}/{len(pending)}] {biz.website} -> {', '.join(emails)}")
                     added = _persist_emails_for_business(session, biz, emails)
                     emails_harvested += added
+
+                _record_crawl_attempt(biz, attempted_at, found_email=bool(emails))
 
                 # Batch commit every 25 businesses so a crash doesn't lose it all.
                 if i % 25 == 0:

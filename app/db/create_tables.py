@@ -24,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     UniqueConstraint,
+    inspect,
     text,
     Float
 )
@@ -103,6 +104,26 @@ class Business(Base):
     description = Column(Text)
     place_id = Column(Text)
 
+    # --- crawl-attempt ledger (review #R7) ---------------------------------
+    # Without these, a business we crawled that yielded no email is
+    # indistinguishable from one never crawled: harvest_emails_from_websites()
+    # builds its skip-set from contacts with a non-null email, so email-less
+    # sites got re-fetched on every depth iteration and every re-run.
+    #
+    # last_crawled_at: stamped on every crawl attempt, success or not.
+    # crawl_attempts:  count of *consecutive* attempts that produced no
+    #   email. Reset to 0 the moment a crawl yields one, so a site that
+    #   starts publishing an address isn't stuck at the give-up threshold.
+    #
+    # Deliberately unindexed: harvest_emails_from_websites() loads the
+    # website-having businesses with one SELECT and splits them in Python
+    # (matching the existing `.all()` + comprehension shape), so no query
+    # filters on these. An index here would only cost write time on every
+    # stamp. It would also silently diverge between a fresh DB and a
+    # migrated one, since create_all() adds indexes to new tables only.
+    last_crawled_at = Column(TIMESTAMP)
+    crawl_attempts = Column(Integer, nullable=False, server_default=text("0"))
+
 
 class Contact(Base):
     """Individual person at a Business (owner, manager, generic info@, etc.)."""
@@ -169,15 +190,48 @@ class ExportHistory(Base):
 # ==========================================
 
 
+# Columns added after the initial schema shipped. `create_all()` creates
+# missing *tables* but never alters an existing one, so a DB created before
+# these columns existed would raise "no such column" on the first query
+# that mentions them. Each entry is (table, column, DDL type clause) and is
+# applied only when absent, so this stays idempotent and cheap.
+_ADDITIVE_COLUMNS = (
+    ("businesses", "last_crawled_at", "TIMESTAMP"),
+    ("businesses", "crawl_attempts", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _apply_additive_columns() -> None:
+    """Add post-hoc columns that an older DB file predates.
+
+    Deliberately narrow: additive, nullable-or-defaulted columns only. This
+    is not a migration framework — anything that drops, renames, or
+    backfills still belongs in the documented SQL in CLAUDE.md.
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table, column, ddl_type in _ADDITIVE_COLUMNS:
+        if table not in existing_tables:
+            continue  # create_all() just built it with the column present.
+        if column in {c["name"] for c in inspector.get_columns(table)}:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+        logger.info("Added missing column %s.%s (%s).", table, column, ddl_type)
+
+
 def init_db() -> None:
     """
-    Create all tables if they don't exist. Idempotent.
+    Create all tables if they don't exist, then add any missing additive
+    columns. Idempotent.
 
     Called once from run_pipeline.py at startup. Do NOT invoke at
     module-import time — that fires every time a worker imports the
     models and can crash if DATABASE_URL is misconfigured.
     """
     Base.metadata.create_all(engine)
+    _apply_additive_columns()
     logger.info("Database tables created (or already existed).")
 if __name__ == "__main__":
     # Allow `python -m app.db.create_tables` to bootstrap the schema.

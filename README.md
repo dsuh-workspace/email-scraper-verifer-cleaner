@@ -112,6 +112,12 @@ CRAWLER_PROXY_FILE=proxies.txt
 # CRAWLER_HTTP_PROXY=http://proxy-http.example.com:8080
 # CRAWLER_HTTPS_PROXY=https://proxy-https.example.com:8443
 
+# Optional crawl-attempt ledger tuning (defaults shown)
+# CRAWL_RETRY_AFTER_HOURS=720   # cooldown before re-crawling a site that
+#                               # yielded no email (30 days)
+# CRAWL_MAX_ATTEMPTS=3          # give up after N consecutive no-email
+#                               # attempts; 0 = no cap
+
 # Kamatera deploy credentials (only needed if you re-provision the
 # verifier server — the verify_emails.py module itself does NOT need them)
 KAMATERA_ACCESS_KEY=...
@@ -289,6 +295,20 @@ Proxy notes:
 - Proxy file lines may be full URLs (`http://user:pass@host:port`) or compact Webshare-style lines (`host:port:user:password`).
 - Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h` when provided as full proxy URLs. Compact proxy-file lines normalize to `http://...` URLs.
 
+Crawl-attempt notes:
+- Every crawl stamps `businesses.last_crawled_at` and bumps
+  `businesses.crawl_attempts` — whether or not an email was found, and
+  including attempts that error out.
+- A site that yields no email is skipped for `CRAWL_RETRY_AFTER_HOURS`
+  (default 720 = 30 days), then retried. After `CRAWL_MAX_ATTEMPTS`
+  (default 3) consecutive no-email attempts it is skipped permanently.
+  Set `CRAWL_MAX_ATTEMPTS=0` to keep retrying forever on the cooldown.
+- Finding an email resets `crawl_attempts` to 0, so a site that starts
+  publishing an address isn't pinned at the give-up threshold.
+- This is what stops the depth loop from re-fetching the same email-less
+  domains on every iteration. To force a full re-crawl of a DB, clear the
+  ledger: `UPDATE businesses SET last_crawled_at = NULL, crawl_attempts = 0;`
+
 ---
 
 ## Verification
@@ -413,7 +433,9 @@ are intentionally not covered here.
 
 - **`scrape_runs`** — one row per scraper invocation.
 - **`raw_leads`** — scraper output, tagged `processed_at` after promotion.
-- **`businesses`** — canonical deduped businesses, `domain` UNIQUE.
+- **`businesses`** — canonical deduped businesses, `domain` UNIQUE. Also
+  carries the crawl-attempt ledger (`last_crawled_at`, `crawl_attempts`)
+  the email harvester uses to avoid re-crawling sites that yielded nothing.
 - **`contacts`** — one row per person/inbox; `(business_id, email)` UNIQUE.
 - **`email_verifications`** — Reacher results, one per contact.
 - **`export_history`** — every (`contact_id`, `destination`) push, with `exported_at` timestamp.
