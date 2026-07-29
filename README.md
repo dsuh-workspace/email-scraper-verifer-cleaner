@@ -16,13 +16,14 @@ Clean + Normalize + Dedupe (domain, name+phone)
         ↓
 Email Harvest (crawl /contact, /about, /team; regex extract)
         ↓
-Email Verify (Reacher on Kamatera)   [optional, wire in verify_contacts_emails]
+Email Verify (Reacher on Kamatera)   [opt-in: --verify]
         ↓
 Google Sheets / local CSV export (with export-history dedupe)
 ```
 
-The verify step is currently **not** called from `run_pipeline.py`. Wire it
-in explicitly when you want it — see [Verification](#verification) below.
+The verify step is wired into `run_pipeline.py` and runs after the email
+crawl, before export — opt in with `--verify`, and gate export on score
+with `--min-score N`. See [Verification](#verification) below.
 
 ---
 
@@ -144,8 +145,8 @@ python run_pipeline.py \
 `run_location_pipeline(...)` for each ZIP.
 
 Defaults:
-- `--min-contacts 500`
-- `--max-depth 20`
+- `--min-contacts 500` (applied when the flag is omitted; single-centroid only)
+- `--max-depth 20` (applied when the flag is omitted; single-centroid only)
 - scraper concurrency/browser pool use upstream defaults unless overridden
 - scraper pages per browser defaults to current wrapper value `2`
 - scraper forwards first `3` validated proxies by default unless overridden
@@ -172,8 +173,12 @@ python run_pipeline.py \
   --max-depth 9
 ```
 
-`run_pipeline.py` keeps legacy semantics: `--min-contacts` is total DB
-contacts, not new contacts from current run.
+`--min-contacts` counts **new exportable contacts produced by this run**
+(contacts with an email that have no `export_history` row for the
+destination yet), not cumulative DB contacts — so re-running against a
+populated DB still scrapes. Both flags are **single-centroid only**;
+grid and full-harvest don't loop on depth and warn if you pass either.
+Both must be `> 0` — a non-positive value exits with status 2.
 
 ### Grid-mode scraping (recommended for coverage)
 
@@ -197,8 +202,8 @@ mxschmitt/playwright-go v0.6100.0 version-mismatch workaround.
 Optional: `--bbox min_lat,min_lon,max_lat,max_lon` overrides the
 Nominatim-derived bbox when you want a specific region.
 
-Grid mode ignores `--max-depth` (single scrape) and typically saturates
-before `--min-contacts`.
+Grid mode ignores both `--max-depth` (single scrape at depth 3 per cell)
+and `--min-contacts`; passing either logs a warning.
 
 ### Full-harvest strategy (max coverage)
 
@@ -264,6 +269,10 @@ Batch semantics:
 - stops each zip on target reached, `--max-depth`, or stale iterations
 - exports once at batch end
 
+`run_pipeline.py --strategy single-centroid` shares this same depth loop
+(`run_location_pipeline`), so its `--min-contacts` means the same thing as
+`--target-new-exportable` here.
+
 The scraper depth starts at 1 and grows by 2 each iteration up to
 `--max-depth`. The location is geocoded **once** at pipeline start and passed
 into every subsequent scrape iteration — Nominatim ToS friendly.
@@ -313,10 +322,21 @@ The old BillionVerify-based implementation is archived at
 `app/pipeline/verify_emails_ARCHIVE.py` — retained for reference, not
 imported anywhere.
 
-To wire verification into the main pipeline, import
-`verify_contacts_emails` from `app.pipeline.verify_emails` in
-`run_pipeline.py` and call it between `harvest_emails_from_websites()`
-and `export_new_leads()`.
+Verification is already wired into the main pipeline — `run_pipeline.py
+--verify` calls `verify_contacts_emails()` between
+`harvest_emails_from_websites()` and `export_new_leads()`, for all three
+strategies. Add `--min-score N` to drop contacts below a score from the
+export:
+
+```bash
+python run_pipeline.py --query "Plumbing" --location "San Jose, CA" \
+  --verify --min-score 50
+```
+
+Verifier failures are logged as warnings and the pipeline continues. An
+unreachable Reacher instance scores every contact `unknown` (25), so
+`--min-score 50` against a dead verifier exports nothing — check the log
+for verifier warnings before concluding the harvest was empty.
 
 ---
 

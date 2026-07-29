@@ -1,4 +1,10 @@
-"""Best-strategy harvester for a target city.
+"""Best-strategy harvester for a target city. OFFLINE / EXPERIMENTAL.
+
+Superseded for production use by `run_pipeline.py --strategy full-harvest`,
+which runs the same three passes but also writes to the DB, dedupes,
+crawls sites for emails, optionally verifies, and exports. This script
+writes a deduped JSONL and stops there — keep it for one-off scrape
+experiments where you want raw scraper output without touching the DB.
 
 Runs three complementary Google Maps scrape passes with NO PROXY and
 merges into one deduped JSONL. Meant to be run once per (city × industry).
@@ -16,7 +22,7 @@ Empirical result for "Plumbing in San Jose, CA":
     UNION: 504 unique businesses in ~18 min (of which 352 have websites)
 
 Usage (from repo root, with venv activated):
-    python scripts/harvest_best.py \\
+    python scripts/experiments/harvest_best.py \\
       --industry "Plumbing" \\
       --bbox "37.20,-121.99,37.44,-121.75" \\
       --centroid "37.336,-121.891" \\
@@ -33,10 +39,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# parents[2] = repo root (this file lives at scripts/experiments/).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.scrape_experiment import scrape
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _slug(s: str) -> str:

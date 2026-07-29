@@ -10,6 +10,7 @@ Stages:
 """
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 
@@ -27,6 +28,12 @@ from app.scraper.run_scraper import execute_scrape_and_ingest, geocode_location
 logger = get_logger(__name__)
 Session = sessionmaker(bind=engine)
 LEGACY_EXPORT_DESTINATION = "local_csv_leads"
+
+# Single-centroid depth-loop bounds. Only that strategy reads them; grid and
+# full-harvest run fixed per-pass depths. Kept as named constants so "did the
+# user pass this flag?" is never inferred from comparing against a literal.
+DEFAULT_MIN_CONTACTS = 500
+DEFAULT_MAX_DEPTH = 20
 
 # Default query variants for full-harvest multi-query pass. Chosen from the
 # 2026-07-20 SJ experiment — "Leak repair" alone added 50 unique businesses
@@ -55,30 +62,69 @@ DEFAULT_HVAC_HARVEST_QUERIES = (
     "HVAC contractor",
 )
 
-_PLUMBING_KEYWORDS = ("plumb", "drain", "sewer", "leak", "water heater")
-_HVAC_KEYWORDS = ("hvac", "heating", "cooling", "furnace", "air condition", "heat pump")
+# Industry keyword patterns. Regex rather than plain substrings because the
+# short HVAC forms need word boundaries — bare "ac" as a substring matches
+# "backflow", "vacuum", "surface", etc. "leak" is deliberately absent from the
+# plumbing set: "AC leak repair" / "refrigerant leak" are HVAC jobs, so the
+# word alone can't decide an industry (see review 2026-07-23 #2).
+_PLUMBING_PATTERNS = (
+    r"plumb",
+    r"drain",
+    r"sewer",
+    r"septic",
+    r"water heater",
+    r"\brooter\b",
+    r"repipe",
+)
+_HVAC_PATTERNS = (
+    r"hvac",
+    r"heating",
+    r"cooling",
+    r"furnace",
+    r"air condition",
+    r"heat pump",
+    r"boiler",
+    r"refrigeration",
+    r"mini.?split",
+    r"ductwork",
+    r"\ba/?c\b",
+)
+_PLUMBING_RE = re.compile("|".join(_PLUMBING_PATTERNS))
+_HVAC_RE = re.compile("|".join(_HVAC_PATTERNS))
 
-
-def _default_harvest_queries(query: str) -> tuple[str, ...]:
-    """Pick default multi-query set from `query`.
+def _default_harvest_queries(query: str) -> tuple[str, ...] | None:
+    """Pick the built-in multi-query set matching `query`'s vertical.
 
     Plumbing-ish → DEFAULT_HARVEST_QUERIES.
     HVAC-ish     → DEFAULT_HVAC_HARVEST_QUERIES.
-    Anything else → single-element `(query,)` + warning, so full-harvest
-    still runs but doesn't silently apply plumbing bias.
+    Neither, or  → None, leaving the caller to decide how loud to be.
+    both at once
+
+    One vertical per run is the operating model: a run is "plumbing in San
+    Jose" or "HVAC in San Jose", never both, so a query naming both is
+    ambiguous rather than a request for a double sweep. Returning None for
+    it keeps either vertical's set from silently shadowing the other (which
+    is what a first-match-wins chain did) and pushes the choice back to the
+    caller.
+
+    Pure lookup: no logging, so the caller that knows the context (which
+    pass, whether that pass will even run) owns the user-facing message.
+
+    Raises ValueError on a blank query — a multi-query pass built from an
+    empty string would scrape garbage and ingest it as real leads.
     """
-    q = (query or "").lower()
-    if any(k in q for k in _PLUMBING_KEYWORDS):
+    q = (query or "").strip().lower()
+    if not q:
+        raise ValueError("query must be a non-empty string")
+    plumbing = _PLUMBING_RE.search(q) is not None
+    hvac = _HVAC_RE.search(q) is not None
+    if plumbing and hvac:
+        return None
+    if plumbing:
         return DEFAULT_HARVEST_QUERIES
-    if any(k in q for k in _HVAC_KEYWORDS):
+    if hvac:
         return DEFAULT_HVAC_HARVEST_QUERIES
-    logger.warning(
-        "No built-in harvest query set for %r; multi-query pass will run "
-        "with only the base query. Supply --queries \"q1,q2,...\" for "
-        "richer coverage.",
-        query,
-    )
-    return (query,)
+    return None
 
 
 @dataclass(frozen=True)
@@ -134,9 +180,21 @@ def run_location_pipeline(
     scraper_pages_per_browser: int | None = None,
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> LocationRunMetrics:
-    """Run scrape/process/harvest loop for one location and return metrics."""
-    lat, lon, _bbox = geocode_location(location)
+    """Run scrape/process/harvest loop for one location and return metrics.
+
+    `target_new_exportable` counts contacts this run made newly exportable —
+    not cumulative DB contacts — so re-running against a populated DB still
+    scrapes. That requires the email crawl inside the loop: a contact only
+    becomes exportable once the crawl finds its address (see CLAUDE.md #R7).
+
+    Pass `lat`/`lon` to reuse a centroid the caller already geocoded; both
+    omitted means geocode here (one Nominatim call either way).
+    """
+    if lat is None or lon is None:
+        lat, lon, _bbox = geocode_location(location)
     if lat is None or lon is None:
         logger.warning("Could not geocode %r. Scraper will retry per iteration.", location)
 
@@ -235,7 +293,7 @@ def run_location_pipeline(
 
 
 
-def parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run end-to-end lead generation pipeline."
     )
@@ -243,20 +301,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--location", required=True, help="Location string for Google Maps search"
     )
+    # --min-contacts / --max-depth default to None rather than their effective
+    # values so "user passed the flag" is knowable; run_end_to_end_pipeline
+    # resolves None to DEFAULT_MIN_CONTACTS / DEFAULT_MAX_DEPTH.
     parser.add_argument(
         "--min-contacts",
         type=int,
-        default=500,
+        default=None,
         help=(
-            "Stop once DB has at least this many contacts. "
-            "single-centroid strategy only; ignored by grid/full-harvest."
+            f"Stop once THIS RUN has produced at least this many new "
+            f"exportable contacts (default {DEFAULT_MIN_CONTACTS}). Counts "
+            f"contacts with an email that are not yet in export_history for "
+            f"the destination — not cumulative DB contacts, so re-running "
+            f"against a populated DB still scrapes. Must be > 0. "
+            f"single-centroid strategy only; ignored by grid/full-harvest."
         ),
     )
     parser.add_argument(
         "--max-depth",
         type=int,
-        default=20,
-        help="Maximum scraper depth before stopping (single-centroid mode only)",
+        default=None,
+        help=(
+            f"Maximum scraper depth before stopping (default "
+            f"{DEFAULT_MAX_DEPTH}). Must be > 0. single-centroid strategy "
+            f"only; ignored by grid/full-harvest, which run fixed per-pass "
+            f"depths."
+        ),
     )
     parser.add_argument(
         "--grid",
@@ -314,7 +384,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated query variants for the multi-query pass "
-            "(full-harvest strategy only). Defaults to 8 plumbing variants."
+            "(full-harvest strategy only). Defaults to the 8-variant set matching "
+"--query's vertical (plumbing or HVAC). Required when --query names "
+"neither vertical, or names both — one vertical per run."
         ),
     )
     parser.add_argument(
@@ -372,12 +444,17 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "Only export contacts whose latest EmailVerification.score is >= N. "
-            "0 (default) exports everything. Reacher scoring: safe=100, "
-            "risky=50, unknown=25, invalid=0. Contacts with no verification "
+            "0 (default) exports everything. Reacher scoring (see "
+            "_SCORE_BY_STATUS in app/pipeline/verify_emails.py): safe=95, "
+            "risky=50, unknown=25, invalid=10. Contacts with no verification "
             "row are treated as score=0 and skipped when min-score > 0."
         ),
     )
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return _build_parser().parse_args()
 
 
 
@@ -417,8 +494,8 @@ def _load_zip_csv(path: str) -> list[dict[str, str]]:
 def run_end_to_end_pipeline(
     query: str,
     location: str,
-    min_contacts: int = 500,
-    max_depth: int = 20,
+    min_contacts: int | None = None,
+    max_depth: int | None = None,
     use_grid: bool = False,
     cell_km: float = 2.0,
     bbox: tuple[float, float, float, float] | None = None,
@@ -446,16 +523,24 @@ def run_end_to_end_pipeline(
     - full-harvest: grid + multi-query slow at centroid + optional fast
       ZIP top-up. Empirically 39% more coverage than grid alone
       (SJ 2026-07-20: grid=362, +multi-query=473, +fast-ZIP=504).
+
+    `min_contacts` / `max_depth` gate the single-centroid depth loop only;
+    grid and full-harvest ignore them, so non-single-centroid callers should
+    pass None. None falls back to DEFAULT_MIN_CONTACTS / DEFAULT_MAX_DEPTH.
+
+    `queries` overrides the full-harvest Pass 2 variant list. None (not an
+    empty tuple) means "derive from the query's industry".
     """
     setup_logging()
 
     logger.info("=" * 60)
     logger.info("STARTING END-TO-END LEAD GENERATION PIPELINE")
     logger.info(
-        "query=%r location=%r min_contacts=%d strategy=%s",
+        "query=%r location=%r min_contacts=%s strategy=%s",
         query,
         location,
-        min_contacts,
+        # None = not applicable to this strategy, not "zero".
+        "n/a" if min_contacts is None else min_contacts,
         strategy,
     )
     logger.info("=" * 60)
@@ -511,7 +596,17 @@ def run_end_to_end_pipeline(
                     f"full-harvest requires a bounding box for the grid pass. "
                     f"Nominatim returned none for {location!r}; supply --bbox."
                 )
-            query_variants = list(queries or _default_harvest_queries(query))
+            # `queries is None` (not falsy) means "derive from the query's
+            # industry"; an explicit empty tuple is a caller bug, so reject it
+            # before spending Pass 1 wall time on it.
+            if queries is not None and not queries:
+                raise ValueError(
+                    "queries must be None (derive from industry) or a "
+                    "non-empty sequence of query variants"
+                )
+            # Pass 2's variant list is resolved inside the Pass 2 guard below,
+            # so an unknown industry doesn't warn about a pass that never runs.
+            pass2_degraded = False
 
             # Pass 1 — grid over bbox (single query, JS mode, depth 3).
             logger.info("--- Full-harvest PASS 1: grid (bbox=%s cell_km=%.2f) ---",
@@ -532,9 +627,29 @@ def run_end_to_end_pipeline(
             process_and_deduplicate_leads()
 
             # Pass 2 — multi-query slow at centroid (browser reuses context
-            # across the 8 queries; Am beats N-separate As runs on wall time).
+            # across the variants; Am beats N-separate As runs on wall time).
             if lat is not None and lon is not None:
-                logger.info("--- Full-harvest PASS 2: multi-query slow at centroid ---")
+                query_variants = queries
+                if query_variants is None:
+                    query_variants = _default_harvest_queries(query)
+                    if query_variants is None:
+                        pass2_degraded = True
+                        query_variants = (query,)
+                        logger.warning(
+                            "No built-in harvest query set for %r; PASS 2 runs "
+                            "the base query alone, so this full-harvest yields "
+                            "roughly Pass-1-only coverage at full wall-clock "
+                            "cost. Supply --queries \"q1,q2,...\" for the full "
+                            "multi-query sweep.",
+                            query,
+                        )
+                query_variants = list(query_variants)
+                logger.info(
+                    "--- Full-harvest PASS 2: multi-query slow at centroid "
+                    "(%d quer%s) ---",
+                    len(query_variants),
+                    "y" if len(query_variants) == 1 else "ies",
+                )
                 execute_scrape_and_ingest(
                     query,
                     location,
@@ -565,7 +680,10 @@ def run_end_to_end_pipeline(
                         logger.warning("  [%d/%d zip %s] geocode failed, skipping.",
                                        i, len(zip_rows), row["zip"])
                         continue
-                    logger.info("  [%d/%d] scraping %s", i, len(zip_rows), zip_loc)
+                    # Same "[i/N zip Z] ..." prefix as the geocode-failure line
+                    # above, so one log-parser regex covers both outcomes.
+                    logger.info("  [%d/%d zip %s] scraping %s",
+                                i, len(zip_rows), row["zip"], zip_loc)
                     execute_scrape_and_ingest(
                         query,
                         zip_loc,
@@ -587,39 +705,48 @@ def run_end_to_end_pipeline(
             harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
             current_contacts = get_contact_count()
             logger.info(
-                "Full-harvest complete. Contacts in DB: %d.",
+                "Full-harvest complete. Contacts in DB: %d.%s",
                 current_contacts,
+                (
+                    " NOTE: PASS 2 ran degraded (base query only) — expect "
+                    "roughly Pass-1-only coverage."
+                    if pass2_degraded
+                    else ""
+                ),
             )
         else:
-            # single-centroid legacy
-            depth = 1
-            while True:
-                logger.info("--- Running scraping loop (depth=%d) ---", depth)
-                execute_scrape_and_ingest(
-                    query, location, lat=lat, lon=lon, depth=depth,
-                    disable_proxy=disable_scraper_proxy,
-                    concurrency=scraper_concurrency,
-                    browser_pool_size=scraper_browser_pool_size,
-                    pages_per_browser=scraper_pages_per_browser,
-                    proxy_limit=scraper_proxy_limit,
-                    disable_page_reuse=scraper_disable_page_reuse,
-                )
-                process_and_deduplicate_leads()
-                harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
-
-                current_contacts = get_contact_count()
-                logger.info("Current contacts in DB: %d / %d", current_contacts, min_contacts)
-
-                if current_contacts >= min_contacts:
-                    logger.info("Reached target of %d contacts.", min_contacts)
-                    break
-
-                if depth >= max_depth:
-                    logger.warning("Reached max scraper depth (%d). Stopping.", max_depth)
-                    break
-
-                depth += 2
-                logger.info("Increasing scraper depth to %d.", depth)
+            # single-centroid legacy — the only strategy that reads
+            # min_contacts / max_depth. Delegates to run_location_pipeline so
+            # there is one depth-loop implementation, shared with
+            # run_zip_batch.py, and one definition of "enough contacts".
+            contact_target = (
+                DEFAULT_MIN_CONTACTS if min_contacts is None else min_contacts
+            )
+            depth_limit = DEFAULT_MAX_DEPTH if max_depth is None else max_depth
+            metrics = run_location_pipeline(
+                query=query,
+                location=location,
+                max_depth=depth_limit,
+                target_new_exportable=contact_target,
+                disable_scraper_proxy=disable_scraper_proxy,
+                disable_crawler_proxy=disable_crawler_proxy,
+                scraper_concurrency=scraper_concurrency,
+                scraper_browser_pool_size=scraper_browser_pool_size,
+                scraper_pages_per_browser=scraper_pages_per_browser,
+                scraper_proxy_limit=scraper_proxy_limit,
+                scraper_disable_page_reuse=scraper_disable_page_reuse,
+                # Centroid already resolved above — don't geocode twice.
+                lat=lat,
+                lon=lon,
+            )
+            logger.info(
+                "Single-centroid complete. Depths run: %s. New exportable "
+                "contacts: %d (target %d). Contacts in DB: %d.",
+                ", ".join(str(d) for d in metrics.depths_run),
+                metrics.new_exportable_contacts,
+                contact_target,
+                metrics.total_contacts,
+            )
 
         if verify:
             logger.info("--- Verifying harvested emails via Reacher ---")
@@ -650,8 +777,68 @@ def _resolve_strategy(args: argparse.Namespace) -> str:
     return "single-centroid"
 
 
+def _validate_positive_counts(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    """Reject non-positive values for the count/depth flags (review #16).
+
+    Both default to None ("flag not passed"), so only an explicitly supplied
+    value is checked. A `--min-contacts 0` target is met before the first
+    scrape; a `--max-depth 0` loop can't run an iteration at all.
+    """
+    for flag, value in (
+        ("--min-contacts", args.min_contacts),
+        ("--max-depth", args.max_depth),
+    ):
+        if value is not None and value <= 0:
+            parser.error(f"{flag} must be > 0 (got {value}).")
+
+
+def _resolve_query_variants(
+    args: argparse.Namespace,
+    strategy: str,
+    parser: argparse.ArgumentParser,
+) -> tuple[str, ...] | None:
+    """Validate flag/strategy combinations and resolve --queries.
+
+    Flags that change *what gets scraped* hard-error when the selected
+    strategy would drop them — a warning that scrolls past in cron output is
+    how users end up trusting a harvest that never ran what they asked for.
+    Flags that only cap a loop (--min-contacts/--max-depth) stay warnings.
+    """
+    if args.queries and strategy != "full-harvest":
+        parser.error(
+            f"--queries only applies to --strategy full-harvest (got "
+            f"{strategy}); drop the flag or switch strategy."
+        )
+
+    query_variants: tuple[str, ...] | None = None
+    if args.queries:
+        query_variants = tuple(q.strip() for q in args.queries.split(",") if q.strip())
+        if not query_variants:
+            parser.error("--queries contained no non-empty query variants.")
+
+    # Full-harvest's coverage edge over grid is Pass 2's multi-query sweep. If
+    # we can't derive a variant set and the user didn't supply one, that pass
+    # degenerates to the base query — fail now rather than burn full-harvest
+    # wall time for grid-level results.
+    if query_variants is None and strategy == "full-harvest":
+        if _default_harvest_queries(args.query) is None:
+            parser.error(
+                f"no built-in harvest query set for --query {args.query!r} "
+                f"(unrecognized vertical, or it names both plumbing and HVAC "
+                f"— run one vertical per run). full-harvest PASS 2 would run "
+                f"the base query alone and yield roughly grid-only coverage. "
+                f'Pass --queries "variant1,variant2,..." to define the sweep.'
+            )
+
+    return query_variants
+
+
 def main() -> None:
-    args = parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    _validate_positive_counts(args, parser)
     bbox = _parse_bbox(args.bbox) if args.bbox else None
     strategy = _resolve_strategy(args)
 
@@ -659,32 +846,36 @@ def main() -> None:
         logger.warning("--bbox supplied but strategy is %s; bbox will be ignored.", strategy)
     if args.zip_csv and strategy != "full-harvest":
         logger.warning("--zip-csv supplied but strategy is %s; zip-csv ignored.", strategy)
-    if args.queries and strategy != "full-harvest":
-        logger.warning("--queries supplied but strategy is %s; queries ignored.", strategy)
-    # --min-contacts only gates the single-centroid depth loop. Warn if a
-    # non-default value was passed with a strategy that ignores it, so
-    # users don't think they're capping grid/full-harvest.
-    if args.min_contacts != 500 and strategy != "single-centroid":
-        logger.warning(
-            "--min-contacts=%d supplied but strategy is %s; ignored "
-            "(only single-centroid gates on --min-contacts).",
-            args.min_contacts,
-            strategy,
-        )
+    # --min-contacts / --max-depth only gate the single-centroid depth loop.
+    # Both default to None, so a non-None value means the user really passed
+    # the flag — warn so they don't think they're bounding grid/full-harvest.
+    if strategy != "single-centroid":
+        for flag, value in (
+            ("--min-contacts", args.min_contacts),
+            ("--max-depth", args.max_depth),
+        ):
+            if value is not None:
+                logger.warning(
+                    "%s=%d supplied but strategy is %s; ignored (only "
+                    "single-centroid gates on %s).",
+                    flag,
+                    value,
+                    strategy,
+                    flag,
+                )
+
+    query_variants = _resolve_query_variants(args, strategy, parser)
 
     disable_scraper_proxy = args.no_proxy or args.no_scraper_proxy
     disable_crawler_proxy = args.no_proxy or args.no_crawler_proxy
 
-    query_variants: tuple[str, ...] | None = None
-    if args.queries and strategy == "full-harvest":
-        variants = tuple(q.strip() for q in args.queries.split(",") if q.strip())
-        query_variants = variants or None
-
     run_end_to_end_pipeline(
         query=args.query,
         location=args.location,
-        min_contacts=args.min_contacts,
-        max_depth=args.max_depth,
+        # Pass None for strategies that ignore these, so the signature
+        # reflects which knobs are actually live for this run.
+        min_contacts=args.min_contacts if strategy == "single-centroid" else None,
+        max_depth=args.max_depth if strategy == "single-centroid" else None,
         use_grid=(strategy == "grid"),
         cell_km=args.cell_km,
         bbox=bbox,
