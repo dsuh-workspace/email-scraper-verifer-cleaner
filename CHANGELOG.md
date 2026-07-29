@@ -6,6 +6,45 @@ demand.
 
 ## Recently closed
 
+- ✅ **#R6 `run_zip_batch.py --strategy`** (2026-07-29) — the batch path was
+  single-centroid-only, which made metro-wide grid/full-harvest (the actual
+  coverage play) unreachable from the CSV runner. Rather than reimplement
+  the passes, each strategy was extracted from `run_end_to_end_pipeline`
+  into its own function in `run_pipeline.py` — `run_location_grid()` and
+  `run_location_full_harvest()`, alongside the existing
+  `run_location_pipeline()` — and both CLIs now call the same three.
+  `run_end_to_end_pipeline` is geocode + dispatch + the verify/export tail;
+  ~150 lines of strategy body left it, and all 166 pre-existing tests
+  passed unchanged, which is the evidence the move was behavior-preserving.
+  - All three return the same `LocationRunMetrics`, so the batch logs one
+    line per row regardless of strategy. `_location_metrics()` snapshots DB
+    counts for the two non-looping strategies; `stale_iterations=0` is by
+    construction, not a fake — a fixed set of passes has no consecutive
+    zero-yield depth bumps.
+  - `_resolve_strategy` / `_resolve_query_variants` are **imported** by
+    `run_zip_batch.py`, not copied. Both CLIs must agree on what `--grid`
+    means and on when full-harvest is refused for lacking a variant set
+    (exit 2) — that check is the difference between a real sweep and
+    grid-level results at full wall cost.
+  - New batch flags `--strategy` / `--grid` / `--cell-km` / `--queries`.
+    The three depth-loop flags moved to `default=None` and are
+    single-centroid only (warn + ignore elsewhere, same treatment
+    `run_pipeline.py` already gave `--min-contacts`/`--max-depth`);
+    non-positive values and `--cell-km <= 0` exit 2.
+  - Batch full-harvest deliberately omits `zip_csv`: Pass 3 is a fast ZIP
+    top-up and the batch already *is* the ZIP sweep. It warns once up front
+    that every row costs a grid pass plus a multi-query centroid sweep.
+  - Grid/full-harvest raise when Nominatim returns no bbox instead of
+    degrading to a centroid scrape — a silent downgrade would report
+    grid metrics for a single-centroid run. Caught per-row in the batch, so
+    one unmappable ZIP doesn't end the sweep.
+  - Tests: 15 new (`TestZipBatchStrategies` in `tests/test_run_pipeline.py`)
+    covering dispatch per strategy, the `--grid` shorthand, the ignored-flag
+    warnings, exit-2 validation, per-row geocoding, Pass 3 omission, and
+    continue-on-error. Full suite: **181 passing**. Two pre-existing grid
+    tests and `TestFullHarvestStrategy._wire` gained a
+    `get_exportable_contact_count` stub — the baseline-delta metrics are new
+    on those paths.
 - ✅ **#R7 crawl-attempt ledger** (2026-07-29) — `harvest_emails_from_websites()`
   no longer re-crawls businesses that previously yielded no email. Two new
   columns on `businesses`: `last_crawled_at` (stamped on every attempt,

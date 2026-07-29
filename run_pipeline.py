@@ -292,6 +292,261 @@ def run_location_pipeline(
         logger.info("Increasing scraper depth to %d.", depth)
 
 
+def _location_metrics(
+    baseline_exportable: int,
+    depths_run: tuple[int, ...],
+    export_destination: str,
+) -> LocationRunMetrics:
+    """Snapshot DB counts into LocationRunMetrics for the non-looping strategies.
+
+    Lets grid and full-harvest report the same shape as the depth loop, so a
+    batch caller can log one line regardless of strategy.
+
+    `depths_run` is the depths actually handed to the scraper — for these
+    strategies a record of the passes, not a loop trace. `stale_iterations` is
+    0 by construction: a fixed set of passes has no consecutive zero-yield
+    depth bumps to count.
+    """
+    total_contacts = get_contact_count()
+    exportable_contacts = get_exportable_contact_count(export_destination)
+    return LocationRunMetrics(
+        depths_run=depths_run,
+        final_depth=depths_run[-1] if depths_run else 0,
+        total_contacts=total_contacts,
+        exportable_contacts=exportable_contacts,
+        baseline_exportable_contacts=baseline_exportable,
+        new_exportable_contacts=max(0, exportable_contacts - baseline_exportable),
+        stale_iterations=0,
+    )
+
+
+def run_location_grid(
+    query: str,
+    location: str,
+    bbox: tuple[float, float, float, float] | None,
+    cell_km: float = 2.0,
+    export_destination: str = LEGACY_EXPORT_DESTINATION,
+    disable_scraper_proxy: bool = False,
+    disable_crawler_proxy: bool = False,
+    scraper_concurrency: int | None = None,
+    scraper_browser_pool_size: int | None = None,
+    scraper_pages_per_browser: int | None = None,
+    scraper_proxy_limit: int | None = None,
+    scraper_disable_page_reuse: bool = False,
+) -> LocationRunMetrics:
+    """Grid-scrape one location's bounding box. One scrape, no depth loop.
+
+    `bbox` is the caller's already-resolved box (Nominatim's, or a `--bbox`
+    override), so this geocodes nothing — the centroid alone can't produce
+    cells. `None` raises rather than falling back to a centroid scrape, which
+    would quietly deliver single-centroid coverage under a grid label.
+    """
+    if bbox is None:
+        raise RuntimeError(
+            f"Grid mode requires a bounding box. Nominatim returned none "
+            f"for {location!r} and no --bbox override was supplied."
+        )
+
+    baseline_exportable = get_exportable_contact_count(export_destination)
+
+    logger.info("--- Grid scrape (bbox=%s cell_km=%.2f) ---", bbox, cell_km)
+    execute_scrape_and_ingest(
+        query,
+        location,
+        bbox=bbox,
+        cell_km=cell_km,
+        depth=3,
+        disable_proxy=disable_scraper_proxy,
+        concurrency=scraper_concurrency,
+        browser_pool_size=scraper_browser_pool_size,
+        pages_per_browser=scraper_pages_per_browser,
+        proxy_limit=scraper_proxy_limit,
+        disable_page_reuse=scraper_disable_page_reuse,
+    )
+    process_and_deduplicate_leads()
+    harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
+
+    metrics = _location_metrics(baseline_exportable, (3,), export_destination)
+    logger.info(
+        "Grid scrape complete for %r. Contacts in DB: %d. New exportable: %d.",
+        location,
+        metrics.total_contacts,
+        metrics.new_exportable_contacts,
+    )
+    return metrics
+
+
+def run_location_full_harvest(
+    query: str,
+    location: str,
+    bbox: tuple[float, float, float, float] | None,
+    lat: float | None = None,
+    lon: float | None = None,
+    cell_km: float = 2.0,
+    queries: tuple[str, ...] | None = None,
+    zip_csv: str | None = None,
+    export_destination: str = LEGACY_EXPORT_DESTINATION,
+    disable_scraper_proxy: bool = False,
+    disable_crawler_proxy: bool = False,
+    scraper_concurrency: int | None = None,
+    scraper_browser_pool_size: int | None = None,
+    scraper_pages_per_browser: int | None = None,
+    scraper_proxy_limit: int | None = None,
+    scraper_disable_page_reuse: bool = False,
+) -> LocationRunMetrics:
+    """Grid + multi-query slow at centroid + optional fast ZIP top-up.
+
+    No depth loop. Geo is the caller's: `bbox` drives Pass 1, `lat`/`lon` drive
+    Pass 2. A missing bbox raises; a missing centroid only skips Pass 2 with a
+    warning, since Pass 1 still produced coverage.
+
+    `queries` overrides Pass 2's variant list. `None` (not an empty tuple)
+    means "derive from the query's industry"; `()` is a caller bug and raises.
+
+    `zip_csv` drives the optional Pass 3. Batch callers should leave it None —
+    a per-location run inside a ZIP sweep would re-sweep the same ZIPs.
+    """
+    if bbox is None:
+        raise RuntimeError(
+            f"full-harvest requires a bounding box for the grid pass. "
+            f"Nominatim returned none for {location!r}; supply --bbox."
+        )
+    # `queries is None` (not falsy) means "derive from the query's industry";
+    # an explicit empty tuple is a caller bug, so reject it before spending
+    # Pass 1 wall time on it.
+    if queries is not None and not queries:
+        raise ValueError(
+            "queries must be None (derive from industry) or a "
+            "non-empty sequence of query variants"
+        )
+
+    baseline_exportable = get_exportable_contact_count(export_destination)
+    depths_run: list[int] = []
+    # Pass 2's variant list is resolved inside the Pass 2 guard below, so an
+    # unknown industry doesn't warn about a pass that never runs.
+    pass2_degraded = False
+
+    # Pass 1 — grid over bbox (single query, JS mode, depth 3).
+    logger.info("--- Full-harvest PASS 1: grid (bbox=%s cell_km=%.2f) ---",
+                bbox, cell_km)
+    execute_scrape_and_ingest(
+        query,
+        location,
+        bbox=bbox,
+        cell_km=cell_km,
+        depth=3,
+        disable_proxy=disable_scraper_proxy,
+        concurrency=scraper_concurrency,
+        browser_pool_size=scraper_browser_pool_size,
+        pages_per_browser=scraper_pages_per_browser,
+        proxy_limit=scraper_proxy_limit,
+        disable_page_reuse=scraper_disable_page_reuse,
+    )
+    depths_run.append(3)
+    process_and_deduplicate_leads()
+
+    # Pass 2 — multi-query slow at centroid (browser reuses context across the
+    # variants; one N-query run beats N separate runs on wall time).
+    if lat is not None and lon is not None:
+        query_variants = queries
+        if query_variants is None:
+            query_variants = _default_harvest_queries(query)
+            if query_variants is None:
+                pass2_degraded = True
+                query_variants = (query,)
+                logger.warning(
+                    "No built-in harvest query set for %r; PASS 2 runs "
+                    "the base query alone, so this full-harvest yields "
+                    "roughly Pass-1-only coverage at full wall-clock "
+                    "cost. Supply --queries \"q1,q2,...\" for the full "
+                    "multi-query sweep.",
+                    query,
+                )
+        query_variants = list(query_variants)
+        logger.info(
+            "--- Full-harvest PASS 2: multi-query slow at centroid "
+            "(%d quer%s) ---",
+            len(query_variants),
+            "y" if len(query_variants) == 1 else "ies",
+        )
+        execute_scrape_and_ingest(
+            query,
+            location,
+            lat=lat,
+            lon=lon,
+            depth=10,
+            queries=query_variants,
+            fast_mode=False,
+            disable_proxy=disable_scraper_proxy,
+            concurrency=scraper_concurrency,
+            browser_pool_size=scraper_browser_pool_size,
+            pages_per_browser=scraper_pages_per_browser,
+            proxy_limit=scraper_proxy_limit,
+            disable_page_reuse=scraper_disable_page_reuse,
+        )
+        depths_run.append(10)
+        process_and_deduplicate_leads()
+    else:
+        logger.warning("Skipping PASS 2 — no centroid available for %r.", location)
+
+    # Pass 3 — fast ZIP top-up (optional). Cheap, ~2s per ZIP.
+    if zip_csv:
+        logger.info("--- Full-harvest PASS 3: fast ZIP top-up from %s ---", zip_csv)
+        zip_rows = _load_zip_csv(zip_csv)
+        zip_scrapes = 0
+        for i, row in enumerate(zip_rows, 1):
+            zip_loc = ", ".join(x for x in (row["city"], row["state"], row["zip"]) if x)
+            zlat, zlon, _ = geocode_location(zip_loc) if zip_loc else (None, None, None)
+            if zlat is None or zlon is None:
+                logger.warning("  [%d/%d zip %s] geocode failed, skipping.",
+                               i, len(zip_rows), row["zip"])
+                continue
+            # Same "[i/N zip Z] ..." prefix as the geocode-failure line
+            # above, so one log-parser regex covers both outcomes.
+            logger.info("  [%d/%d zip %s] scraping %s",
+                        i, len(zip_rows), row["zip"], zip_loc)
+            execute_scrape_and_ingest(
+                query,
+                zip_loc,
+                lat=zlat,
+                lon=zlon,
+                depth=3,
+                fast_mode=True,
+                disable_proxy=disable_scraper_proxy,
+                concurrency=scraper_concurrency,
+                browser_pool_size=scraper_browser_pool_size,
+                pages_per_browser=scraper_pages_per_browser,
+                proxy_limit=scraper_proxy_limit,
+                disable_page_reuse=scraper_disable_page_reuse,
+            )
+            zip_scrapes += 1
+        # One entry for the whole pass, not one per ZIP — a 28-ZIP sweep would
+        # otherwise bury the pass structure under 28 identical depths.
+        if zip_scrapes:
+            depths_run.append(3)
+        process_and_deduplicate_leads()
+    else:
+        logger.info("--- Full-harvest PASS 3: skipped (no --zip-csv) ---")
+
+    harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
+
+    metrics = _location_metrics(
+        baseline_exportable, tuple(depths_run), export_destination
+    )
+    logger.info(
+        "Full-harvest complete for %r. Contacts in DB: %d. New exportable: %d.%s",
+        location,
+        metrics.total_contacts,
+        metrics.new_exportable_contacts,
+        (
+            " NOTE: PASS 2 ran degraded (base query only) — expect "
+            "roughly Pass-1-only coverage."
+            if pass2_degraded
+            else ""
+        ),
+    )
+    return metrics
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -557,162 +812,43 @@ def run_end_to_end_pipeline(
         if lat is None or lon is None:
             logger.warning("Could not geocode %r. Scraper will retry per iteration.", location)
 
+        # Grid and full-harvest need a box; an explicit --bbox beats
+        # Nominatim's. Both raise on None rather than degrading to a centroid
+        # scrape — see run_location_grid.
+        effective_bbox = bbox if bbox is not None else geo_bbox
+
         if strategy == "grid":
-            effective_bbox = bbox if bbox is not None else geo_bbox
-            if effective_bbox is None:
-                raise RuntimeError(
-                    f"Grid mode requires a bounding box. Nominatim returned none "
-                    f"for {location!r} and no --bbox override was supplied."
-                )
-            logger.info(
-                "--- Grid scrape (bbox=%s cell_km=%.2f) ---",
-                effective_bbox,
-                cell_km,
-            )
-            execute_scrape_and_ingest(
-                query,
-                location,
+            run_location_grid(
+                query=query,
+                location=location,
                 bbox=effective_bbox,
                 cell_km=cell_km,
-                depth=3,
-                disable_proxy=disable_scraper_proxy,
-                concurrency=scraper_concurrency,
-                browser_pool_size=scraper_browser_pool_size,
-                pages_per_browser=scraper_pages_per_browser,
-                proxy_limit=scraper_proxy_limit,
-                disable_page_reuse=scraper_disable_page_reuse,
-            )
-            process_and_deduplicate_leads()
-            harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
-            current_contacts = get_contact_count()
-            logger.info(
-                "Grid scrape complete. Contacts in DB: %d.",
-                current_contacts,
+                disable_scraper_proxy=disable_scraper_proxy,
+                disable_crawler_proxy=disable_crawler_proxy,
+                scraper_concurrency=scraper_concurrency,
+                scraper_browser_pool_size=scraper_browser_pool_size,
+                scraper_pages_per_browser=scraper_pages_per_browser,
+                scraper_proxy_limit=scraper_proxy_limit,
+                scraper_disable_page_reuse=scraper_disable_page_reuse,
             )
         elif strategy == "full-harvest":
-            effective_bbox = bbox if bbox is not None else geo_bbox
-            if effective_bbox is None:
-                raise RuntimeError(
-                    f"full-harvest requires a bounding box for the grid pass. "
-                    f"Nominatim returned none for {location!r}; supply --bbox."
-                )
-            # `queries is None` (not falsy) means "derive from the query's
-            # industry"; an explicit empty tuple is a caller bug, so reject it
-            # before spending Pass 1 wall time on it.
-            if queries is not None and not queries:
-                raise ValueError(
-                    "queries must be None (derive from industry) or a "
-                    "non-empty sequence of query variants"
-                )
-            # Pass 2's variant list is resolved inside the Pass 2 guard below,
-            # so an unknown industry doesn't warn about a pass that never runs.
-            pass2_degraded = False
-
-            # Pass 1 — grid over bbox (single query, JS mode, depth 3).
-            logger.info("--- Full-harvest PASS 1: grid (bbox=%s cell_km=%.2f) ---",
-                        effective_bbox, cell_km)
-            execute_scrape_and_ingest(
-                query,
-                location,
+            run_location_full_harvest(
+                query=query,
+                location=location,
                 bbox=effective_bbox,
+                # Centroid already resolved above — don't geocode twice.
+                lat=lat,
+                lon=lon,
                 cell_km=cell_km,
-                depth=3,
-                disable_proxy=disable_scraper_proxy,
-                concurrency=scraper_concurrency,
-                browser_pool_size=scraper_browser_pool_size,
-                pages_per_browser=scraper_pages_per_browser,
-                proxy_limit=scraper_proxy_limit,
-                disable_page_reuse=scraper_disable_page_reuse,
-            )
-            process_and_deduplicate_leads()
-
-            # Pass 2 — multi-query slow at centroid (browser reuses context
-            # across the variants; Am beats N-separate As runs on wall time).
-            if lat is not None and lon is not None:
-                query_variants = queries
-                if query_variants is None:
-                    query_variants = _default_harvest_queries(query)
-                    if query_variants is None:
-                        pass2_degraded = True
-                        query_variants = (query,)
-                        logger.warning(
-                            "No built-in harvest query set for %r; PASS 2 runs "
-                            "the base query alone, so this full-harvest yields "
-                            "roughly Pass-1-only coverage at full wall-clock "
-                            "cost. Supply --queries \"q1,q2,...\" for the full "
-                            "multi-query sweep.",
-                            query,
-                        )
-                query_variants = list(query_variants)
-                logger.info(
-                    "--- Full-harvest PASS 2: multi-query slow at centroid "
-                    "(%d quer%s) ---",
-                    len(query_variants),
-                    "y" if len(query_variants) == 1 else "ies",
-                )
-                execute_scrape_and_ingest(
-                    query,
-                    location,
-                    lat=lat,
-                    lon=lon,
-                    depth=10,
-                    queries=query_variants,
-                    fast_mode=False,
-                    disable_proxy=disable_scraper_proxy,
-                    concurrency=scraper_concurrency,
-                    browser_pool_size=scraper_browser_pool_size,
-                    pages_per_browser=scraper_pages_per_browser,
-                    proxy_limit=scraper_proxy_limit,
-                    disable_page_reuse=scraper_disable_page_reuse,
-                )
-                process_and_deduplicate_leads()
-            else:
-                logger.warning("Skipping PASS 2 — no centroid available for %r.", location)
-
-            # Pass 3 — fast ZIP top-up (optional). Cheap, ~2s per ZIP.
-            if zip_csv:
-                logger.info("--- Full-harvest PASS 3: fast ZIP top-up from %s ---", zip_csv)
-                zip_rows = _load_zip_csv(zip_csv)
-                for i, row in enumerate(zip_rows, 1):
-                    zip_loc = ", ".join(x for x in (row["city"], row["state"], row["zip"]) if x)
-                    zlat, zlon, _ = geocode_location(zip_loc) if zip_loc else (None, None, None)
-                    if zlat is None or zlon is None:
-                        logger.warning("  [%d/%d zip %s] geocode failed, skipping.",
-                                       i, len(zip_rows), row["zip"])
-                        continue
-                    # Same "[i/N zip Z] ..." prefix as the geocode-failure line
-                    # above, so one log-parser regex covers both outcomes.
-                    logger.info("  [%d/%d zip %s] scraping %s",
-                                i, len(zip_rows), row["zip"], zip_loc)
-                    execute_scrape_and_ingest(
-                        query,
-                        zip_loc,
-                        lat=zlat,
-                        lon=zlon,
-                        depth=3,
-                        fast_mode=True,
-                        disable_proxy=disable_scraper_proxy,
-                        concurrency=scraper_concurrency,
-                        browser_pool_size=scraper_browser_pool_size,
-                        pages_per_browser=scraper_pages_per_browser,
-                        proxy_limit=scraper_proxy_limit,
-                        disable_page_reuse=scraper_disable_page_reuse,
-                    )
-                process_and_deduplicate_leads()
-            else:
-                logger.info("--- Full-harvest PASS 3: skipped (no --zip-csv) ---")
-
-            harvest_emails_from_websites(disable_proxy=disable_crawler_proxy)
-            current_contacts = get_contact_count()
-            logger.info(
-                "Full-harvest complete. Contacts in DB: %d.%s",
-                current_contacts,
-                (
-                    " NOTE: PASS 2 ran degraded (base query only) — expect "
-                    "roughly Pass-1-only coverage."
-                    if pass2_degraded
-                    else ""
-                ),
+                queries=queries,
+                zip_csv=zip_csv,
+                disable_scraper_proxy=disable_scraper_proxy,
+                disable_crawler_proxy=disable_crawler_proxy,
+                scraper_concurrency=scraper_concurrency,
+                scraper_browser_pool_size=scraper_browser_pool_size,
+                scraper_pages_per_browser=scraper_pages_per_browser,
+                scraper_proxy_limit=scraper_proxy_limit,
+                scraper_disable_page_reuse=scraper_disable_page_reuse,
             )
         else:
             # single-centroid legacy — the only strategy that reads

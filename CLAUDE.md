@@ -47,8 +47,9 @@ with `--queries "a,b,c"`. See
 ## Pipeline flow (as-built)
 
 Three strategies via `--strategy {single-centroid, grid, full-harvest}`
-on `run_pipeline.py`. Default = `single-centroid` (legacy). Selection
-sugar: `--grid` == `--strategy grid`.
+on `run_pipeline.py` **and** on `run_zip_batch.py` (as of 2026-07-29 —
+#R6). Default = `single-centroid` (legacy). Selection sugar: `--grid` ==
+`--strategy grid`.
 
 **Single-centroid** (legacy depth-loop). Delegates to
 `run_location_pipeline()` — the same loop `run_zip_batch.py` uses, so
@@ -117,6 +118,56 @@ if verify: verify_contacts_emails()               # --verify; failures warn
 export_new_leads(min_score=min_score)             # --min-score N
 ```
 
+---
+
+## Strategy entrypoints (review #R6, shipped 2026-07-29)
+
+Each strategy is one function in `run_pipeline.py`, and both CLIs call the
+same three. `run_end_to_end_pipeline` is now geocode + dispatch + the
+verify/export tail; it holds no strategy body of its own.
+
+| Function | Strategy | Returns |
+|---|---|---|
+| `run_location_pipeline()` | single-centroid | `LocationRunMetrics` |
+| `run_location_grid()` | grid | `LocationRunMetrics` |
+| `run_location_full_harvest()` | full-harvest | `LocationRunMetrics` |
+
+All three return the same `LocationRunMetrics` shape, so a batch caller
+logs one line per row regardless of strategy. For the two non-looping
+strategies, `_location_metrics()` snapshots the DB counts; `depths_run` is
+a record of the passes (`(3,)` for grid, `(3, 10)` or `(3, 10, 3)` for
+full-harvest — Pass 3 contributes one entry total, not one per ZIP) and
+`stale_iterations` is 0 by construction, since a fixed set of passes has
+no consecutive zero-yield depth bumps to count.
+
+Grid and full-harvest **raise** when Nominatim returns no bounding box
+rather than degrading to a centroid scrape — a silent downgrade would
+report grid-strategy metrics for a single-centroid run.
+
+### `run_zip_batch.py` flags
+
+New: `--strategy` / `--grid` / `--cell-km` / `--queries`, matching
+`run_pipeline.py`'s spelling and validation. `_resolve_strategy` and
+`_resolve_query_variants` are imported from `run_pipeline`, not
+reimplemented — both CLIs must agree on what `--grid` means and on when a
+full-harvest is refused for lacking a variant set (exit 2), since that
+check is the difference between a real sweep and grid-level results at
+full wall cost.
+
+- `--target-new-exportable` / `--max-depth` / `--stale-iterations` now
+  default to `None` and are **single-centroid only** — they warn and are
+  ignored under grid/full-harvest, which don't loop on depth. Non-positive
+  values still exit 2. Effective defaults: 20 / `DEFAULT_MAX_DEPTH` / 2.
+- `--cell-km` warns under single-centroid (no grid to size). Must be `> 0`.
+- Geocoding: single-centroid geocodes inside `run_location_pipeline`;
+  grid/full-harvest geocode in the batch loop to get each row's bbox. One
+  Nominatim call per row either way.
+- Batch full-harvest **never passes `zip_csv`** — Pass 3 is a fast ZIP
+  top-up, and the batch already *is* the ZIP sweep. It warns once up front
+  that each row costs a grid pass plus a multi-query centroid sweep.
+- A row that fails (unmappable ZIP, scraper error) is logged and skipped;
+  the batch continues, and export still runs once at the end.
+
 Verification (`app/pipeline/verify_emails.py`) is wired into
 `run_pipeline.py` and is the supported path — opt in with `--verify`.
 When set, it runs after the email crawl and before export, for all three
@@ -174,14 +225,11 @@ auto-loaded into context — read it on demand).
 
 Ordered. Top item is the one to pick up first.
 
-1. **#R6 Give `run_zip_batch.py` `--strategy` support** — metro-wide
-   full-harvest via batch is the coverage play; without it the batch path
-   is single-centroid-only.
-2. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
+1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
    Sheets auth before falling back to CSV.
-3. **#R9 Sticky-per-host crawler proxy rotation** — deferred until block
+2. **#R9 Sticky-per-host crawler proxy rotation** — deferred until block
    signals appear. `proxies[hash(host) % len(proxies)]`.
-4. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
+3. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
 
 ## Still open (intentional deferrals)
 
@@ -193,9 +241,11 @@ Findings not covered by 393a10c.
   always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
   "mock", fails auth, then falls through to CSV. Short-circuit when
   destination is the mock literal.
-- **#R6 `run_zip_batch.py` still on legacy `run_location_pipeline`** —
-  no `--strategy` support. Metro-wide full-harvest via batch is the real
-  coverage play; without it, `run_zip_batch.py` = orphaned path.
+- **#R6 `run_zip_batch.py` locked to `run_location_pipeline`** — ✅ resolved
+  2026-07-29. `--strategy {single-centroid,grid,full-harvest}` (plus
+  `--grid` sugar, `--cell-km`, `--queries`) now works in the batch, sharing
+  the same three strategy functions as `run_pipeline.py`. See "Strategy
+  entrypoints" below.
 - **#R7 Redundant re-crawl of email-less businesses** — ✅ resolved
   2026-07-29 via a crawl-attempt ledger. See the "Crawl-attempt ledger"
   section below for the shipped behavior. Note the crawl still lives

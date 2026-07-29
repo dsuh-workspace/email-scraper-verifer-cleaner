@@ -146,9 +146,9 @@ python run_pipeline.py \
   --scraper-concurrency 3
 ```
 
-`run_zip_batch.py` now exposes same scraper tuning knobs, including
-`--scraper-disable-page-reuse`, and forwards them into
-`run_location_pipeline(...)` for each ZIP.
+`run_zip_batch.py` exposes the same scraper tuning knobs, including
+`--scraper-disable-page-reuse`, and forwards them into the selected
+strategy for each ZIP (see [Batch strategies](#batch-strategies)).
 
 Defaults:
 - `--min-contacts 500` (applied when the flag is omitted; single-centroid only)
@@ -273,6 +273,8 @@ San Jose, CA 95123
 Batch semantics:
 - `--target-new-exportable` = new contacts from this zip not yet exported
 - stops each zip on target reached, `--max-depth`, or stale iterations
+- a row that fails (unmappable location, scraper error) is logged and
+  skipped; the batch keeps going
 - exports once at batch end
 
 `run_pipeline.py --strategy single-centroid` shares this same depth loop
@@ -282,6 +284,40 @@ Batch semantics:
 The scraper depth starts at 1 and grows by 2 each iteration up to
 `--max-depth`. The location is geocoded **once** at pipeline start and passed
 into every subsequent scrape iteration — Nominatim ToS friendly.
+
+#### Batch strategies
+
+`run_zip_batch.py` takes the same `--strategy` flag as `run_pipeline.py`
+and applies it to every row, sharing the same three strategy
+implementations:
+
+```bash
+# grid over each ZIP's own bounding box
+python run_zip_batch.py \
+  --query "Plumbing" \
+  --zip-file san_jose_zips.csv \
+  --grid --cell-km 2.0
+
+# full-harvest per row: grid pass + multi-query centroid sweep
+python run_zip_batch.py \
+  --query "Plumbing" \
+  --zip-file san_jose_zips.csv \
+  --strategy full-harvest \
+  --queries "Plumber,Drain cleaning,Water heater repair"
+```
+
+- Default stays `single-centroid`, so existing invocations are unchanged.
+- `--target-new-exportable`, `--max-depth`, and `--stale-iterations` are
+  **single-centroid only** — grid and full-harvest run a fixed set of
+  passes, so passing any of them logs a warning and is ignored.
+  `--cell-km` is likewise ignored (with a warning) under single-centroid.
+- Batch full-harvest skips Pass 3 (the fast ZIP top-up) — the batch is
+  already a ZIP sweep, so there is no `--zip-csv` to pass. Each row still
+  costs a grid pass **plus** a multi-query centroid sweep; the run warns
+  about the total up front.
+- `--queries` overrides the Pass 2 variant set for every row. Omit it and
+  the variants are derived from `--query`; as with `run_pipeline.py`, a
+  query that names neither trade or both exits with status 2.
 
 Proxy notes:
 - `--no-proxy` disables both scraper and crawler proxies for one run.

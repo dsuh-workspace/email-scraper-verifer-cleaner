@@ -633,6 +633,11 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        # Grid reports a new-exportable delta, so it reads this twice.
+        monkeypatch.setattr(
+            run_pipeline, "get_exportable_contact_count",
+            lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 0,
+        )
         monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
@@ -670,6 +675,10 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        monkeypatch.setattr(
+            run_pipeline, "get_exportable_contact_count",
+            lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 0,
+        )
         monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
@@ -765,6 +774,13 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites",
                             lambda **_: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
+        # Full-harvest reports a new-exportable delta like the depth loop does,
+        # so it takes a baseline before Pass 1 and reads the count again at the
+        # end — both hit the DB, which is stubbed out here.
+        monkeypatch.setattr(
+            run_pipeline, "get_exportable_contact_count",
+            lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 0,
+        )
         monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
 
     def test_full_harvest_runs_grid_then_multi_query(self, monkeypatch, modules):
@@ -1254,3 +1270,259 @@ class TestZipBatchProxyFlags:
         assert called["scraper_pages_per_browser"] == 1
         assert called["scraper_proxy_limit"] == 4
         assert called["scraper_disable_page_reuse"] is True
+
+
+class TestZipBatchStrategies:
+    """#R6 — run_zip_batch dispatches all three strategies, not just the loop."""
+
+    def _zip_file(self, tmp_path, rows="zip\n95112\n95123\n"):
+        path = tmp_path / "zips.csv"
+        path.write_text(rows, encoding="utf-8")
+        return str(path)
+
+    def _wire(self, monkeypatch, run_pipeline, run_zip_batch, *, bbox=(1.0, 1.0, 2.0, 2.0)):
+        """Stub out logging, DB, geocode, and the three strategy entrypoints.
+
+        Returns a dict of per-strategy call lists so a test can assert which
+        one ran and with what geo.
+        """
+        monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
+        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(
+            run_zip_batch, "geocode_location",
+            lambda location: (37.3, -121.8, bbox),
+        )
+
+        calls = {"single": [], "grid": [], "harvest": []}
+
+        def recorder(bucket):
+            def fake(**kwargs):
+                calls[bucket].append(kwargs)
+                return run_pipeline.LocationRunMetrics(
+                    depths_run=(3,),
+                    final_depth=3,
+                    total_contacts=1,
+                    exportable_contacts=1,
+                    baseline_exportable_contacts=0,
+                    new_exportable_contacts=1,
+                    stale_iterations=0,
+                )
+            return fake
+
+        monkeypatch.setattr(run_zip_batch, "run_location_pipeline", recorder("single"))
+        monkeypatch.setattr(run_zip_batch, "run_location_grid", recorder("grid"))
+        monkeypatch.setattr(run_zip_batch, "run_location_full_harvest", recorder("harvest"))
+        return calls
+
+    def test_defaults_to_single_centroid(self, monkeypatch, tmp_path, modules):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path),
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        run_zip_batch.main()
+
+        assert len(calls["single"]) == 2
+        assert not calls["grid"] and not calls["harvest"]
+
+    def test_grid_strategy_passes_per_row_bbox(self, monkeypatch, tmp_path, modules):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path),
+            "--strategy", "grid", "--cell-km", "1.5",
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        run_zip_batch.main()
+
+        assert len(calls["grid"]) == 2
+        assert not calls["single"]
+        assert all(c["bbox"] == (1.0, 1.0, 2.0, 2.0) for c in calls["grid"])
+        assert all(c["cell_km"] == 1.5 for c in calls["grid"])
+
+    def test_grid_flag_is_shorthand_for_strategy(self, monkeypatch, tmp_path, modules):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), "--grid",
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        run_zip_batch.main()
+
+        assert len(calls["grid"]) == 2
+
+    def test_full_harvest_passes_centroid_and_skips_pass3(
+        self, monkeypatch, tmp_path, modules,
+    ):
+        """The batch IS the ZIP sweep, so Pass 3 must never be handed a CSV."""
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "full-harvest",
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        run_zip_batch.main()
+
+        assert len(calls["harvest"]) == 2
+        for call in calls["harvest"]:
+            # Two-step contract: the CLI only *validates* that a variant set is
+            # derivable and forwards None; run_location_full_harvest does the
+            # deriving. Sending a pre-derived tuple would work but would put
+            # the industry defaults in two places.
+            assert call["queries"] is None
+            assert call["lat"] == 37.3 and call["lon"] == -121.8
+            assert "zip_csv" not in call
+
+    def test_full_harvest_honors_explicit_queries(self, monkeypatch, tmp_path, modules):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Roofing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "full-harvest",
+            "--queries", "Roofer,Roof repair",
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        run_zip_batch.main()
+
+        assert all(c["queries"] == ("Roofer", "Roof repair") for c in calls["harvest"])
+
+    def test_full_harvest_rejects_underivable_query(self, monkeypatch, tmp_path, modules):
+        """Same exit-2 contract as run_pipeline: no variant set, no run."""
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Roofing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "full-harvest",
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        with pytest.raises(SystemExit) as excinfo:
+            run_zip_batch.main()
+
+        assert excinfo.value.code == 2
+        assert not calls["harvest"]
+
+    def test_queries_with_non_full_harvest_is_an_error(self, monkeypatch, tmp_path, modules):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "grid",
+            "--queries", "a,b",
+        ])
+        self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        with pytest.raises(SystemExit) as excinfo:
+            run_zip_batch.main()
+
+        assert excinfo.value.code == 2
+
+    def test_unmappable_row_does_not_end_the_batch(self, monkeypatch, tmp_path, modules):
+        """Grid raises on a bbox-less row; the batch must keep going."""
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "grid",
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        exported = []
+        monkeypatch.setattr(run_zip_batch, "export_new_leads",
+                            lambda **_kw: exported.append(True))
+
+        seen = []
+
+        def boom_then_ok(**kwargs):
+            seen.append(kwargs["location"])
+            if len(seen) == 1:
+                raise RuntimeError("Grid mode requires a bounding box.")
+            return run_pipeline.LocationRunMetrics(
+                depths_run=(3,), final_depth=3, total_contacts=1,
+                exportable_contacts=1, baseline_exportable_contacts=0,
+                new_exportable_contacts=1, stale_iterations=0,
+            )
+
+        monkeypatch.setattr(run_zip_batch, "run_location_grid", boom_then_ok)
+
+        run_zip_batch.main()
+
+        assert seen == ["95112", "95123"]
+        assert exported == [True]
+        assert calls["single"] == []
+
+    @pytest.mark.parametrize(
+        "flag,value",
+        [
+            ("--target-new-exportable", "0"),
+            ("--max-depth", "0"),
+            ("--stale-iterations", "-1"),
+            ("--cell-km", "0"),
+        ],
+    )
+    def test_non_positive_bounds_exit_2(self, monkeypatch, tmp_path, modules, flag, value):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), flag, value,
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        with pytest.raises(SystemExit) as excinfo:
+            run_zip_batch.main()
+
+        assert excinfo.value.code == 2
+        assert not any(calls.values())
+
+    def test_depth_flags_warn_when_strategy_ignores_them(
+        self, monkeypatch, tmp_path, modules,
+    ):
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "grid",
+            "--max-depth", "8",
+        ])
+        self._wire(monkeypatch, run_pipeline, run_zip_batch)
+        recorder = RecordingLogger()
+        monkeypatch.setattr(run_zip_batch, "logger", recorder)
+
+        run_zip_batch.main()
+
+        warnings = recorder.joined("warning")
+        assert "--max-depth=8" in warnings
+        assert "does not loop on depth" in warnings
+
+    def test_no_depth_warning_when_flags_untouched(self, monkeypatch, tmp_path, modules):
+        """Defaults are None, so an unpassed flag can't look like a passed one."""
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path), "--strategy", "grid",
+        ])
+        self._wire(monkeypatch, run_pipeline, run_zip_batch)
+        recorder = RecordingLogger()
+        monkeypatch.setattr(run_zip_batch, "logger", recorder)
+
+        run_zip_batch.main()
+
+        assert "ignored" not in recorder.joined("warning")
+
+    def test_single_centroid_resolves_none_defaults(self, monkeypatch, tmp_path, modules):
+        """None means "not passed", so the pipeline must still get real numbers."""
+        run_pipeline, run_zip_batch = modules
+        monkeypatch.setattr(sys, "argv", [
+            "run_zip_batch.py", "--query", "Plumbing",
+            "--zip-file", self._zip_file(tmp_path, "zip\n95112\n"),
+        ])
+        calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
+
+        run_zip_batch.main()
+
+        call = calls["single"][0]
+        assert call["target_new_exportable"] == run_zip_batch.DEFAULT_TARGET_NEW_EXPORTABLE
+        assert call["max_depth"] == run_zip_batch.DEFAULT_MAX_DEPTH
+        assert call["stale_iterations_limit"] == run_zip_batch.DEFAULT_STALE_ITERATIONS
