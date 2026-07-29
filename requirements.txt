@@ -4,6 +4,9 @@
 SQLAlchemy>=2.0,<3.0
 python-dotenv>=1.0
 requests>=2.31
+geopy>=2.4
+phonenumbers>=8.13
+email-validator>=2.2
 
 # Google Sheets export path (falls back to CSV if these are missing,
 # but Sheets won't work at all without them).
