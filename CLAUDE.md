@@ -241,22 +241,6 @@ Findings not covered by 393a10c.
   always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
   "mock", fails auth, then falls through to CSV. Short-circuit when
   destination is the mock literal.
-- **#R6 `run_zip_batch.py` locked to `run_location_pipeline`** — ✅ resolved
-  2026-07-29. `--strategy {single-centroid,grid,full-harvest}` (plus
-  `--grid` sugar, `--cell-km`, `--queries`) now works in the batch, sharing
-  the same three strategy functions as `run_pipeline.py`. See "Strategy
-  entrypoints" below.
-- **#R7 Redundant re-crawl of email-less businesses** — ✅ resolved
-  2026-07-29 via a crawl-attempt ledger. See the "Crawl-attempt ledger"
-  section below for the shipped behavior. Note the crawl still lives
-  *inside* the depth loop and has to: `--min-contacts` means new
-  exportable contacts, and exportability requires an email, which
-  requires the crawl. The ledger is what makes staying in the loop cheap.
-- **#R8 `harvest_best.py`** — ✅ resolved 2026-07-28 by moving to
-  `scripts/experiments/harvest_best.py` and documenting it as
-  offline-only (no DB, no dedupe, no crawl). Production equivalent is
-  `run_pipeline.py --strategy full-harvest`. Kept, not deleted, for
-  raw-scraper-output experiments.
 - **#R9 Crawler proxy = only proxy[0] from file** — 10 workers × 1 IP
   across ~350 domains = fingerprint risk. Deferred until block signals
   appear (per existing #22). Rotate sticky-per-host when the time comes:
