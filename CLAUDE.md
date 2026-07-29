@@ -256,19 +256,6 @@ blank Email column. Left as-is per project decision.
 reconciled in a later fix; the remaining issue is the deliberate project
 decision to allow blank-email rows to export.
 
-### #14 — Dead imports in `create_tables.py`
-
-Post-rewrite: none remain. Closed by natural attrition during the #13
-schema rewrite.
-
-### #16 — CLI validation for `run_pipeline.py`
-
-✅ Closed 2026-07-28. `_validate_positive_counts()` runs right after
-`parse_args()` and calls `parser.error()` (exit 2) for non-positive
-`--min-contacts` / `--max-depth`. `None` (flag not passed) is allowed
-through and resolved to `DEFAULT_MIN_CONTACTS` / `DEFAULT_MAX_DEPTH`
-inside the pipeline.
-
 ### #20 — Commits inside per-business loop
 
 `extract_emails.py` batches every 25, which is acceptable. Not worth

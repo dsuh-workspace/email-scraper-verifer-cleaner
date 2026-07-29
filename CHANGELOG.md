@@ -179,6 +179,10 @@ demand.
   not by reverting. The entry was dropped from `CLAUDE.md` in `986b640`
   without a CHANGELOG counterpart; recorded here for traceability
   (review 2026-07-23 #15).
+- ✅ **#14 dead imports in `create_tables.py`** (closed during the #13
+  schema rewrite) — no follow-up fix was needed after the rewrite settled;
+  the old dead imports were gone by natural attrition, so the item is
+  closed for bookkeeping rather than by a separate patch.
 - ✅ **Review 393a10c items R2/R3/R4/R5** (2026-07-22):
   - **#R2** `main()` now only builds `query_variants` when
     `strategy == "full-harvest"`. Warning message kept for user feedback.
