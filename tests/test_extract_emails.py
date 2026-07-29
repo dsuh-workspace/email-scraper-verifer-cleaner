@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import sessionmaker
 
 import app.pipeline.extract_emails as extract_module
 from app.pipeline.extract_emails import (
@@ -420,3 +422,56 @@ class TestHarvestLedgerAgainstDb:
 
         # Cooldown expired and attempts are 0, but it already has an email.
         assert self._harvest(monkeypatch, lambda _url: []) == []
+
+
+class TestInitDbAdditiveMigrations:
+    def test_init_db_adds_exported_at_to_legacy_export_history(self, monkeypatch, tmp_path):
+        import app.db.database as db_module
+        import app.db.create_tables as tables_module
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+        monkeypatch.setattr(db_module, "engine", engine)
+        monkeypatch.setattr(tables_module, "engine", engine)
+
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE contacts (id INTEGER PRIMARY KEY)"))
+            conn.execute(text(
+                "CREATE TABLE export_history ("
+                "id INTEGER PRIMARY KEY, "
+                "contact_id INTEGER, "
+                "destination TEXT, "
+                "dummy_test INTEGER"
+                ")"
+            ))
+            conn.execute(text(
+                "INSERT INTO export_history (id, contact_id, destination, dummy_test) "
+                "VALUES (1, 1, 'legacy', 0)"
+            ))
+
+        tables_module.init_db()
+
+        columns = {
+            column["name"]: column
+            for column in inspect(engine).get_columns("export_history")
+        }
+        assert "exported_at" in columns
+
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE export_history SET exported_at = CURRENT_TIMESTAMP "
+                "WHERE exported_at IS NULL"
+            ))
+
+        session = sessionmaker(bind=engine)()
+        session.add(tables_module.ExportHistory(
+            contact_id=2,
+            destination="after_migration",
+            exported_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+        inserted = session.query(tables_module.ExportHistory).filter_by(
+            destination="after_migration"
+        ).one()
+        assert inserted.exported_at is not None
+        session.close()

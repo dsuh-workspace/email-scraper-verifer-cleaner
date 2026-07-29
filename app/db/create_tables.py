@@ -198,6 +198,7 @@ class ExportHistory(Base):
 _ADDITIVE_COLUMNS = (
     ("businesses", "last_crawled_at", "TIMESTAMP"),
     ("businesses", "crawl_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("export_history", "exported_at", "TIMESTAMP"),
 )
 
 

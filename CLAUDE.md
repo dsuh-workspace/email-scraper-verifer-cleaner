@@ -302,11 +302,13 @@ Reasonable given we're crawling only shortlisted contact pages.
 **Automatic, as of 2026-07-29:** `init_db()` now runs
 `_apply_additive_columns()` after `create_all()`, which `ALTER TABLE ... ADD
 COLUMN`s any missing entry in `_ADDITIVE_COLUMNS` — currently
-`businesses.last_crawled_at` and `businesses.crawl_attempts`. `create_all()`
+`businesses.last_crawled_at`, `businesses.crawl_attempts`, and
+`export_history.exported_at` (added nullable on legacy SQLite DBs; backfill
+existing rows once if you care about historical timestamps). `create_all()`
 creates missing *tables* but never alters existing ones, so without this an
-older DB file would raise "no such column" on the first harvest. It is
-idempotent and additive-only; anything that drops, renames, or backfills
-still belongs in the manual SQL below.
+older DB file would raise "no such column" on the first harvest/export that
+touched those fields. It is idempotent and additive-only; anything that
+drops, renames, or backfills still belongs in the manual SQL below.
 
 The rest is **manual**. If you have an existing SQLite `hvac_leads.db`:
 
@@ -320,9 +322,10 @@ CREATE UNIQUE INDEX ix_businesses_domain ON businesses(domain);
 -- Add (business_id, email) composite unique on contacts
 CREATE UNIQUE INDEX uq_contact_biz_email ON contacts(business_id, email);
 
--- For newer export_history rows, add timestamp + disallow NULL contact_id
-ALTER TABLE export_history ADD COLUMN exported_at TIMESTAMP;
+-- Backfill legacy export_history rows after auto-adding exported_at
 UPDATE export_history SET exported_at = CURRENT_TIMESTAMP WHERE exported_at IS NULL;
+
+-- Disallow NULL contact_id on export_history if you are tightening legacy DBs
 ```
 
 Manual follow-up for existing DBs:
