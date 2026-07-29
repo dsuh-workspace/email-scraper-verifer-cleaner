@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Set
 
 import requests
+from email_validator import EmailNotValidError, validate_email
 
 from app.logging_config import get_logger
 from app.proxy_utils import load_proxy_file, validate_proxy_url
@@ -132,10 +133,14 @@ def extract_emails_from_html(html_text: str) -> List[str]:
     """
     emails: Set[str] = set()
     for match in EMAIL_REGEX.findall(html_text):
-        email = match.lower()
-        if any(email.endswith(ext) for ext in EXCLUDE_EXTENSIONS):
+        candidate = match.lower()
+        if any(candidate.endswith(ext) for ext in EXCLUDE_EXTENSIONS):
             continue
-        if any(bad in email for bad in EXCLUDE_DOMAINS):
+        if any(bad in candidate for bad in EXCLUDE_DOMAINS):
+            continue
+        try:
+            email = validate_email(candidate, check_deliverability=False).normalized.lower()
+        except EmailNotValidError:
             continue
         emails.add(email)
     return sorted(emails)

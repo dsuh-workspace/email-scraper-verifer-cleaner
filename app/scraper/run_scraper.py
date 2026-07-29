@@ -4,24 +4,17 @@ import platform
 import subprocess
 import tempfile
 from datetime import datetime, timezone
+
+from geopy.geocoders import Nominatim
 from app.logging_config import get_logger, setup_logging
 from app.proxy_utils import load_proxy_file, normalize_proxy_line, validate_proxy_url
 
 logger = get_logger(__name__)
 
 
-class _MissingOrmModel:
-    _next_id = 1
-
-    def __init__(self, *args, **kwargs):
-        self.id = self.__class__._next_id
-        self.__class__._next_id += 1
-        self.__dict__.update(kwargs)
-
-
 Session = None
-ScrapeRun = _MissingOrmModel
-RawLead = _MissingOrmModel
+ScrapeRun = None
+RawLead = None
 
 DEFAULT_SCRAPER_PROXY_LIMIT = 3
 DEFAULT_SCRAPER_PAGES_PER_BROWSER = 2
@@ -118,29 +111,24 @@ def geocode_location(location: str):
     omitted the boundingbox field for the match. Returns (None, None, None)
     on error or no match.
     """
-    import requests
-    headers = {
-        "User-Agent": "hvac-lead-engine-scraper/1.0"
-    }
-    url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(location)}&format=json&limit=1"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data:
-                lat = float(data[0]["lat"])
-                lon = float(data[0]["lon"])
-                # Nominatim boundingbox is [south, north, west, east] as strings.
+        geocoder = Nominatim(user_agent="hvac-lead-engine-scraper/1.0")
+        match = geocoder.geocode(location, exactly_one=True)
+        if not match:
+            return None, None, None
+
+        lat = float(match.latitude)
+        lon = float(match.longitude)
+        bbox = None
+        raw_bbox = getattr(match, "raw", {}).get("boundingbox")
+        if raw_bbox and len(raw_bbox) == 4:
+            try:
+                south, north, west, east = (float(x) for x in raw_bbox)
+                bbox = (south, west, north, east)  # min_lat, min_lon, max_lat, max_lon
+            except (TypeError, ValueError):
                 bbox = None
-                raw_bbox = data[0].get("boundingbox")
-                if raw_bbox and len(raw_bbox) == 4:
-                    try:
-                        south, north, west, east = (float(x) for x in raw_bbox)
-                        bbox = (south, west, north, east)  # min_lat, min_lon, max_lat, max_lon
-                    except (TypeError, ValueError):
-                        bbox = None
-                logger.info(f"Geocoded '{location}' to ({lat}, {lon}) bbox={bbox}")
-                return lat, lon, bbox
+        logger.info(f"Geocoded '{location}' to ({lat}, {lon}) bbox={bbox}")
+        return lat, lon, bbox
     except Exception as e:
         logger.warning("Geocoding failed for %r: %s", location, e)
     return None, None, None
@@ -202,13 +190,14 @@ def execute_scrape_and_ingest(
         "SCRAPER_PAGES_PER_BROWSER",
     )
 
-    if Session is None:
+    if Session is None or ScrapeRun is None or RawLead is None:
         from sqlalchemy.orm import sessionmaker
 
         from app.db.database import engine
         from app.db.create_tables import ScrapeRun as _ScrapeRun, RawLead as _RawLead
 
-        Session = sessionmaker(bind=engine)
+        if Session is None:
+            Session = sessionmaker(bind=engine)
         ScrapeRun = _ScrapeRun
         RawLead = _RawLead
 

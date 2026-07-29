@@ -17,8 +17,8 @@ Key changes vs the naive first pass:
   instead of two SELECT round-trips per raw row (was: ~2N queries for N
   raw leads → now: 2 queries total).
 - Same batch treatment for existing contacts.
-- Runs raw email strings through a real regex + splits on ,;\\s so we
-  don't insert garbage into Contact.email.
+- Splits raw email strings on ,;\\s and validates candidates with
+  `email-validator` so we don't insert garbage into Contact.email.
 """
 
 import re
@@ -26,12 +26,12 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Dict, Tuple
 
+import phonenumbers
+from email_validator import EmailNotValidError, validate_email
+
 from app.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
-
-# Same regex as extract_emails.py so validation is consistent across the pipeline.
-EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
 # Substring match — same blocklist rationale as extract_emails.EXCLUDE_DOMAINS.
 # Keep the two lists loosely in sync; duplication here is deliberate so the
@@ -69,17 +69,12 @@ def extract_domain(url_str):
     if not url_str:
         return None
     try:
-        url_str = url_str.strip()
-        # Case-insensitive scheme check — some scraper output uses HTTPS://
-        # in uppercase and startswith() would miss it, causing us to prepend
-        # http:// and break the URL.
-        if not re.match(r'^https?://', url_str, re.IGNORECASE):
-            url_str = 'http://' + url_str
-        parsed = urllib.parse.urlparse(url_str)
+        raw = url_str.strip()
+        if not raw:
+            return None
+        parsed = urllib.parse.urlparse(raw if '://' in raw else f'http://{raw}')
         domain = (parsed.hostname or "").lower()
-        if domain.startswith('www.'):
-            domain = domain[4:]
-        return domain or None
+        return domain.removeprefix('www.') or None
     except Exception:
         return None
 
@@ -91,22 +86,38 @@ def normalize_phone(phone_str):
     """
     if not phone_str:
         return None
-    phone_str = phone_str.strip()
-    digits = re.sub(r'\D', '', phone_str)
+
+    raw = phone_str.strip()
+    digits = re.sub(r'\D', '', raw)
+    if not digits:
+        return None
 
     if len(digits) == 10:
+        try:
+            parsed = phonenumbers.parse(digits, "US")
+            if phonenumbers.is_possible_number(parsed):
+                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+        except phonenumbers.NumberParseException:
+            pass
         return f"+1{digits}"
+
     if len(digits) == 11 and digits.startswith('1'):
+        try:
+            parsed = phonenumbers.parse(digits, "US")
+            if phonenumbers.is_possible_number(parsed):
+                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+        except phonenumbers.NumberParseException:
+            pass
         return f"+{digits}"
 
-    return phone_str
+    return raw
 
 
 def _parse_and_validate_emails(raw_email_field: str):
     """
     Split a scraper email field (which can contain commas, semicolons,
     or whitespace between addresses) and drop anything that doesn't
-    validate against EMAIL_REGEX.
+    validate as an email.
     """
     if not raw_email_field:
         return []
@@ -114,12 +125,16 @@ def _parse_and_validate_emails(raw_email_field: str):
     valid = []
     seen = set()
     for part in parts:
-        email = part.strip().lower().rstrip('.,;')
-        if not email or email in seen:
+        candidate = part.strip().lower().rstrip('.,;')
+        if not candidate or candidate in seen:
             continue
-        if not EMAIL_REGEX.match(email):
+        try:
+            email = validate_email(candidate, check_deliverability=False).normalized.lower()
+        except EmailNotValidError:
             continue
         if any(bad in email for bad in _PLACEHOLDER_EMAIL_SUBSTRINGS):
+            continue
+        if email in seen:
             continue
         seen.add(email)
         valid.append(email)

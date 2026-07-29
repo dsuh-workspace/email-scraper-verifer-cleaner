@@ -90,20 +90,21 @@ class TestScraperProxyArgs:
 
 class TestGeocodeReturnsBbox:
     def test_returns_bbox_tuple_from_nominatim(self, monkeypatch):
-        class FakeResp:
-            status_code = 200
+        class FakeLocation:
+            latitude = "37.336"
+            longitude = "-121.891"
+            raw = {
+                "boundingbox": ["37.21", "37.47", "-122.05", "-121.75"],
+            }
 
-            @staticmethod
-            def json():
-                return [{
-                    "lat": "37.336",
-                    "lon": "-121.891",
-                    # Nominatim returns [south, north, west, east] as strings.
-                    "boundingbox": ["37.21", "37.47", "-122.05", "-121.75"],
-                }]
+        class FakeGeocoder:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        import requests as _requests
-        monkeypatch.setattr(_requests, "get", lambda *a, **k: FakeResp())
+            def geocode(self, *args, **kwargs):
+                return FakeLocation()
+
+        monkeypatch.setattr(run_scraper, "Nominatim", FakeGeocoder)
 
         lat, lon, bbox = run_scraper.geocode_location("San Jose, CA")
         assert lat == pytest.approx(37.336)
@@ -112,25 +113,33 @@ class TestGeocodeReturnsBbox:
         assert bbox == pytest.approx((37.21, -122.05, 37.47, -121.75))
 
     def test_returns_none_bbox_when_missing(self, monkeypatch):
-        class FakeResp:
-            status_code = 200
+        class FakeLocation:
+            latitude = "1"
+            longitude = "2"
+            raw = {}
 
-            @staticmethod
-            def json():
-                return [{"lat": "1", "lon": "2"}]  # no boundingbox
+        class FakeGeocoder:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        import requests as _requests
-        monkeypatch.setattr(_requests, "get", lambda *a, **k: FakeResp())
+            def geocode(self, *args, **kwargs):
+                return FakeLocation()
+
+        monkeypatch.setattr(run_scraper, "Nominatim", FakeGeocoder)
 
         lat, lon, bbox = run_scraper.geocode_location("x")
         assert (lat, lon) == (1.0, 2.0)
         assert bbox is None
 
     def test_returns_none_triple_on_error(self, monkeypatch):
-        import requests as _requests
-        def _boom(*a, **k):
-            raise _requests.RequestException("network")
-        monkeypatch.setattr(_requests, "get", _boom)
+        class FakeGeocoder:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def geocode(self, *args, **kwargs):
+                raise RuntimeError("network")
+
+        monkeypatch.setattr(run_scraper, "Nominatim", FakeGeocoder)
 
         assert run_scraper.geocode_location("x") == (None, None, None)
 
