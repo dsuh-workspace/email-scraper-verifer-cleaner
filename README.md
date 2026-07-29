@@ -16,13 +16,14 @@ Clean + Normalize + Dedupe (domain, name+phone)
         ↓
 Email Harvest (crawl /contact, /about, /team; regex extract)
         ↓
-Email Verify (Reacher on Kamatera)   [optional, wire in verify_contacts_emails]
+Email Verify (Reacher on Kamatera)   [opt-in: --verify]
         ↓
 Google Sheets / local CSV export (with export-history dedupe)
 ```
 
-The verify step is currently **not** called from `run_pipeline.py`. Wire it
-in explicitly when you want it — see [Verification](#verification) below.
+The verify step is wired into `run_pipeline.py` and runs after the email
+crawl, before export — opt in with `--verify`, and gate export on score
+with `--min-score N`. See [Verification](#verification) below.
 
 ---
 
@@ -111,6 +112,12 @@ CRAWLER_PROXY_FILE=proxies.txt
 # CRAWLER_HTTP_PROXY=http://proxy-http.example.com:8080
 # CRAWLER_HTTPS_PROXY=https://proxy-https.example.com:8443
 
+# Optional crawl-attempt ledger tuning (defaults shown)
+# CRAWL_RETRY_AFTER_HOURS=720   # cooldown before re-crawling a site that
+#                               # yielded no email (30 days)
+# CRAWL_MAX_ATTEMPTS=3          # give up after N consecutive no-email
+#                               # attempts; 0 = no cap
+
 # Kamatera deploy credentials (only needed if you re-provision the
 # verifier server — the verify_emails.py module itself does NOT need them)
 KAMATERA_ACCESS_KEY=...
@@ -139,13 +146,13 @@ python run_pipeline.py \
   --scraper-concurrency 3
 ```
 
-`run_zip_batch.py` now exposes same scraper tuning knobs, including
-`--scraper-disable-page-reuse`, and forwards them into
-`run_location_pipeline(...)` for each ZIP.
+`run_zip_batch.py` exposes the same scraper tuning knobs, including
+`--scraper-disable-page-reuse`, and forwards them into the selected
+strategy for each ZIP (see [Batch strategies](#batch-strategies)).
 
 Defaults:
-- `--min-contacts 500`
-- `--max-depth 20`
+- `--min-contacts 500` (applied when the flag is omitted; single-centroid only)
+- `--max-depth 20` (applied when the flag is omitted; single-centroid only)
 - scraper concurrency/browser pool use upstream defaults unless overridden
 - scraper pages per browser defaults to current wrapper value `2`
 - scraper forwards first `3` validated proxies by default unless overridden
@@ -172,8 +179,12 @@ python run_pipeline.py \
   --max-depth 9
 ```
 
-`run_pipeline.py` keeps legacy semantics: `--min-contacts` is total DB
-contacts, not new contacts from current run.
+`--min-contacts` counts **new exportable contacts produced by this run**
+(contacts with an email that have no `export_history` row for the
+destination yet), not cumulative DB contacts — so re-running against a
+populated DB still scrapes. Both flags are **single-centroid only**;
+grid and full-harvest don't loop on depth and warn if you pass either.
+Both must be `> 0` — a non-positive value exits with status 2.
 
 ### Grid-mode scraping (recommended for coverage)
 
@@ -197,8 +208,8 @@ mxschmitt/playwright-go v0.6100.0 version-mismatch workaround.
 Optional: `--bbox min_lat,min_lon,max_lat,max_lon` overrides the
 Nominatim-derived bbox when you want a specific region.
 
-Grid mode ignores `--max-depth` (single scrape) and typically saturates
-before `--min-contacts`.
+Grid mode ignores both `--max-depth` (single scrape at depth 3 per cell)
+and `--min-contacts`; passing either logs a warning.
 
 ### Full-harvest strategy (max coverage)
 
@@ -262,11 +273,51 @@ San Jose, CA 95123
 Batch semantics:
 - `--target-new-exportable` = new contacts from this zip not yet exported
 - stops each zip on target reached, `--max-depth`, or stale iterations
+- a row that fails (unmappable location, scraper error) is logged and
+  skipped; the batch keeps going
 - exports once at batch end
+
+`run_pipeline.py --strategy single-centroid` shares this same depth loop
+(`run_location_pipeline`), so its `--min-contacts` means the same thing as
+`--target-new-exportable` here.
 
 The scraper depth starts at 1 and grows by 2 each iteration up to
 `--max-depth`. The location is geocoded **once** at pipeline start and passed
 into every subsequent scrape iteration — Nominatim ToS friendly.
+
+#### Batch strategies
+
+`run_zip_batch.py` takes the same `--strategy` flag as `run_pipeline.py`
+and applies it to every row, sharing the same three strategy
+implementations:
+
+```bash
+# grid over each ZIP's own bounding box
+python run_zip_batch.py \
+  --query "Plumbing" \
+  --zip-file san_jose_zips.csv \
+  --grid --cell-km 2.0
+
+# full-harvest per row: grid pass + multi-query centroid sweep
+python run_zip_batch.py \
+  --query "Plumbing" \
+  --zip-file san_jose_zips.csv \
+  --strategy full-harvest \
+  --queries "Plumber,Drain cleaning,Water heater repair"
+```
+
+- Default stays `single-centroid`, so existing invocations are unchanged.
+- `--target-new-exportable`, `--max-depth`, and `--stale-iterations` are
+  **single-centroid only** — grid and full-harvest run a fixed set of
+  passes, so passing any of them logs a warning and is ignored.
+  `--cell-km` is likewise ignored (with a warning) under single-centroid.
+- Batch full-harvest skips Pass 3 (the fast ZIP top-up) — the batch is
+  already a ZIP sweep, so there is no `--zip-csv` to pass. Each row still
+  costs a grid pass **plus** a multi-query centroid sweep; the run warns
+  about the total up front.
+- `--queries` overrides the Pass 2 variant set for every row. Omit it and
+  the variants are derived from `--query`; as with `run_pipeline.py`, a
+  query that names neither trade or both exits with status 2.
 
 Proxy notes:
 - `--no-proxy` disables both scraper and crawler proxies for one run.
@@ -279,6 +330,20 @@ Proxy notes:
 - `CRAWLER_HTTP_PROXY` and `CRAWLER_HTTPS_PROXY` override `CRAWLER_PROXY` / `CRAWLER_PROXY_FILE` per scheme.
 - Proxy file lines may be full URLs (`http://user:pass@host:port`) or compact Webshare-style lines (`host:port:user:password`).
 - Crawler proxy support accepts `http`, `https`, `socks5`, and `socks5h` when provided as full proxy URLs. Compact proxy-file lines normalize to `http://...` URLs.
+
+Crawl-attempt notes:
+- Every crawl stamps `businesses.last_crawled_at` and bumps
+  `businesses.crawl_attempts` — whether or not an email was found, and
+  including attempts that error out.
+- A site that yields no email is skipped for `CRAWL_RETRY_AFTER_HOURS`
+  (default 720 = 30 days), then retried. After `CRAWL_MAX_ATTEMPTS`
+  (default 3) consecutive no-email attempts it is skipped permanently.
+  Set `CRAWL_MAX_ATTEMPTS=0` to keep retrying forever on the cooldown.
+- Finding an email resets `crawl_attempts` to 0, so a site that starts
+  publishing an address isn't pinned at the give-up threshold.
+- This is what stops the depth loop from re-fetching the same email-less
+  domains on every iteration. To force a full re-crawl of a DB, clear the
+  ledger: `UPDATE businesses SET last_crawled_at = NULL, crawl_attempts = 0;`
 
 ---
 
@@ -313,10 +378,21 @@ The old BillionVerify-based implementation is archived at
 `app/pipeline/verify_emails_ARCHIVE.py` — retained for reference, not
 imported anywhere.
 
-To wire verification into the main pipeline, import
-`verify_contacts_emails` from `app.pipeline.verify_emails` in
-`run_pipeline.py` and call it between `harvest_emails_from_websites()`
-and `export_new_leads()`.
+Verification is already wired into the main pipeline — `run_pipeline.py
+--verify` calls `verify_contacts_emails()` between
+`harvest_emails_from_websites()` and `export_new_leads()`, for all three
+strategies. Add `--min-score N` to drop contacts below a score from the
+export:
+
+```bash
+python run_pipeline.py --query "Plumbing" --location "San Jose, CA" \
+  --verify --min-score 50
+```
+
+Verifier failures are logged as warnings and the pipeline continues. An
+unreachable Reacher instance scores every contact `unknown` (25), so
+`--min-score 50` against a dead verifier exports nothing — check the log
+for verifier warnings before concluding the harvest was empty.
 
 ---
 
@@ -393,7 +469,9 @@ are intentionally not covered here.
 
 - **`scrape_runs`** — one row per scraper invocation.
 - **`raw_leads`** — scraper output, tagged `processed_at` after promotion.
-- **`businesses`** — canonical deduped businesses, `domain` UNIQUE.
+- **`businesses`** — canonical deduped businesses, `domain` UNIQUE. Also
+  carries the crawl-attempt ledger (`last_crawled_at`, `crawl_attempts`)
+  the email harvester uses to avoid re-crawling sites that yielded nothing.
 - **`contacts`** — one row per person/inbox; `(business_id, email)` UNIQUE.
 - **`email_verifications`** — Reacher results, one per contact.
 - **`export_history`** — every (`contact_id`, `destination`) push, with `exported_at` timestamp.

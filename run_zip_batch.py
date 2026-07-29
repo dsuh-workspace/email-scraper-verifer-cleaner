@@ -7,9 +7,33 @@ from pathlib import Path
 from app.db.create_tables import init_db
 from app.logging_config import get_logger, setup_logging
 from app.pipeline.export_sheets import export_new_leads
-from run_pipeline import run_location_pipeline
+from app.scraper.run_scraper import geocode_location
+# _resolve_strategy / _resolve_query_variants are shared rather than
+# reimplemented: both CLIs must agree on what --grid means and on when a
+# full-harvest is refused for lacking a variant set, since that check is the
+# difference between a full sweep and grid-level results at full wall cost.
+from run_pipeline import (
+    DEFAULT_MAX_DEPTH,
+    _resolve_query_variants,
+    _resolve_strategy,
+    run_location_full_harvest,
+    run_location_grid,
+    run_location_pipeline,
+)
 
 logger = get_logger(__name__)
+
+STRATEGIES = ("single-centroid", "grid", "full-harvest")
+
+# Per-ZIP depth-loop defaults. The flags themselves default to None so "did the
+# operator pass this?" is never inferred from comparing against a literal —
+# same reasoning as run_pipeline.py's DEFAULT_MIN_CONTACTS. The batch wants a
+# much lower per-ZIP target than a single metro run (nearby ZIPs overlap, so
+# marginal yield per ZIP is small), but the depth cap is a property of the
+# shared depth loop, so it comes from run_pipeline.
+DEFAULT_TARGET_NEW_EXPORTABLE = 20
+DEFAULT_STALE_ITERATIONS = 2
+DEFAULT_CELL_KM = 2.0
 
 
 
@@ -53,29 +77,66 @@ def load_locations(zip_file: str) -> list[str]:
 
 
 
-def parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run batch lead generation from CSV of zip codes/locations."
     )
     parser.add_argument("--query", required=True, help="Industry keyword to scrape")
     parser.add_argument("--zip-file", required=True, help="CSV file of zip/location rows")
     parser.add_argument(
+        "--strategy",
+        choices=STRATEGIES,
+        default=None,
+        help=(
+            "Scrape strategy applied to every row. Default single-centroid. "
+            "grid/full-harvest resolve each row's bounding box from Nominatim."
+        ),
+    )
+    parser.add_argument(
+        "--grid",
+        action="store_true",
+        help="Shorthand for --strategy grid.",
+    )
+    parser.add_argument(
+        "--cell-km",
+        type=float,
+        default=DEFAULT_CELL_KM,
+        help="Grid cell size in km. grid/full-harvest only.",
+    )
+    parser.add_argument(
+        "--queries",
+        default=None,
+        help=(
+            'Comma-separated Pass 2 query variants, e.g. "Plumber,Drain '
+            'cleaning". full-harvest only; overrides the industry defaults.'
+        ),
+    )
+    parser.add_argument(
         "--target-new-exportable",
         type=int,
-        default=20,
-        help="Per-zip target for newly exportable contacts",
+        default=None,
+        help=(
+            f"Per-zip target for newly exportable contacts "
+            f"(default {DEFAULT_TARGET_NEW_EXPORTABLE}). Single-centroid only."
+        ),
     )
     parser.add_argument(
         "--max-depth",
         type=int,
-        default=20,
-        help="Maximum scraper depth before stopping each zip",
+        default=None,
+        help=(
+            f"Maximum scraper depth before stopping each zip "
+            f"(default {DEFAULT_MAX_DEPTH}). Single-centroid only."
+        ),
     )
     parser.add_argument(
         "--stale-iterations",
         type=int,
-        default=2,
-        help="Stop zip after this many consecutive zero-progress iterations",
+        default=None,
+        help=(
+            f"Stop zip after this many consecutive zero-progress iterations "
+            f"(default {DEFAULT_STALE_ITERATIONS}). Single-centroid only."
+        ),
     )
     parser.add_argument(
         "--no-proxy",
@@ -121,43 +182,147 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pass upstream -disable-page-reuse for this run.",
     )
-    return parser.parse_args()
+    return parser
 
+
+def parse_args() -> argparse.Namespace:
+    return _build_parser().parse_args()
+
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    """Resolve the strategy and reject flag combinations that would be ignored.
+
+    Same split as run_pipeline.py: a non-positive bound is an error (a `0`
+    target is met before the first scrape, a `0` depth can't run an iteration),
+    and a flag that the chosen strategy ignores is a warning — grid and
+    full-harvest run a fixed set of passes, so nothing there loops on depth.
+    """
+    strategy = _resolve_strategy(args)
+
+    depth_loop_flags = (
+        ("--target-new-exportable", args.target_new_exportable),
+        ("--max-depth", args.max_depth),
+        ("--stale-iterations", args.stale_iterations),
+    )
+    for flag, value in depth_loop_flags:
+        if value is not None and value <= 0:
+            parser.error(f"{flag} must be > 0 (got {value}).")
+    if args.cell_km <= 0:
+        parser.error(f"--cell-km must be > 0 (got {args.cell_km}).")
+
+    if strategy == "single-centroid":
+        if args.cell_km != DEFAULT_CELL_KM:
+            logger.warning(
+                "--cell-km=%.2f supplied but --strategy is single-centroid, "
+                "which has no grid; ignored.",
+                args.cell_km,
+            )
+    else:
+        for flag, value in depth_loop_flags:
+            if value is not None:
+                logger.warning(
+                    "%s=%d supplied but --strategy is %s, which does not loop "
+                    "on depth; ignored.",
+                    flag, value, strategy,
+                )
+
+    return strategy
 
 
 def main() -> None:
-    args = parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    setup_logging()
+
+    strategy = _validate_args(args, parser)
+    query_variants = _resolve_query_variants(args, strategy, parser)
+
     disable_scraper_proxy = args.no_proxy or args.no_scraper_proxy
     disable_crawler_proxy = args.no_proxy or args.no_crawler_proxy
-    setup_logging()
     init_db()
 
     locations = load_locations(args.zip_file)
-    logger.info("Loaded %d locations from %s", len(locations), args.zip_file)
+    logger.info(
+        "Loaded %d locations from %s (strategy=%s)",
+        len(locations), args.zip_file, strategy,
+    )
+    if strategy == "full-harvest":
+        logger.warning(
+            "full-harvest runs a grid pass AND a multi-query centroid sweep "
+            "for each of the %d rows — budget accordingly. PASS 3 (fast ZIP "
+            "top-up) is skipped: this batch already is the ZIP sweep.",
+            len(locations),
+        )
+
+    # Shared by all three strategies; every one of these is a per-run knob, not
+    # a per-location one.
+    common = dict(
+        disable_scraper_proxy=disable_scraper_proxy,
+        disable_crawler_proxy=disable_crawler_proxy,
+        scraper_concurrency=args.scraper_concurrency,
+        scraper_browser_pool_size=args.scraper_browser_pool_size,
+        scraper_pages_per_browser=args.scraper_pages_per_browser,
+        scraper_proxy_limit=args.scraper_proxy_limit,
+        scraper_disable_page_reuse=args.scraper_disable_page_reuse,
+    )
 
     for location in locations:
         try:
-            metrics = run_location_pipeline(
-                query=args.query,
-                location=location,
-                max_depth=args.max_depth,
-                target_new_exportable=args.target_new_exportable,
-                stale_iterations_limit=args.stale_iterations,
-                disable_scraper_proxy=disable_scraper_proxy,
-                disable_crawler_proxy=disable_crawler_proxy,
-                scraper_concurrency=args.scraper_concurrency,
-                scraper_browser_pool_size=args.scraper_browser_pool_size,
-                scraper_pages_per_browser=args.scraper_pages_per_browser,
-                scraper_proxy_limit=args.scraper_proxy_limit,
-                scraper_disable_page_reuse=args.scraper_disable_page_reuse,
-            )
+            if strategy == "single-centroid":
+                # Geocodes internally, so the centroid still costs exactly one
+                # Nominatim call per row — same as the branch below.
+                metrics = run_location_pipeline(
+                    query=args.query,
+                    location=location,
+                    max_depth=(
+                        DEFAULT_MAX_DEPTH if args.max_depth is None
+                        else args.max_depth
+                    ),
+                    target_new_exportable=(
+                        DEFAULT_TARGET_NEW_EXPORTABLE
+                        if args.target_new_exportable is None
+                        else args.target_new_exportable
+                    ),
+                    stale_iterations_limit=(
+                        DEFAULT_STALE_ITERATIONS if args.stale_iterations is None
+                        else args.stale_iterations
+                    ),
+                    **common,
+                )
+            else:
+                # grid and full-harvest need a bounding box, which a centroid
+                # alone doesn't give — resolve geo here and hand it down. A row
+                # Nominatim can't box raises inside the strategy and is caught
+                # below, so one unmappable ZIP doesn't end the batch.
+                lat, lon, bbox = geocode_location(location)
+                if strategy == "grid":
+                    metrics = run_location_grid(
+                        query=args.query,
+                        location=location,
+                        bbox=bbox,
+                        cell_km=args.cell_km,
+                        **common,
+                    )
+                else:
+                    metrics = run_location_full_harvest(
+                        query=args.query,
+                        location=location,
+                        bbox=bbox,
+                        lat=lat,
+                        lon=lon,
+                        cell_km=args.cell_km,
+                        queries=query_variants,
+                        # zip_csv deliberately omitted — see the warning above.
+                        **common,
+                    )
         except Exception:
             logger.exception("Location run failed for %s. Continuing batch.", location)
             continue
 
         logger.info(
-            "Finished %r: depths=%s new_exportable=%d total_contacts=%d",
+            "Finished %r: strategy=%s depths=%s new_exportable=%d total_contacts=%d",
             location,
+            strategy,
             metrics.depths_run,
             metrics.new_exportable_contacts,
             metrics.total_contacts,

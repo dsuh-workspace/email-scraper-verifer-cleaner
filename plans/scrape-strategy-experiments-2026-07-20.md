@@ -15,7 +15,9 @@
 - Adds 76% more coverage than the current pipeline's single-query centroid call
 - Runs comfortably without proxies (single browser context, one Google connection at a time)
 
-Run it via `scripts/harvest_best.py` (created; see below).
+Run it via `run_pipeline.py --strategy full-harvest`. The original
+standalone runner lives at `scripts/experiments/harvest_best.py`
+(offline-only: no DB, no dedupe, no email crawl).
 
 ---
 
@@ -108,12 +110,20 @@ Use **Grid + Multi-query + Fast ZIP top-up**:
 env -u SCRAPER_PROXIES -u SCRAPER_PROXIES_FILE \
     -u CRAWLER_PROXY -u CRAWLER_PROXY_FILE \
     -u CRAWLER_HTTP_PROXY -u CRAWLER_HTTPS_PROXY \
-  .venv/bin/python scripts/harvest_best.py \
+  .venv/bin/python scripts/experiments/harvest_best.py \
     --industry "Plumbing" \
     --bbox "37.20,-121.99,37.44,-121.75" \
     --centroid "37.336,-121.891" \
     --zips-csv san_jose_zips.csv \
     --out data/plumbing_sanjose_best.jsonl
+```
+
+For production runs prefer the pipeline equivalent, which also dedupes into
+the DB, crawls sites for emails, and exports:
+
+```bash
+python run_pipeline.py --query "Plumbing" --location "San Jose, CA" \
+  --strategy full-harvest --cell-km 3.0 --zip-csv san_jose_zips.csv
 ```
 
 Expected: ~500 unique businesses, ~350 with websites, ~18 min wall time.
@@ -155,7 +165,10 @@ scripts/scrape_experiment.py   — experiment harness (one invocation)
 scripts/run_experiments.py     — cluster driver (A/As/Am/B/C/D/Dt/Dm/Dr/E/Es)
 scripts/analyze_experiments.py — per-experiment stats + overlap matrix
 scripts/final_analysis.py      — strategy comparison + combo recommendations
-scripts/harvest_best.py        — production runner (Grid + Multi + Fast ZIP)
+scripts/experiments/harvest_best.py
+                              — original standalone runner (Grid + Multi + Fast
+                                ZIP). Superseded in production by
+                                `run_pipeline.py --strategy full-harvest`.
 experiments/*.json             — raw scraper output per experiment
 experiments/*.meta.json        — run metadata (queries, geo, depth, wall time)
 experiments/*.log              — scraper stdout log (dropped from git)
