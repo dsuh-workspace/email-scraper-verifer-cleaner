@@ -14,6 +14,7 @@ from app.scraper.run_scraper import geocode_location
 # difference between a full sweep and grid-level results at full wall cost.
 from run_pipeline import (
     DEFAULT_MAX_DEPTH,
+    _default_csv_path,
     _resolve_query_variants,
     _resolve_strategy,
     run_location_full_harvest,
@@ -182,6 +183,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pass upstream -disable-page-reuse for this run.",
     )
+    parser.add_argument(
+        "--csv-path",
+        type=str,
+        default=None,
+        help=(
+            "Path for the local CSV export fallback (used only if Sheets "
+            "export fails or SPREADSHEET_ID is unset/mock). Defaults to a "
+            "descriptive 'data/leads_<query>_<date>.csv' covering the whole "
+            "batch (no single location, since a batch spans many rows)."
+        ),
+    )
     return parser
 
 
@@ -328,7 +340,7 @@ def main() -> None:
             metrics.total_contacts,
         )
 
-    export_new_leads()
+    export_new_leads(csv_path=args.csv_path or _default_csv_path(args.query))
 
 
 if __name__ == "__main__":

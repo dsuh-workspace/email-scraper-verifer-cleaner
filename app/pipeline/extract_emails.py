@@ -176,8 +176,10 @@ def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, st
 
     file_proxy = None
     if proxy_file:
+        import random
         file_proxies = load_proxy_file(proxy_file)
         if file_proxies:
+            random.shuffle(file_proxies)
             file_proxy = validate_proxy_url(
                 file_proxies[0],
                 error_prefix="Crawler",

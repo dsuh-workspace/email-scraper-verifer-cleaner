@@ -17,6 +17,7 @@ Session = sessionmaker(bind=engine)
 LEGACY_EXPORT_DESTINATION = "local_csv_leads"
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "mock")
 CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE", "credentials.json")
+DEFAULT_CSV_PATH = "data/leads_export.csv"
 
 # Google Sheets scopes
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -89,7 +90,7 @@ def append_leads_to_google_sheets(leads_to_export):
         logger.error(f"Error writing to Google Sheets API: {e}")
         return False
 
-def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
+def write_leads_to_local_csv(leads_to_export, csv_path=DEFAULT_CSV_PATH):
     """
     Writes leads to a local CSV file (used as a fallback or local development mock).
     """
@@ -137,7 +138,11 @@ def write_leads_to_local_csv(leads_to_export, csv_path="data/leads_export.csv"):
         logger.error(f"Failed to write to local CSV: {e}")
         return False
 
-def export_new_leads(destination: str | None = None, min_score: int = 0):
+def export_new_leads(
+    destination: str | None = None,
+    min_score: int = 0,
+    csv_path: str | None = None,
+):
     """
     Finds contacts that haven't been exported yet, exports them to Sheets
     (or fallback CSV), and logs the export history.
@@ -189,7 +194,7 @@ def export_new_leads(destination: str | None = None, min_score: int = 0):
         
         # Fall back to local CSV if Sheets fails or isn't configured
         if not success:
-            success = write_leads_to_local_csv(new_leads)
+            success = write_leads_to_local_csv(new_leads, csv_path=csv_path or DEFAULT_CSV_PATH)
             
         if success:
             # Log export history entries

@@ -333,7 +333,7 @@ class TestMain:
             use_grid=False, cell_km=2.0, bbox=None,
             disable_scraper_proxy=False, disable_crawler_proxy=False,
             strategy="single-centroid", queries=None, zip_csv=None,
-            verify=False, min_score=0,
+            verify=False, min_score=0, csv_path=None,
             scraper_concurrency=None,
             scraper_browser_pool_size=None,
             scraper_pages_per_browser=None,
@@ -354,6 +354,7 @@ class TestMain:
             called["zip_csv"] = zip_csv
             called["verify"] = verify
             called["min_score"] = min_score
+            called["csv_path"] = csv_path
             called["scraper_concurrency"] = scraper_concurrency
             called["scraper_browser_pool_size"] = scraper_browser_pool_size
             called["scraper_pages_per_browser"] = scraper_pages_per_browser
@@ -379,6 +380,7 @@ class TestMain:
             "zip_csv": None,
             "verify": False,
             "min_score": 0,
+            "csv_path": None,
             "scraper_concurrency": 3,
             "scraper_browser_pool_size": 2,
             "scraper_pages_per_browser": 1,

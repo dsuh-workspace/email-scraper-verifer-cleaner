@@ -13,6 +13,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 
 from sqlalchemy.orm import sessionmaker
 
@@ -705,6 +706,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "row are treated as score=0 and skipped when min-score > 0."
         ),
     )
+    parser.add_argument(
+        "--csv-path",
+        type=str,
+        default=None,
+        help=(
+            "Path for the local CSV export fallback (used only if Sheets "
+            "export fails or SPREADSHEET_ID is unset/mock). Defaults to a "
+            "descriptive 'data/leads_<location>_<query>_<date>.csv'."
+        ),
+    )
     return parser
 
 
@@ -746,6 +757,30 @@ def _load_zip_csv(path: str) -> list[dict[str, str]]:
     return rows
 
 
+def _slugify(text: str) -> str:
+    """First comma-separated segment, lowercased, alnum-only.
+
+    e.g. 'San Jose, CA' -> 'sanjose'. Drops the state/qualifier so batch
+    filenames stay short; callers that need the state should pre-join it.
+    """
+    primary = text.split(",")[0]
+    return re.sub(r"[^a-z0-9]+", "", primary.lower()) or "na"
+
+
+def _default_csv_path(query: str, location: str | None = None) -> str:
+    """Descriptive default local-CSV export filename.
+
+    e.g. 'data/leads_sanjose_plumbing_2026-07-29.csv'. `location` is
+    omitted for batch runs spanning many ZIPs/cities under one query.
+    """
+    parts = ["leads"]
+    if location:
+        parts.append(_slugify(location))
+    parts.append(_slugify(query))
+    parts.append(date.today().isoformat())
+    return f"data/{'_'.join(parts)}.csv"
+
+
 def run_end_to_end_pipeline(
     query: str,
     location: str,
@@ -761,6 +796,7 @@ def run_end_to_end_pipeline(
     zip_csv: str | None = None,
     verify: bool = False,
     min_score: int = 0,
+    csv_path: str | None = None,
     scraper_concurrency: int | None = None,
     scraper_browser_pool_size: int | None = None,
     scraper_pages_per_browser: int | None = None,
@@ -893,7 +929,7 @@ def run_end_to_end_pipeline(
                 # blocked. Log and keep going so we still get an export.
                 logger.warning("Verification pass failed: %s", ve)
 
-        export_new_leads(min_score=min_score)
+        export_new_leads(min_score=min_score, csv_path=csv_path or _default_csv_path(query, location))
         logger.info("=" * 60)
         logger.info("PIPELINE EXECUTED SUCCESSFULLY")
         logger.info("=" * 60)
@@ -1022,6 +1058,7 @@ def main() -> None:
         zip_csv=args.zip_csv,
         verify=args.verify,
         min_score=args.min_score,
+        csv_path=args.csv_path,
         scraper_concurrency=args.scraper_concurrency,
         scraper_browser_pool_size=args.scraper_browser_pool_size,
         scraper_pages_per_browser=args.scraper_pages_per_browser,

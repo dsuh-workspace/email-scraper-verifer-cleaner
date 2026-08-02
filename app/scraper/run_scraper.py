@@ -84,6 +84,8 @@ def _scraper_proxy_args(
             "SCRAPER_PROXIES contains an empty entry. Remove trailing or double commas."
         )
 
+    import random
+
     proxies = []
     for proxy_url in proxy_values:
         proxies.append(
@@ -94,6 +96,8 @@ def _scraper_proxy_args(
                 unsupported_message="Unsupported proxy scheme",
             )
         )
+
+    random.shuffle(proxies)
 
     if limit is not None:
         proxies = proxies[:limit]

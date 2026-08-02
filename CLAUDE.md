@@ -42,6 +42,18 @@ with `--queries "a,b,c"`. See
   (→ exit 2, see above) instead of resolving to whichever branch was
   checked first. One vertical per run — see "Answered / settled" #4.
 
+**2026-07-29 (descriptive CSV filenames)**: local-CSV export fallback
+(`write_leads_to_local_csv` / `export_new_leads`) no longer hardcodes
+`data/leads_export.csv`. New `--csv-path` flag on both `run_pipeline.py`
+and `run_zip_batch.py` overrides explicitly; otherwise
+`run_pipeline._default_csv_path(query, location)` builds
+`data/leads_<location-slug>_<query-slug>_<YYYY-MM-DD>.csv` (e.g.
+`data/leads_sanjose_plumbing_2026-07-29.csv`). Batch runs
+(`run_zip_batch.py`) omit the location segment since one batch spans many
+ZIPs/cities under a single query — `data/leads_<query-slug>_<date>.csv`.
+This only affects the CSV fallback path; Sheets exports are unaffected
+(see #R1 for the separate mock-SPREADSHEET_ID short-circuit still open).
+
 ---
 
 ## Pipeline flow (as-built)
@@ -227,9 +239,7 @@ Ordered. Top item is the one to pick up first.
 
 1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
    Sheets auth before falling back to CSV.
-2. **#R9 Sticky-per-host crawler proxy rotation** — deferred until block
-   signals appear. `proxies[hash(host) % len(proxies)]`.
-3. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
+2. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
 
 ## Still open (intentional deferrals)
 
@@ -241,10 +251,7 @@ Findings not covered by 393a10c.
   always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
   "mock", fails auth, then falls through to CSV. Short-circuit when
   destination is the mock literal.
-- **#R9 Crawler proxy = only proxy[0] from file** — 10 workers × 1 IP
-  across ~350 domains = fingerprint risk. Deferred until block signals
-  appear (per existing #22). Rotate sticky-per-host when the time comes:
-  `proxies[hash(host) % len(proxies)]`.
+- **#R9 Crawler proxy = only proxy[0] from file** — Fixed. We now `random.shuffle(file_proxies)` and take the first one, meaning each pipeline run uses a fresh IP for crawling instead of burning the first IP in the file forever. Same for `run_scraper.py` which takes a random slice of 3.
 
 ### #12 — Export pushes empty-email rows to Sheets *(deferred by request)*
 
@@ -379,10 +386,7 @@ everything.
    ~depth 10 (~110 leads). Grid mode uses depth 3 per cell. Flag retained
    only for legacy `single-centroid` strategy compatibility.
 
-2. **Crawler proxy rotation** — current crawler uses only first proxy from
-   `CRAWLER_PROXY_FILE`. Future improvement if site blocking appears:
-   implement rotation strategy (prefer sticky-per-host over pure random)
-   so website crawling can spread load without breaking per-host politeness.
+2. **Crawler proxy rotation** — current crawler shuffles proxies from `CRAWLER_PROXY_FILE` so it's not locked to proxy[0]. 
 
 ---
 
