@@ -31,6 +31,11 @@ data/leads_export.csv
 data/temp-*/
 temp-*/
 
+# Raw experiment/harvest artifacts — reproducible from scripts + their own
+# .meta.json; durable findings belong in plans/*.md, not here. See RUNS.md.
+data/harvests/
+plans/*.jsonl
+
 # Pytest
 .pytest_cache/
 

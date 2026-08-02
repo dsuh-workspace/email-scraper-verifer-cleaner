@@ -6,6 +6,11 @@ demand.
 
 ## Recently closed
 
+- ✅ **#R9 Crawler proxy = only proxy[0] from file** (2026-08-01, commit
+  `9d28a8a`) — `random.shuffle(file_proxies)` before taking the first one,
+  so each pipeline run uses a fresh IP for crawling instead of burning the
+  first IP in the file forever. Same treatment for `run_scraper.py`, which
+  takes a random slice of 3.
 - ✅ **#R6 `run_zip_batch.py --strategy`** (2026-07-29) — the batch path was
   single-centroid-only, which made metro-wide grid/full-harvest (the actual
   coverage play) unreachable from the CSV runner. Rather than reimplement
