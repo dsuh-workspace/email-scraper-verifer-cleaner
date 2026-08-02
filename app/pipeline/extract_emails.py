@@ -85,7 +85,18 @@ EXCLUDE_DOMAINS = (
 
 # Paths to try in order. First hit that returns emails short-circuits.
 # Homepage first because many small biz sites do drop a mailto on it.
-CONTACT_PATHS = ("", "/contact", "/contact-us", "/about", "/about-us", "/team")
+CONTACT_PATHS = (
+    "",
+    "/contact",
+    "/contact-us",
+    "/about",
+    "/about-us",
+    "/team",
+    "/privacy-policy",
+    "/privacy",
+    "/terms",
+    "/terms-of-service",
+)
 
 REQUEST_TIMEOUT_SEC = 7
 MAX_WORKERS = 10
