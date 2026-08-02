@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.db.create_tables import init_db
 from app.logging_config import get_logger, setup_logging
-from app.pipeline.export_sheets import export_new_leads
+from app.pipeline.export_sheets import export_run_outputs
 from app.scraper.run_scraper import geocode_location
 # _resolve_strategy / _resolve_query_variants are shared rather than
 # reimplemented: both CLIs must agree on what --grid means and on when a
@@ -184,6 +184,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pass upstream -disable-page-reuse for this run.",
     )
     parser.add_argument(
+        "--min-score",
+        type=int,
+        default=0,
+        help=(
+            "Only include contacts with verifier score >= N in the verified CSV. "
+            "Deduped export behavior is unchanged."
+        ),
+    )
+    parser.add_argument(
         "--csv-path",
         type=str,
         default=None,
@@ -340,7 +349,10 @@ def main() -> None:
             metrics.total_contacts,
         )
 
-    export_new_leads(csv_path=args.csv_path or _default_csv_path(args.query))
+    export_run_outputs(
+        min_score=args.min_score,
+        csv_path=args.csv_path or _default_csv_path(args.query),
+    )
 
 
 if __name__ == "__main__":

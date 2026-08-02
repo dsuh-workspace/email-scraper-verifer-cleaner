@@ -1,7 +1,9 @@
 import os
 import csv
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from dotenv import load_dotenv
+from sqlalchemy import func
 from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification
@@ -138,6 +140,76 @@ def write_leads_to_local_csv(leads_to_export, csv_path=DEFAULT_CSV_PATH):
         logger.error(f"Failed to write to local CSV: {e}")
         return False
 
+def _latest_verification_subquery(session):
+    latest_ids = (
+        session.query(
+            EmailVerification.contact_id.label("cid"),
+            func.max(EmailVerification.id).label("latest_id"),
+        )
+        .group_by(EmailVerification.contact_id)
+        .subquery()
+    )
+    return (
+        session.query(
+            EmailVerification.contact_id.label("cid"),
+            EmailVerification.score.label("score"),
+        )
+        .join(latest_ids, EmailVerification.id == latest_ids.c.latest_id)
+        .subquery()
+    )
+
+
+def _build_export_query(
+    session,
+    *,
+    destination: str,
+    min_score: int = 0,
+    exported_only: bool = False,
+):
+    query = session.query(Contact, Business).join(
+        Business, Contact.business_id == Business.id
+    )
+
+    if exported_only:
+        query = query.filter(Contact.email.isnot(None))
+        query = query.filter(
+            ~Contact.id.in_(
+                session.query(ExportHistory.contact_id).filter(
+                    ExportHistory.destination == destination,
+                    ExportHistory.contact_id.isnot(None),
+                )
+            )
+        )
+
+    if min_score > 0:
+        latest = _latest_verification_subquery(session)
+        query = query.join(latest, latest.c.cid == Contact.id).filter(
+            latest.c.score >= min_score
+        )
+        logger.info("Gating export at min_score=%d (verifier score).", min_score)
+
+    return query
+
+
+def _derive_csv_paths(csv_path: str | None) -> dict[str, str]:
+    base_path = Path(csv_path or DEFAULT_CSV_PATH)
+    stem = base_path.stem
+    suffix = base_path.suffix or ".csv"
+    parent = base_path.parent
+    return {
+        "all": str(parent / f"{stem}_all{suffix}"),
+        "deduped": str(parent / f"{stem}_deduped{suffix}"),
+        "verified": str(parent / f"{stem}_verified{suffix}"),
+    }
+
+
+def _export_csv_only(leads_to_export, csv_path: str) -> bool:
+    if not leads_to_export:
+        logger.info("No leads to write for %s.", csv_path)
+        return True
+    return write_leads_to_local_csv(leads_to_export, csv_path=csv_path)
+
+
 def export_new_leads(
     destination: str | None = None,
     min_score: int = 0,
@@ -157,64 +229,95 @@ def export_new_leads(
     )
 
     try:
-        # Query contacts that don't have an export history entry for this destination
-        query = session.query(Contact, Business).join(
-            Business, Contact.business_id == Business.id
-        ).filter(
-            Contact.email.isnot(None),
-            ~Contact.id.in_(
-                session.query(ExportHistory.contact_id).filter(
-                    ExportHistory.destination == destination,
-                    ExportHistory.contact_id.isnot(None),
-                )
-            )
-        )
-        if min_score > 0:
-            # Sub-select latest verification per contact by max(id) (id is
-            # monotonic, no timestamp column on EmailVerification).
-            latest = (
-                session.query(
-                    EmailVerification.contact_id.label("cid"),
-                    EmailVerification.score.label("score"),
-                )
-            ).subquery()
-            query = query.join(latest, latest.c.cid == Contact.id).filter(
-                latest.c.score >= min_score
-            )
-            logger.info("Gating export at min_score=%d (verifier score).", min_score)
-        new_leads = query.all()
-        
+        new_leads = _build_export_query(
+            session,
+            destination=destination,
+            min_score=min_score,
+            exported_only=True,
+        ).all()
+
         if not new_leads:
             logger.info("No new leads to export.")
-            return
+            return []
 
         logger.info(f"Found {len(new_leads)} new leads to export.")
-        # Try to write to Google Sheets first
         success = append_leads_to_google_sheets(new_leads)
-        
-        # Fall back to local CSV if Sheets fails or isn't configured
+
         if not success:
-            success = write_leads_to_local_csv(new_leads, csv_path=csv_path or DEFAULT_CSV_PATH)
-            
+            success = write_leads_to_local_csv(
+                new_leads, csv_path=csv_path or DEFAULT_CSV_PATH
+            )
+
         if success:
-            # Log export history entries
             for contact, _ in new_leads:
                 history = ExportHistory(
                     contact_id=contact.id,
                     destination=destination,
-                    exported_at=datetime.utcnow(),
+                    exported_at=datetime.now(UTC),
                 )
                 session.add(history)
             session.commit()
-            logger.info(f"Export logging completed. Logged {len(new_leads)} entries to export_history.")
-        else:
-            logger.error("Export failed.")
+            logger.info(
+                f"Export logging completed. Logged {len(new_leads)} entries to export_history."
+            )
+            return new_leads
+
+        logger.error("Export failed.")
+        return []
     except Exception as e:
         session.rollback()
         logger.error(f"Error during export: {e}")
         raise e
     finally:
         session.close()
+
+
+def export_run_outputs(
+    destination: str | None = None,
+    min_score: int = 0,
+    csv_path: str | None = None,
+):
+    destination = destination or (
+        SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else LEGACY_EXPORT_DESTINATION
+    )
+    paths = _derive_csv_paths(csv_path)
+
+    session = Session()
+    try:
+        all_leads = _build_export_query(
+            session,
+            destination=destination,
+            exported_only=False,
+        ).all()
+        verified_leads = _build_export_query(
+            session,
+            destination=destination,
+            min_score=min_score,
+            exported_only=True,
+        ).all()
+    finally:
+        session.close()
+
+    _export_csv_only(all_leads, paths["all"])
+    deduped_leads = export_new_leads(
+        destination=destination,
+        min_score=0,
+        csv_path=paths["deduped"],
+    )
+    _export_csv_only(verified_leads, paths["verified"])
+
+    logger.info(
+        "Exported run outputs: all=%d deduped=%d verified=%d",
+        len(all_leads),
+        len(deduped_leads),
+        len(verified_leads),
+    )
+
+    return {
+        "all": paths["all"],
+        "deduped": paths["deduped"],
+        "verified": paths["verified"],
+    }
 
 if __name__ == "__main__":
     setup_logging()
