@@ -74,7 +74,7 @@ def modules():
 
 
     fake_export = types.ModuleType("app.pipeline.export_sheets")
-    fake_export.export_new_leads = lambda **_kw: None
+    fake_export.export_run_outputs = lambda **_kw: None
 
     fake_extract = types.ModuleType("app.pipeline.extract_emails")
     fake_extract.harvest_emails_from_websites = lambda: None
@@ -339,6 +339,7 @@ class TestMain:
             scraper_pages_per_browser=None,
             scraper_proxy_limit=None,
             scraper_disable_page_reuse=False,
+            pass2_per_variant=True,
         ):
             called["query"] = query
             called["location"] = location
@@ -360,6 +361,7 @@ class TestMain:
             called["scraper_pages_per_browser"] = scraper_pages_per_browser
             called["scraper_proxy_limit"] = scraper_proxy_limit
             called["scraper_disable_page_reuse"] = scraper_disable_page_reuse
+            called["pass2_per_variant"] = pass2_per_variant
 
         monkeypatch.setattr(run_pipeline, "run_end_to_end_pipeline", fake_run_end_to_end_pipeline)
 
@@ -386,6 +388,7 @@ class TestMain:
             "scraper_pages_per_browser": 1,
             "scraper_proxy_limit": 4,
             "scraper_disable_page_reuse": True,
+            "pass2_per_variant": True,
         }
 
     def _capture_pipeline_kwargs(self, monkeypatch, run_pipeline) -> dict:
@@ -564,7 +567,7 @@ class TestMain:
         )
 
         exported = []
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: exported.append(True))
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: exported.append(True))
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -603,7 +606,7 @@ class TestMain:
             run_pipeline, "get_exportable_contact_count",
             lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 5,
         )
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -640,7 +643,7 @@ class TestMain:
             run_pipeline, "get_exportable_contact_count",
             lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 0,
         )
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -681,7 +684,7 @@ class TestMain:
             run_pipeline, "get_exportable_contact_count",
             lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 0,
         )
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
             query="Plumbing",
@@ -710,7 +713,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **kwargs: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         import pytest
         with pytest.raises(SystemExit):
@@ -783,9 +786,12 @@ class TestFullHarvestStrategy:
             run_pipeline, "get_exportable_contact_count",
             lambda destination=run_pipeline.LEGACY_EXPORT_DESTINATION: 0,
         )
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
-    def test_full_harvest_runs_grid_then_multi_query(self, monkeypatch, modules):
+    def test_full_harvest_pass2_default_is_per_variant(self, monkeypatch, modules):
+        """Per-variant is the default: one execute_scrape_and_ingest call per
+        Pass 2 query variant, not one combined multi-query call — the
+        combined call under-delivers (see CLAUDE.md)."""
         run_pipeline, _ = modules
         calls: list[dict] = []
         self._wire(monkeypatch, run_pipeline, calls)
@@ -797,7 +803,41 @@ class TestFullHarvestStrategy:
             cell_km=2.0,
         )
 
-        # No zip-csv → 2 passes: grid, then multi-query.
+        # No zip-csv → grid, then one call per Pass 2 variant.
+        assert len(calls) == 1 + len(run_pipeline.DEFAULT_HARVEST_QUERIES)
+
+        # PASS 1: grid single query
+        assert calls[0]["bbox"] == (37.21, -122.05, 37.47, -121.75)
+        assert calls[0]["cell_km"] == 2.0
+        assert calls[0]["queries"] is None
+        assert calls[0]["depth"] == 3
+
+        # PASS 2: one separate call per variant, no shared queries= list.
+        for i, variant in enumerate(run_pipeline.DEFAULT_HARVEST_QUERIES, start=1):
+            assert calls[i]["query"] == variant
+            assert calls[i]["queries"] is None
+            assert calls[i]["bbox"] is None
+            assert calls[i]["lat"] == 37.3
+            assert calls[i]["lon"] == -121.8
+            assert calls[i]["depth"] == 10
+            assert calls[i]["fast_mode"] is False
+
+    def test_full_harvest_pass2_combined_opt_in(self, monkeypatch, modules):
+        """--pass2-combined / pass2_per_variant=False: legacy single combined
+        multi-query call, kept for comparison/diagnostic use."""
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            cell_km=2.0,
+            pass2_per_variant=False,
+        )
+
+        # No zip-csv → 2 passes: grid, then one combined multi-query call.
         assert len(calls) == 2
 
         # PASS 1: grid single query
@@ -827,6 +867,7 @@ class TestFullHarvestStrategy:
             scraper_browser_pool_size=2,
             scraper_pages_per_browser=1,
             scraper_proxy_limit=4,
+            pass2_per_variant=False,
         )
 
         assert len(calls) == 2
@@ -839,6 +880,32 @@ class TestFullHarvestStrategy:
         assert calls[1]["pages_per_browser"] == 1
         assert calls[1]["proxy_limit"] == 4
 
+    def test_full_harvest_forwards_scraper_tuning_per_variant_default(
+        self, monkeypatch, modules
+    ):
+        """Tuning kwargs reach every Pass 2 variant call under the
+        per-variant default, not just a single combined call."""
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            scraper_concurrency=3,
+            scraper_browser_pool_size=2,
+            scraper_pages_per_browser=1,
+            scraper_proxy_limit=4,
+        )
+
+        assert len(calls) == 1 + len(run_pipeline.DEFAULT_HARVEST_QUERIES)
+        for call in calls:
+            assert call["concurrency"] == 3
+            assert call["browser_pool_size"] == 2
+            assert call["pages_per_browser"] == 1
+            assert call["proxy_limit"] == 4
+
     def test_full_harvest_uses_custom_queries(self, monkeypatch, modules):
         run_pipeline, _ = modules
         calls: list[dict] = []
@@ -849,8 +916,31 @@ class TestFullHarvestStrategy:
             location="San Jose, CA",
             strategy="full-harvest",
             queries=("Plumbing", "Plumber", "Leak repair"),
+            pass2_per_variant=False,
         )
         assert calls[1]["queries"] == ("Plumbing", "Plumber", "Leak repair")
+
+    def test_full_harvest_uses_custom_queries_per_variant_default(
+        self, monkeypatch, modules
+    ):
+        """Custom queries= is still honored under the per-variant default —
+        each custom variant gets its own scrape, not a combined call."""
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        custom = ("Plumbing", "Plumber", "Leak repair")
+        run_pipeline.run_end_to_end_pipeline(
+            query="Plumbing",
+            location="San Jose, CA",
+            strategy="full-harvest",
+            queries=custom,
+        )
+
+        assert len(calls) == 1 + len(custom)
+        for i, variant in enumerate(custom, start=1):
+            assert calls[i]["query"] == variant
+            assert calls[i]["queries"] is None
 
     def test_full_harvest_zip_pass_optional(self, monkeypatch, tmp_path, modules):
         run_pipeline, _ = modules
@@ -868,6 +958,7 @@ class TestFullHarvestStrategy:
             location="San Jose, CA",
             strategy="full-harvest",
             zip_csv=str(zip_csv),
+            pass2_per_variant=False,
         )
 
         # 4 passes: grid, multi-query, 2×zip
@@ -891,7 +982,7 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "process_and_deduplicate_leads", lambda: None)
         monkeypatch.setattr(run_pipeline, "harvest_emails_from_websites", lambda **_: None)
         monkeypatch.setattr(run_pipeline, "get_contact_count", lambda: 0)
-        monkeypatch.setattr(run_pipeline, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         import pytest
         with pytest.raises(SystemExit):
@@ -985,6 +1076,7 @@ class TestFullHarvestStrategy:
             query="Roofing",
             location="San Jose, CA",
             strategy="full-harvest",
+            pass2_per_variant=False,
         )
 
         assert calls[1]["queries"] == ("Roofing",)
@@ -1061,9 +1153,28 @@ class TestFullHarvestStrategy:
             query="HVAC",
             location="Plano, TX",
             strategy="full-harvest",
+            pass2_per_variant=False,
         )
         # Pass 2 = multi-query. Should be HVAC set, not plumbing.
         assert calls[1]["queries"] == run_pipeline.DEFAULT_HVAC_HARVEST_QUERIES
+
+    def test_full_harvest_hvac_pass2_per_variant_default(self, monkeypatch, modules):
+        """HVAC's pruned 3-variant set, one call per variant under the
+        per-variant default (not combined into a single Pass 2 call)."""
+        run_pipeline, _ = modules
+        calls: list[dict] = []
+        self._wire(monkeypatch, run_pipeline, calls)
+
+        run_pipeline.run_end_to_end_pipeline(
+            query="HVAC",
+            location="Plano, TX",
+            strategy="full-harvest",
+        )
+
+        assert len(calls) == 1 + len(run_pipeline.DEFAULT_HVAC_HARVEST_QUERIES)
+        for i, variant in enumerate(run_pipeline.DEFAULT_HVAC_HARVEST_QUERIES, start=1):
+            assert calls[i]["query"] == variant
+            assert calls[i]["queries"] is None
 
 
 class TestZipBatchHelpers:
@@ -1143,7 +1254,7 @@ class TestZipBatchMain:
         monkeypatch.setattr(run_zip_batch, "init_db", lambda: init_db_calls.append(True))
 
         exported = []
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: exported.append(True))
+        monkeypatch.setattr(run_zip_batch, "export_run_outputs", lambda **_kw: exported.append(True))
 
         run_zip_batch.main()
 
@@ -1189,7 +1300,7 @@ class TestZipBatchMain:
         monkeypatch.setattr(run_zip_batch, "run_location_pipeline", fake_run_location_pipeline)
 
         exported = []
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: exported.append(True))
+        monkeypatch.setattr(run_zip_batch, "export_run_outputs", lambda **_kw: exported.append(True))
 
         run_zip_batch.main()
 
@@ -1215,7 +1326,7 @@ class TestZipBatchProxyFlags:
         monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
         monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
         monkeypatch.setattr(run_zip_batch, "load_locations", lambda path: ["95112"])
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_zip_batch, "export_run_outputs", lambda **_kw: None)
 
         called = {}
 
@@ -1255,7 +1366,7 @@ class TestZipBatchProxyFlags:
         monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
         monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
         monkeypatch.setattr(run_zip_batch, "load_locations", lambda path: ["95112"])
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_zip_batch, "export_run_outputs", lambda **_kw: None)
 
         called = {}
 
@@ -1290,7 +1401,7 @@ class TestZipBatchStrategies:
         """
         monkeypatch.setattr(run_zip_batch, "setup_logging", lambda: None)
         monkeypatch.setattr(run_zip_batch, "init_db", lambda: None)
-        monkeypatch.setattr(run_zip_batch, "export_new_leads", lambda **_kw: None)
+        monkeypatch.setattr(run_zip_batch, "export_run_outputs", lambda **_kw: None)
         monkeypatch.setattr(
             run_zip_batch, "geocode_location",
             lambda location: (37.3, -121.8, bbox),
@@ -1433,7 +1544,7 @@ class TestZipBatchStrategies:
         calls = self._wire(monkeypatch, run_pipeline, run_zip_batch)
 
         exported = []
-        monkeypatch.setattr(run_zip_batch, "export_new_leads",
+        monkeypatch.setattr(run_zip_batch, "export_run_outputs",
                             lambda **_kw: exported.append(True))
 
         seen = []

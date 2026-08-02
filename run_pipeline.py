@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.create_tables import Contact, ExportHistory, init_db
 from app.db.database import engine
 from app.logging_config import get_logger, setup_logging
-from app.pipeline.export_sheets import export_new_leads
+from app.pipeline.export_sheets import export_run_outputs
 from app.pipeline.extract_emails import harvest_emails_from_websites
 from app.pipeline.process_leads import process_and_deduplicate_leads
 from app.pipeline.verify_emails import verify_contacts_emails
@@ -50,16 +50,17 @@ DEFAULT_HARVEST_QUERIES = (
     "Sewer service",
 )
 
-# HVAC variants — analogous breadth-over-redundancy set. No empirical
-# per-variant lift table yet; refine after first HVAC full-harvest run.
+# HVAC variants. Pruned from the original 8-variant breadth-over-redundancy
+# set to these 3 per a real per-variant lift table run against SJ HVAC on
+# 2026-08-01/02 (--pass2-combined diagnostic): "Air conditioning repair",
+# "Furnace repair", "AC installation", "Heat pump service", and "Ductwork"
+# each contributed ~0 net-new businesses over Pass 1 grid + the other
+# variants — only "Heating and cooling" and "HVAC contractor" surfaced real
+# incremental lift. "HVAC" is kept as the anchor/base query. See CLAUDE.md
+# ("Pass 2 combined-query underperformance") for the full root-cause writeup.
 DEFAULT_HVAC_HARVEST_QUERIES = (
     "HVAC",
     "Heating and cooling",
-    "Air conditioning repair",
-    "Furnace repair",
-    "AC installation",
-    "Heat pump service",
-    "Ductwork",
     "HVAC contractor",
 )
 
@@ -394,6 +395,7 @@ def run_location_full_harvest(
     scraper_pages_per_browser: int | None = None,
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
+    pass2_per_variant: bool = True,
 ) -> LocationRunMetrics:
     """Grid + multi-query slow at centroid + optional fast ZIP top-up.
 
@@ -406,6 +408,24 @@ def run_location_full_harvest(
 
     `zip_csv` drives the optional Pass 3. Batch callers should leave it None —
     a per-location run inside a ZIP sweep would re-sweep the same ZIPs.
+
+    `pass2_per_variant` (default True): runs each Pass 2 variant as its own
+    `execute_scrape_and_ingest` call (one `scrape_runs` row per variant,
+    tagged with the variant text) instead of one combined multi-query
+    invocation. This is the default because the combined call under-delivers:
+    the upstream Go scraper (`gosom/google-maps-scraper`) shares one
+    `deduper`/`exiter` pair across every seed job derived from the `-input`
+    file when not using `-grid-bbox`, so each query line's newly-found place
+    hrefs are silently dropped once a concurrently-scheduled sibling variant's
+    feed-parse has already claimed them — regardless of whether that sibling
+    "should" get credit. Empirically (SJ HVAC, 2026-08-01/02): one combined
+    8-variant call yielded 4 raw leads total; the same 8 variants run
+    separately yielded 81. See CLAUDE.md ("Pass 2 combined-query
+    underperformance") for the full source-level writeup and why this isn't
+    being patched upstream. Costs roughly len(variants)x Pass 2 wall time
+    since separate invocations can't reuse one browser context — pass
+    `pass2_per_variant=False` (CLI: `--pass2-combined`) to opt back into the
+    old combined call for comparison/diagnostic purposes.
     """
     if bbox is None:
         raise RuntimeError(
@@ -446,8 +466,10 @@ def run_location_full_harvest(
     depths_run.append(3)
     process_and_deduplicate_leads()
 
-    # Pass 2 — multi-query slow at centroid (browser reuses context across the
-    # variants; one N-query run beats N separate runs on wall time).
+    # Pass 2 — multi-query slow at centroid. Per-variant is the default (see
+    # docstring): the combined call is faster on wall time but the upstream
+    # scraper's shared deduper/exiter across all variants in one -input file
+    # silently drops most variants' results, so it under-delivers on yield.
     if lat is not None and lon is not None:
         query_variants = queries
         if query_variants is None:
@@ -466,25 +488,54 @@ def run_location_full_harvest(
         query_variants = list(query_variants)
         logger.info(
             "--- Full-harvest PASS 2: multi-query slow at centroid "
-            "(%d quer%s) ---",
+            "(%d quer%s%s) ---",
             len(query_variants),
             "y" if len(query_variants) == 1 else "ies",
+            ", one scrape_runs row per variant" if pass2_per_variant else "",
         )
-        execute_scrape_and_ingest(
-            query,
-            location,
-            lat=lat,
-            lon=lon,
-            depth=10,
-            queries=query_variants,
-            fast_mode=False,
-            disable_proxy=disable_scraper_proxy,
-            concurrency=scraper_concurrency,
-            browser_pool_size=scraper_browser_pool_size,
-            pages_per_browser=scraper_pages_per_browser,
-            proxy_limit=scraper_proxy_limit,
-            disable_page_reuse=scraper_disable_page_reuse,
-        )
+        if pass2_per_variant:
+            # Default: N separate invocations so each variant gets its own
+            # scrape_runs row (query=variant text) and, crucially, its own
+            # fresh deduper/exiter — the combined call's shared instance is
+            # what suppresses cross-variant yield (see docstring). Slower
+            # than the combined call below — no shared browser context.
+            for variant in query_variants:
+                execute_scrape_and_ingest(
+                    variant,
+                    location,
+                    lat=lat,
+                    lon=lon,
+                    depth=10,
+                    fast_mode=False,
+                    disable_proxy=disable_scraper_proxy,
+                    concurrency=scraper_concurrency,
+                    browser_pool_size=scraper_browser_pool_size,
+                    pages_per_browser=scraper_pages_per_browser,
+                    proxy_limit=scraper_proxy_limit,
+                    disable_page_reuse=scraper_disable_page_reuse,
+                )
+        else:
+            # Legacy/diagnostic: one combined multi-query call. Kept for
+            # comparison — see docstring for why it under-delivers and is no
+            # longer the default.
+            execute_scrape_and_ingest(
+                query,
+                location,
+                lat=lat,
+                lon=lon,
+                depth=10,
+                queries=query_variants,
+                fast_mode=False,
+                disable_proxy=disable_scraper_proxy,
+                concurrency=scraper_concurrency,
+                browser_pool_size=scraper_browser_pool_size,
+                pages_per_browser=scraper_pages_per_browser,
+                proxy_limit=scraper_proxy_limit,
+                disable_page_reuse=scraper_disable_page_reuse,
+            )
+        # One entry for the whole pass regardless of mode — consistent with
+        # Pass 3's convention (see below): depths_run records passes, not the
+        # sub-calls within one.
         depths_run.append(10)
         process_and_deduplicate_leads()
     else:
@@ -656,6 +707,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--pass2-combined",
+        action="store_true",
+        help=(
+            "Opt into the legacy combined Pass 2 call (full-harvest only): "
+            "one multi-query scrape covering all variants instead of a "
+            "separate scrape per variant. Discouraged — the upstream "
+            "scraper's shared deduper/exiter across a combined -input file "
+            "silently drops most variants' results (see CLAUDE.md). Kept "
+            "for comparison/diagnostic use; per-variant is the default."
+        ),
+    )
+    parser.add_argument(
         "--scraper-concurrency",
         type=int,
         default=None,
@@ -802,6 +865,7 @@ def run_end_to_end_pipeline(
     scraper_pages_per_browser: int | None = None,
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
+    pass2_per_variant: bool = True,
 ) -> None:
     """
     Orchestrate pipeline. Three strategies:
@@ -821,6 +885,11 @@ def run_end_to_end_pipeline(
 
     `queries` overrides the full-harvest Pass 2 variant list. None (not an
     empty tuple) means "derive from the query's industry".
+
+    `pass2_per_variant` (full-harvest only, default True): run each Pass 2
+    variant as its own scrape, tagged separately in scrape_runs, instead of
+    one combined multi-query call. See run_location_full_harvest docstring
+    for why this is the default rather than a diagnostic opt-in.
     """
     setup_logging()
 
@@ -885,6 +954,7 @@ def run_end_to_end_pipeline(
                 scraper_pages_per_browser=scraper_pages_per_browser,
                 scraper_proxy_limit=scraper_proxy_limit,
                 scraper_disable_page_reuse=scraper_disable_page_reuse,
+                pass2_per_variant=pass2_per_variant,
             )
         else:
             # single-centroid legacy — the only strategy that reads
@@ -929,7 +999,10 @@ def run_end_to_end_pipeline(
                 # blocked. Log and keep going so we still get an export.
                 logger.warning("Verification pass failed: %s", ve)
 
-        export_new_leads(min_score=min_score, csv_path=csv_path or _default_csv_path(query, location))
+        export_run_outputs(
+            min_score=min_score,
+            csv_path=csv_path or _default_csv_path(query, location),
+        )
         logger.info("=" * 60)
         logger.info("PIPELINE EXECUTED SUCCESSFULLY")
         logger.info("=" * 60)
@@ -1018,6 +1091,12 @@ def main() -> None:
         logger.warning("--bbox supplied but strategy is %s; bbox will be ignored.", strategy)
     if args.zip_csv and strategy != "full-harvest":
         logger.warning("--zip-csv supplied but strategy is %s; zip-csv ignored.", strategy)
+    if args.pass2_combined and strategy != "full-harvest":
+        logger.warning(
+            "--pass2-combined supplied but strategy is %s; ignored (only "
+            "full-harvest has a Pass 2).",
+            strategy,
+        )
     # --min-contacts / --max-depth only gate the single-centroid depth loop.
     # Both default to None, so a non-None value means the user really passed
     # the flag — warn so they don't think they're bounding grid/full-harvest.
@@ -1064,6 +1143,10 @@ def main() -> None:
         scraper_pages_per_browser=args.scraper_pages_per_browser,
         scraper_proxy_limit=args.scraper_proxy_limit,
         scraper_disable_page_reuse=args.scraper_disable_page_reuse,
+        # Per-variant is the default; --pass2-combined opts back into the
+        # legacy combined call. Irrelevant (Pass 2 doesn't run) for other
+        # strategies, so it always resolves to the default there.
+        pass2_per_variant=not (strategy == "full-harvest" and args.pass2_combined),
     )
 
 

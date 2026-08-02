@@ -169,10 +169,19 @@ def execute_scrape_and_ingest(
       -fast-mode is dropped; scraper rejects it with -grid-bbox.
     - Multi-query mode: pass `queries=[q1, q2, ...]`. All are written to
       the scraper's -input file (one per line as "{q} in {location}"), so
-      the scraper reuses its browser context across queries. More
-      efficient than N separate invocations (Am vs As in the 2026-07-20
-      experiment: ~2x faster at same coverage). Compatible with either
-      grid or single-centroid mode.
+      the scraper reuses its browser context across queries — faster than
+      N separate invocations (Am vs As in the 2026-07-20 experiment: ~2x
+      faster). BUT for non-grid (single-centroid `-geo`) mode, coverage is
+      NOT equivalent: the scraper shares one deduper/exiter across every
+      query line in the file, so near-synonym queries at the same centroid
+      silently lose most of their results to whichever variant's feed-parse
+      claims a place href first. Verified on SJ HVAC (2026-08-01/02): one
+      combined 8-variant call yielded 4 raw leads vs 81 for the same 8
+      variants run as separate invocations. run_pipeline.py's full-harvest
+      Pass 2 defaults to N separate calls for this reason — see its
+      `pass2_per_variant` param and CLAUDE.md. Grid mode's dedup-across-
+      cells use of this same mechanism is fine; it's specifically the
+      multi-query-at-one-centroid case that's degraded.
 
     fast_mode override:
       - None (default) => True for single-centroid, False for grid.

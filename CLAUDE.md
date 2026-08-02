@@ -54,6 +54,20 @@ ZIPs/cities under a single query — `data/leads_<query-slug>_<date>.csv`.
 This only affects the CSV fallback path; Sheets exports are unaffected
 (see #R1 for the separate mock-SPREADSHEET_ID short-circuit still open).
 
+**2026-08-02 (Pass 2 combined-query underperformance)**: full-harvest Pass
+2's combined multi-query call was silently dropping leads to a shared
+deduper/exiter in the vendored Go scraper — on SJ HVAC (8 variants), 4 raw
+leads combined vs 81 separate. Fixed Python-side: `--pass2-per-variant`
+(each variant its own subprocess, fresh deduper) is now the **default**
+for full-harvest; the old combined-call behavior is opt-in via
+`--pass2-combined`, kept for comparison/diagnostic use. Same run pruned
+`DEFAULT_HVAC_HARVEST_QUERIES` from 8 → 3 variants (the other 5
+contributed ~0 net-new businesses per-variant). See
+`plans/2026-08-02-pass2-dedup-investigation.md` for the full root-cause
+trace through the upstream source and the decision rationale.
+`DEFAULT_HARVEST_QUERIES` (plumbing) hasn't had its own lift-table run —
+follow-up.
+
 ---
 
 ## Pipeline flow (as-built)
@@ -233,6 +247,14 @@ To force a full re-crawl:
 Closed review items and shipped fixes now live in `CHANGELOG.md` (not
 auto-loaded into context — read it on demand).
 
+## Run tracking
+
+**Check `RUNS.md` before starting a new city/vertical run** — it's the
+city × vertical status table (done / stale / not-run) so you don't
+re-scrape a city that's already covered, or skip one that only has a
+throwaway experiment DB behind it. Update it after any real production
+run completes.
+
 ## TODO — next up
 
 Ordered. Top item is the one to pick up first.
@@ -240,6 +262,10 @@ Ordered. Top item is the one to pick up first.
 1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
    Sheets auth before falling back to CSV.
 2. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
+3. **Plumbing Pass 2 lift-table** — `DEFAULT_HARVEST_QUERIES` (8 variants)
+   hasn't had the per-variant lift-table run HVAC got 2026-08-01/02 (see
+   "Pass 2 combined-query underperformance"); likely has similarly-dead
+   variants worth pruning.
 
 ## Still open (intentional deferrals)
 
@@ -251,7 +277,6 @@ Findings not covered by 393a10c.
   always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
   "mock", fails auth, then falls through to CSV. Short-circuit when
   destination is the mock literal.
-- **#R9 Crawler proxy = only proxy[0] from file** — Fixed. We now `random.shuffle(file_proxies)` and take the first one, meaning each pipeline run uses a fresh IP for crawling instead of burning the first IP in the file forever. Same for `run_scraper.py` which takes a random slice of 3.
 
 ### #12 — Export pushes empty-email rows to Sheets *(deferred by request)*
 
