@@ -3,6 +3,7 @@ import os
 import csv
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from sqlalchemy import func
 from sqlalchemy.orm import sessionmaker
@@ -204,6 +205,178 @@ def _derive_csv_paths(csv_path: str | None) -> dict[str, str]:
     }
 
 
+FREEMAIL_DOMAINS = {
+    "gmail.com",
+    "yahoo.com",
+    "hotmail.com",
+    "outlook.com",
+    "aol.com",
+    "icloud.com",
+    "me.com",
+    "live.com",
+}
+
+_GENERIC_EMAIL_PREFIXES = (
+    "info",
+    "office",
+    "hello",
+    "contact",
+    "support",
+    "sales",
+    "service",
+    "customerservice",
+    "admin",
+    "dispatch",
+    "booking",
+    "appointments",
+    "estimate",
+    "estimates",
+    "quotes",
+    "team",
+)
+
+_BAD_EMAIL_PREFIXES = (
+    "careers",
+    "career",
+    "jobs",
+    "job",
+    "development",
+    "marketing",
+    "webmaster",
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "do-not-reply",
+    "member_services",
+    "memberservices",
+    "flags",
+    "messages",
+)
+
+_BAD_EMAIL_DOMAINS = {
+    "2x.png",
+    "2x.ck7nhwq8.webp",
+    "gmaiil.com",
+    "ndiscovered.com",
+    "tel-us.biz",
+    "latofonts.com",
+    "pixelspread.com",
+    "rioradio.org",
+    "imtresidential.com",
+    "newapthome.com",
+    "engrain.com",
+    "santaclarita.gov",
+    "2pointagency.com",
+    "astigmatic.com",
+}
+
+
+def _normalize_host(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("www."):
+        value = value[4:]
+    return value
+
+
+def _email_parts(email: str) -> tuple[str, str]:
+    local, domain = email.lower().strip().split("@", 1)
+    return local, _normalize_host(domain)
+
+
+def _website_domain(website: str | None) -> str:
+    if not website:
+        return ""
+    return _normalize_host(urlparse(website.strip()).netloc)
+
+
+def _matches_prefix(local: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        local == prefix
+        or local.startswith(prefix + ".")
+        or local.startswith(prefix + "_")
+        for prefix in prefixes
+    )
+
+
+def _domain_matches_business(email_domain: str, website_domain: str) -> bool:
+    if not website_domain:
+        return False
+    return (
+        email_domain == website_domain
+        or email_domain.endswith("." + website_domain)
+        or website_domain.endswith("." + email_domain)
+    )
+
+
+def _is_bad_outreach_email(email: str) -> bool:
+    if not email or "@" not in email:
+        return True
+
+    local, domain = _email_parts(email)
+    if domain in _BAD_EMAIL_DOMAINS:
+        return True
+    if _matches_prefix(local, _BAD_EMAIL_PREFIXES):
+        return True
+    if any(domain.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".pdf")):
+        return True
+    return False
+
+
+def _contact_priority(lead: tuple[Contact, Business]) -> tuple[int, int, int, str]:
+    contact, business = lead
+    email = (contact.email or "").strip().lower()
+    if _is_bad_outreach_email(email):
+        return (-10_000, 0, 0, email)
+
+    local, domain = _email_parts(email)
+    website_domain = _website_domain(business.website)
+
+    score = 0
+    if _domain_matches_business(domain, website_domain):
+        score += 100
+    elif domain in FREEMAIL_DOMAINS:
+        score += 25
+    else:
+        score += 10
+
+    if _matches_prefix(local, _GENERIC_EMAIL_PREFIXES):
+        score += 30
+    if _matches_prefix(local, _BAD_EMAIL_PREFIXES):
+        score -= 50
+    if (contact.name or "").strip().lower() == "info/office":
+        score += 5
+
+    review_count = business.review_count or 0
+    return (score, review_count, -len(email), email)
+
+
+def _select_best_contacts_per_business(leads_to_export):
+    grouped: dict[int, list[tuple[Contact, Business]]] = {}
+    for lead in leads_to_export:
+        contact, business = lead
+        grouped.setdefault(business.id, []).append(lead)
+
+    selected = []
+    dropped_bad = 0
+    collapsed = 0
+    for candidates in grouped.values():
+        usable = [lead for lead in candidates if not _is_bad_outreach_email((lead[0].email or "").strip().lower())]
+        dropped_bad += len(candidates) - len(usable)
+        if not usable:
+            continue
+        best = max(usable, key=_contact_priority)
+        selected.append(best)
+        collapsed += len(usable) - 1
+
+    logger.info(
+        "Selected one best contact per business: kept=%d dropped_bad=%d dropped_extra=%d",
+        len(selected),
+        dropped_bad,
+        collapsed,
+    )
+    return selected
+
+
 def _export_csv_only(leads_to_export, csv_path: str) -> bool:
     if not leads_to_export:
         logger.info("No leads to write for %s.", csv_path)
@@ -305,13 +478,14 @@ def export_run_outputs(
         min_score=0,
         csv_path=paths["deduped"],
     )
-    _export_csv_only(verified_leads, paths["verified"])
+    verified_best_leads = _select_best_contacts_per_business(verified_leads)
+    _export_csv_only(verified_best_leads, paths["verified"])
 
     logger.info(
         "Exported run outputs: all=%d deduped=%d verified=%d",
         len(all_leads),
         len(deduped_leads),
-        len(verified_leads),
+        len(verified_best_leads),
     )
 
     return {
