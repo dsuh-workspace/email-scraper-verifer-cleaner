@@ -61,6 +61,16 @@ EXCLUDE_DOMAINS = (
     "cloudfront.net",
     "googleusercontent.com",
     "gstatic.com",
+    # recurring non-business/support-site emails found on crawled pages
+    "latofonts.com",
+    "pixelspread.com",
+    "rioradio.org",
+    "imtresidential.com",
+    "newapthome.com",
+    "engrain.com",
+    "santaclarita.gov",
+    "2pointagency.com",
+    "astigmatic.com",
     "cdn.",
     # documentation / spec placeholders
     "example.com",
