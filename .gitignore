@@ -19,6 +19,8 @@ proxies.txt
 
 # Local Database files
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 database/hvac_leads.db
 
