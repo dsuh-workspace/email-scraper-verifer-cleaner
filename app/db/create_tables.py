@@ -103,6 +103,7 @@ class Business(Base):
     status = Column(Text)
     description = Column(Text)
     place_id = Column(Text)
+    first_scrape_run_id = Column(Integer, ForeignKey("scrape_runs.id"), index=True)
 
     # --- crawl-attempt ledger (review #R7) ---------------------------------
     # Without these, a business we crawled that yielded no email is
@@ -140,6 +141,7 @@ class Contact(Base):
     title = Column(Text)
     email = Column(Text)
     lead_status = Column(Text, index=True)
+    first_scrape_run_id = Column(Integer, ForeignKey("scrape_runs.id"), index=True)
 
     __table_args__ = (
         # Composite unique — one (biz, email) pair max. NULL emails are
@@ -198,6 +200,8 @@ class ExportHistory(Base):
 _ADDITIVE_COLUMNS = (
     ("businesses", "last_crawled_at", "TIMESTAMP"),
     ("businesses", "crawl_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("businesses", "first_scrape_run_id", "INTEGER"),
+    ("contacts", "first_scrape_run_id", "INTEGER"),
     ("export_history", "exported_at", "TIMESTAMP"),
 )
 

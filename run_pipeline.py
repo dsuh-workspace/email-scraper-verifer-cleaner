@@ -43,12 +43,6 @@ DEFAULT_MAX_DEPTH = 20
 DEFAULT_HARVEST_QUERIES = (
     "Plumbing",
     "Plumber",
-    "Plumbing services",
-    "Emergency plumber",
-    "Drain cleaning",
-    "Water heater repair",
-    "Leak repair",
-    "Sewer service",
 )
 
 # HVAC variants. Pruned from the original 8-variant breadth-over-redundancy

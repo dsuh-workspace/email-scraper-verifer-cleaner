@@ -790,7 +790,7 @@ class TestFullHarvestStrategy:
         )
 
         # No zip-csv → grid, then one call per Pass 2 variant.
-        assert len(calls) == 1 + len(run_pipeline.DEFAULT_HARVEST_QUERIES)
+        assert len(calls) == 3
 
         # PASS 1: grid single query
         assert calls[0]["bbox"] == (37.21, -122.05, 37.47, -121.75)
@@ -885,7 +885,7 @@ class TestFullHarvestStrategy:
             scraper_proxy_limit=4,
         )
 
-        assert len(calls) == 1 + len(run_pipeline.DEFAULT_HARVEST_QUERIES)
+        assert len(calls) == 3
         for call in calls:
             assert call["concurrency"] == 3
             assert call["browser_pool_size"] == 2
@@ -1015,6 +1015,7 @@ class TestFullHarvestStrategy:
 
     def test_default_harvest_queries_plumbing(self, modules):
         run_pipeline, _ = modules
+        assert run_pipeline.DEFAULT_HARVEST_QUERIES == ("Plumbing", "Plumber")
         assert run_pipeline._default_harvest_queries("Plumbing") == \
             run_pipeline.DEFAULT_HARVEST_QUERIES
         assert run_pipeline._default_harvest_queries("Drain cleaning") == \

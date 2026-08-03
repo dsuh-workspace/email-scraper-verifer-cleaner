@@ -228,7 +228,8 @@ def process_and_deduplicate_leads() -> None:
                     address=raw.address,
                     status=raw.status,
                     description=raw.description,
-                    place_id=raw.place_id
+                    place_id=raw.place_id,
+                    first_scrape_run_id=raw.scrape_run_id,
                 )
                 session.add(new_business)
                 session.flush()  # populate .id
@@ -256,6 +257,7 @@ def process_and_deduplicate_leads() -> None:
                         title="General Contact",
                         email=email,
                         lead_status="Not Contacted",
+                        first_scrape_run_id=raw.scrape_run_id,
                     ))
                     existing_emails.add(key)
                     contacts_added += 1
@@ -269,6 +271,7 @@ def process_and_deduplicate_leads() -> None:
                         title="General Contact",
                         email=None,
                         lead_status="Not Contacted",
+                        first_scrape_run_id=raw.scrape_run_id,
                     ))
                     existing_phones.add(key)
                     contacts_added += 1

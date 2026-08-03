@@ -1,7 +1,8 @@
 from datetime import datetime
 
-from app.pipeline import export_sheets
-from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification
+from app.pipeline import export_sheets, process_leads
+from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification, RawLead, ScrapeRun
+from app.db.database import engine
 
 
 class TestDeriveCsvPaths:
@@ -22,6 +23,46 @@ class TestDeriveCsvPaths:
             "deduped": "/tmp/custom_deduped.csv",
             "verified": "/tmp/custom_verified.csv",
         }
+
+
+class TestProcessLeadsProvenance:
+    def test_records_first_scrape_run_on_new_business_and_contact(self):
+        RawLead.__table__.drop(engine, checkfirst=True)
+        Contact.__table__.drop(engine, checkfirst=True)
+        Business.__table__.drop(engine, checkfirst=True)
+        ScrapeRun.__table__.drop(engine, checkfirst=True)
+        ScrapeRun.__table__.create(engine)
+        Business.__table__.create(engine)
+        Contact.__table__.create(engine)
+        RawLead.__table__.create(engine)
+
+        session = process_leads.sessionmaker(bind=engine)()
+        run = ScrapeRun(query="Plumber", location="San Jose, CA", status="completed")
+        session.add(run)
+        session.flush()
+        session.add(
+            RawLead(
+                scrape_run_id=run.id,
+                business_name="Acme Plumbing",
+                website="https://acmeplumbing.example",
+                phone="408-555-0100",
+                email="owner@acmeplumbing.example",
+            )
+        )
+        session.commit()
+        session.close()
+
+        process_leads.process_and_deduplicate_leads()
+
+        session = process_leads.sessionmaker(bind=engine)()
+        try:
+            business = session.query(Business).one()
+            contact = session.query(Contact).one()
+        finally:
+            session.close()
+
+        assert business.first_scrape_run_id == run.id
+        assert contact.first_scrape_run_id == run.id
 
 
 class TestExportRunOutputs:
