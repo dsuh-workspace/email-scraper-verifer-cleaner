@@ -3,8 +3,9 @@ Central logging setup for the pipeline.
 
 Usage in a module:
 
-    from app.logging_config import get_logger
-    logger = get_logger(__name__)
+    import logging
+    from app.logging_config import setup_logging
+    logger = logging.getLogger(__name__)
     logger.info("something happened")
 
 Level is controlled by the LOG_LEVEL env var (default INFO). Set to
@@ -16,13 +17,9 @@ import logging
 import os
 import sys
 
-_CONFIGURED = False
-
 
 def setup_logging(level: str | None = None) -> None:
     """Idempotent root-logger configuration. Call at process start."""
-    global _CONFIGURED
-
     resolved_level = (level or os.getenv("LOG_LEVEL", "INFO")).upper()
     numeric_level = getattr(logging, resolved_level, logging.INFO)
 
@@ -44,14 +41,3 @@ def setup_logging(level: str | None = None) -> None:
     # Silence noisy 3rd-party loggers at INFO.
     for noisy in ("urllib3", "requests"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-
-    _CONFIGURED = True
-
-
-def get_logger(name: str) -> logging.Logger:
-    """
-    Return a module logger. Safe to call at import time — this only
-    creates the logger; setup_logging() attaches the handler when the
-    pipeline actually runs.
-    """
-    return logging.getLogger(name)

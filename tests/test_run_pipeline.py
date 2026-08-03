@@ -58,18 +58,6 @@ def modules():
     fake_verify.verify_contacts_emails = lambda **_kw: None
 
     fake_logging = types.ModuleType("app.logging_config")
-
-    class _Logger:
-        def info(self, *args, **kwargs):
-            return None
-
-        def warning(self, *args, **kwargs):
-            return None
-
-        def exception(self, *args, **kwargs):
-            return None
-
-    fake_logging.get_logger = lambda name: _Logger()
     fake_logging.setup_logging = lambda: None
 
 
@@ -330,7 +318,7 @@ class TestMain:
 
         def fake_run_end_to_end_pipeline(
             query, location, min_contacts, max_depth,
-            use_grid=False, cell_km=2.0, bbox=None,
+            cell_km=2.0, bbox=None,
             disable_scraper_proxy=False, disable_crawler_proxy=False,
             strategy="single-centroid", queries=None, zip_csv=None,
             verify=False, min_score=0, csv_path=None,
@@ -345,7 +333,6 @@ class TestMain:
             called["location"] = location
             called["min_contacts"] = min_contacts
             called["max_depth"] = max_depth
-            called["use_grid"] = use_grid
             called["cell_km"] = cell_km
             called["bbox"] = bbox
             called["disable_scraper_proxy"] = disable_scraper_proxy
@@ -372,7 +359,6 @@ class TestMain:
             "location": "Plano, TX",
             "min_contacts": 50,
             "max_depth": 9,
-            "use_grid": False,
             "cell_km": 2.0,
             "bbox": None,
             "disable_scraper_proxy": False,
@@ -650,7 +636,7 @@ class TestMain:
             location="San Jose, CA",
             min_contacts=999,
             max_depth=20,
-            use_grid=True,
+            strategy="grid",
             cell_km=2.0,
         )
 
@@ -691,7 +677,7 @@ class TestMain:
             location="anywhere",
             min_contacts=1,
             max_depth=20,
-            use_grid=True,
+            strategy="grid",
             cell_km=1.5,
             bbox=(1.0, 1.0, 2.0, 2.0),
         )
@@ -721,7 +707,7 @@ class TestMain:
             run_pipeline.run_end_to_end_pipeline(
                 query="Plumbing",
                 location="unmappable",
-                use_grid=True,
+                strategy="grid",
             )
 
     def test_parse_bbox_rejects_wrong_arity(self, modules):

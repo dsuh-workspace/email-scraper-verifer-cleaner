@@ -21,6 +21,7 @@ Key changes vs the naive first pass:
   `email-validator` so we don't insert garbage into Contact.email.
 """
 
+import logging
 import re
 import urllib.parse
 from datetime import datetime, timezone
@@ -29,9 +30,9 @@ from typing import Dict, Tuple
 import phonenumbers
 from email_validator import EmailNotValidError, validate_email
 
-from app.logging_config import get_logger, setup_logging
+from app.logging_config import setup_logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Substring match — same blocklist rationale as extract_emails.EXCLUDE_DOMAINS.
 # Keep the two lists loosely in sync; duplication here is deliberate so the
@@ -93,24 +94,19 @@ def normalize_phone(phone_str):
         return None
 
     if len(digits) == 10:
-        try:
-            parsed = phonenumbers.parse(digits, "US")
-            if phonenumbers.is_possible_number(parsed):
-                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-        except phonenumbers.NumberParseException:
-            pass
-        return f"+1{digits}"
+        prefix = "+1"
+    elif len(digits) == 11 and digits.startswith('1'):
+        prefix = "+"
+    else:
+        return raw
 
-    if len(digits) == 11 and digits.startswith('1'):
-        try:
-            parsed = phonenumbers.parse(digits, "US")
-            if phonenumbers.is_possible_number(parsed):
-                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-        except phonenumbers.NumberParseException:
-            pass
-        return f"+{digits}"
-
-    return raw
+    try:
+        parsed = phonenumbers.parse(digits, "US")
+        if phonenumbers.is_possible_number(parsed):
+            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except phonenumbers.NumberParseException:
+        pass
+    return f"{prefix}{digits}"
 
 
 def _parse_and_validate_emails(raw_email_field: str):

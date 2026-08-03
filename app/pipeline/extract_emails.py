@@ -19,6 +19,7 @@ Design notes
   business go through this lock in sequence.
 """
 
+import logging
 import os
 import re
 import threading
@@ -31,10 +32,9 @@ from typing import List, Optional, Set
 import requests
 from email_validator import EmailNotValidError, validate_email
 
-from app.logging_config import get_logger
 from app.proxy_utils import load_proxy_file, validate_proxy_url
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # TLD length {2,} — the old {2,4} bound rejected legitimate industry TLDs
 # like .plumbing, .services, .contractors, .museum which show up on
@@ -174,51 +174,34 @@ def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, st
     fallback_proxy = os.getenv("CRAWLER_PROXY", "").strip()
     proxy_file = os.getenv("CRAWLER_PROXY_FILE", "").strip()
 
+    def _validate(url: str) -> str:
+        return validate_proxy_url(
+            url,
+            error_prefix="Crawler",
+            allowed_schemes=ALLOWED_PROXY_SCHEMES,
+            unsupported_message="Unsupported crawler proxy scheme",
+        )
+
     file_proxy = None
     if proxy_file:
         import random
         file_proxies = load_proxy_file(proxy_file)
         if file_proxies:
             random.shuffle(file_proxies)
-            file_proxy = validate_proxy_url(
-                file_proxies[0],
-                error_prefix="Crawler",
-                allowed_schemes=ALLOWED_PROXY_SCHEMES,
-                unsupported_message="Unsupported crawler proxy scheme",
-            )
+            file_proxy = _validate(file_proxies[0])
 
     proxies = {}
     if http_proxy:
-        proxies["http"] = validate_proxy_url(
-            http_proxy,
-            error_prefix="Crawler",
-            allowed_schemes=ALLOWED_PROXY_SCHEMES,
-            unsupported_message="Unsupported crawler proxy scheme",
-        )
+        proxies["http"] = _validate(http_proxy)
     elif fallback_proxy:
-        proxies["http"] = validate_proxy_url(
-            fallback_proxy,
-            error_prefix="Crawler",
-            allowed_schemes=ALLOWED_PROXY_SCHEMES,
-            unsupported_message="Unsupported crawler proxy scheme",
-        )
+        proxies["http"] = _validate(fallback_proxy)
     elif file_proxy:
         proxies["http"] = file_proxy
 
     if https_proxy:
-        proxies["https"] = validate_proxy_url(
-            https_proxy,
-            error_prefix="Crawler",
-            allowed_schemes=ALLOWED_PROXY_SCHEMES,
-            unsupported_message="Unsupported crawler proxy scheme",
-        )
+        proxies["https"] = _validate(https_proxy)
     elif fallback_proxy:
-        proxies["https"] = validate_proxy_url(
-            fallback_proxy,
-            error_prefix="Crawler",
-            allowed_schemes=ALLOWED_PROXY_SCHEMES,
-            unsupported_message="Unsupported crawler proxy scheme",
-        )
+        proxies["https"] = _validate(fallback_proxy)
     elif file_proxy:
         proxies["https"] = file_proxy
 

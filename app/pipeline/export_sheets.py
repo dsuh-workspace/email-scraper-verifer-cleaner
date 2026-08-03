@@ -1,3 +1,4 @@
+import logging
 import os
 import csv
 from datetime import UTC, datetime
@@ -8,9 +9,9 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification
 
-from app.logging_config import get_logger, setup_logging
+from app.logging_config import setup_logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 

@@ -16,6 +16,8 @@ Constraints/indexes summary
 Call init_db() once at startup — do NOT invoke on module import.
 """
 
+import logging
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -32,9 +34,7 @@ from sqlalchemy.orm import declarative_base
 
 from app.db.database import engine
 
-from app.logging_config import get_logger
-
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 Base = declarative_base()

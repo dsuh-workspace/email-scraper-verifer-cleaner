@@ -1,3 +1,4 @@
+import logging
 import os
 import json
 import platform
@@ -6,15 +7,16 @@ import tempfile
 from datetime import datetime, timezone
 
 from geopy.geocoders import Nominatim
-from app.logging_config import get_logger, setup_logging
+from sqlalchemy.orm import sessionmaker
+
+from app.db.database import engine
+from app.db.create_tables import ScrapeRun, RawLead
+from app.logging_config import setup_logging
 from app.proxy_utils import load_proxy_file, normalize_proxy_line, validate_proxy_url
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
-
-Session = None
-ScrapeRun = None
-RawLead = None
+Session = sessionmaker(bind=engine)
 
 DEFAULT_SCRAPER_PROXY_LIMIT = 3
 DEFAULT_SCRAPER_PAGES_PER_BROWSER = 2
@@ -188,31 +190,18 @@ def execute_scrape_and_ingest(
       - True/False => explicit; caller responsible for compatibility
         (scraper rejects fast_mode=True + bbox).
     """
-    global Session, ScrapeRun, RawLead
-
-    _resolve_positive_int(
+    resolved_concurrency = _resolve_positive_int(
         concurrency if concurrency is not None else _env_positive_int("SCRAPER_CONCURRENCY"),
         "SCRAPER_CONCURRENCY",
     )
-    _resolve_positive_int(
+    resolved_browser_pool_size = _resolve_positive_int(
         browser_pool_size if browser_pool_size is not None else _env_positive_int("SCRAPER_BROWSER_POOL_SIZE"),
         "SCRAPER_BROWSER_POOL_SIZE",
     )
-    _resolve_positive_int(
+    resolved_pages_per_browser = _resolve_positive_int(
         pages_per_browser if pages_per_browser is not None else _env_positive_int("SCRAPER_PAGES_PER_BROWSER"),
         "SCRAPER_PAGES_PER_BROWSER",
-    )
-
-    if Session is None or ScrapeRun is None or RawLead is None:
-        from sqlalchemy.orm import sessionmaker
-
-        from app.db.database import engine
-        from app.db.create_tables import ScrapeRun as _ScrapeRun, RawLead as _RawLead
-
-        if Session is None:
-            Session = sessionmaker(bind=engine)
-        ScrapeRun = _ScrapeRun
-        RawLead = _RawLead
+    ) or 2
 
     session = Session()
 
@@ -275,23 +264,6 @@ def execute_scrape_and_ingest(
                 "fast_mode=True is incompatible with grid mode (bbox). "
                 "Scraper rejects the combination."
             )
-
-        resolved_concurrency = _resolve_positive_int(
-            concurrency if concurrency is not None else _env_positive_int("SCRAPER_CONCURRENCY"),
-            "SCRAPER_CONCURRENCY",
-        )
-        resolved_browser_pool_size = _resolve_positive_int(
-            browser_pool_size
-            if browser_pool_size is not None
-            else _env_positive_int("SCRAPER_BROWSER_POOL_SIZE"),
-            "SCRAPER_BROWSER_POOL_SIZE",
-        )
-        resolved_pages_per_browser = _resolve_positive_int(
-            pages_per_browser
-            if pages_per_browser is not None
-            else _env_positive_int("SCRAPER_PAGES_PER_BROWSER"),
-            "SCRAPER_PAGES_PER_BROWSER",
-        ) or 2
 
         cmd = [
             binary_path,

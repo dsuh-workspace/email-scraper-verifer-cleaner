@@ -10,6 +10,7 @@ Stages:
 """
 
 import argparse
+import logging
 import re
 import sys
 from dataclasses import dataclass
@@ -19,14 +20,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.create_tables import Contact, ExportHistory, init_db
 from app.db.database import engine
-from app.logging_config import get_logger, setup_logging
+from app.logging_config import setup_logging
 from app.pipeline.export_sheets import export_run_outputs
 from app.pipeline.extract_emails import harvest_emails_from_websites
 from app.pipeline.process_leads import process_and_deduplicate_leads
 from app.pipeline.verify_emails import verify_contacts_emails
 from app.scraper.run_scraper import execute_scrape_and_ingest, geocode_location
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 Session = sessionmaker(bind=engine)
 LEGACY_EXPORT_DESTINATION = "local_csv_leads"
 
@@ -849,7 +850,6 @@ def run_end_to_end_pipeline(
     location: str,
     min_contacts: int | None = None,
     max_depth: int | None = None,
-    use_grid: bool = False,
     cell_km: float = 2.0,
     bbox: tuple[float, float, float, float] | None = None,
     disable_scraper_proxy: bool = False,
@@ -904,11 +904,6 @@ def run_end_to_end_pipeline(
         strategy,
     )
     logger.info("=" * 60)
-
-    # Back-compat: callers passing use_grid=True keep working even if they
-    # didn't set strategy explicitly.
-    if use_grid and strategy == "single-centroid":
-        strategy = "grid"
 
     init_db()
 
@@ -1127,7 +1122,6 @@ def main() -> None:
         # reflects which knobs are actually live for this run.
         min_contacts=args.min_contacts if strategy == "single-centroid" else None,
         max_depth=args.max_depth if strategy == "single-centroid" else None,
-        use_grid=(strategy == "grid"),
         cell_km=args.cell_km,
         bbox=bbox,
         disable_scraper_proxy=disable_scraper_proxy,

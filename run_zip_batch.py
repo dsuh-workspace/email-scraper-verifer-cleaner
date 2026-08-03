@@ -2,10 +2,11 @@
 
 import argparse
 import csv
+import logging
 from pathlib import Path
 
 from app.db.create_tables import init_db
-from app.logging_config import get_logger, setup_logging
+from app.logging_config import setup_logging
 from app.pipeline.export_sheets import export_run_outputs
 from app.scraper.run_scraper import geocode_location
 # _resolve_strategy / _resolve_query_variants are shared rather than
@@ -22,7 +23,7 @@ from run_pipeline import (
     run_location_pipeline,
 )
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 STRATEGIES = ("single-centroid", "grid", "full-harvest")
 

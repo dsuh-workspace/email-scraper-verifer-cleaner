@@ -17,15 +17,15 @@ API contract:
     See https://github.com/reacherhq/check-if-email-exists for the full shape.
 """
 
+import logging
 import os
-import time
 
 import requests
 from dotenv import load_dotenv
 
-from app.logging_config import get_logger, setup_logging
+from app.logging_config import setup_logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -106,16 +106,11 @@ def verify_email_via_reacher(email: str) -> dict:
     }
 
 
-def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
+def verify_contacts_emails() -> None:
     """
     Pull every contact that has an email + no prior verification row,
     check each via Reacher, persist an EmailVerification row and update
     Contact.lead_status.
-
-    batch_sleep_sec: optional pause between requests. Reacher runs on our
-    own server so we don't need to be gentle for the vendor's sake, but a
-    small delay reduces the chance of getting our IP greylisted by target
-    mail providers during a large run.
     """
     from sqlalchemy.orm import sessionmaker
 
@@ -161,9 +156,6 @@ def verify_contacts_emails(batch_sleep_sec: float = 0.0) -> None:
             # Commit incrementally so a crash mid-run doesn't lose progress.
             if verifications_run % 25 == 0:
                 session.commit()
-
-            if batch_sleep_sec > 0:
-                time.sleep(batch_sleep_sec)
 
         session.commit()
         logger.info(
