@@ -1,146 +1,79 @@
-# email-scraper-verifer-cleaner — Review Notes
+# email-scraper-verifer-cleaner — Operator Notes
 
-Living review + backlog. Updated 2026-07-29.
+Current operator guide for the HVAC/Plumbing lead-gen pipeline. Keep this
+file focused on present-tense behavior, open work, and runbook details.
+Shipped history and closed review items live in `CHANGELOG.md`.
 
-Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
-dedupes → crawls sites for emails → optionally verifies via a self-hosted
-local Reacher instance → exports Sheets/CSV.
-Now captures rich map details (Review Count, Review Rating, Address, Status, Description, Place ID).
+Purpose: scrape Google Maps → ingest into SQLite → dedupe → crawl sites for
+emails → optionally verify via local Reacher → export to Sheets/CSV.
+The pipeline also captures rich map details (review count/rating, address,
+status, description, place ID).
 
-**2026-07-21 (v1)**: pipeline supports native grid-mode scraping via
-`--grid --cell-km <km>` on `run_pipeline.py`. Empirically 4-25× coverage
-of single-centroid mode. Requires Playwright driver installed via
-`./scripts/setup_scraper_playwright.sh` (one-time, ~265 MB). See
-`plans/generalized-city-coverage-method-2026-07-20.md` for the full
-strategy write-up + n=2 SJ/SC empirical results.
+## Current strategy and CLI contract
 
-**2026-07-21 (v2)**: pipeline adds `--strategy full-harvest` = grid +
-multi-query slow at centroid + optional fast ZIP top-up (via
-`--zip-csv`). On SJ 2026-07-20 experiment: grid alone = 362 biz, full
-harvest = 504 biz (+39%). Default queries = 8 plumbing variants; override
-with `--queries "a,b,c"`. See
-`plans/scrape-strategy-experiments-2026-07-20.md` for full n=1 evidence.
+- Three strategies are supported on both `run_pipeline.py` and
+  `run_zip_batch.py`: `single-centroid`, `grid`, and `full-harvest`.
+  `--grid` is shorthand for `--strategy grid`.
+- `grid` requires Playwright via `./scripts/setup_scraper_playwright.sh`.
+- `full-harvest` runs grid pass 1, per-variant slow centroid pass 2, and
+  optional ZIP top-up pass 3.
+- Pass 2 defaults to **per-variant subprocesses** (`--pass2-per-variant`)
+  to avoid the vendored scraper's combined-query undercount. The old
+  combined behavior is opt-in via `--pass2-combined` for diagnostics only.
+- Default harvest query sets are intentionally pruned: HVAC defaults to 3
+  variants and plumbing defaults to 2 based on recent San Jose reruns.
+- One vertical per run. A query that names both HVAC and plumbing does not
+  silently sweep both; full-harvest exits 2 unless explicit `--queries`
+  are supplied.
+- `--queries` is valid only with `full-harvest`; other strategies exit 2.
+- `--min-contacts` / `--max-depth` are single-centroid only. Under
+  `grid`/`full-harvest` they warn and are ignored; non-positive values
+  exit 2.
+- CSV fallback filenames are descriptive by default:
+  `data/leads_<location>_<query>_<date>.csv` for single-location runs and
+  `data/leads_<query>_<date>.csv` for batch runs. `--csv-path` overrides.
 
-**2026-07-28 (CLI contract changes)** — from
-`plans/code-review-2026-07-23.md`, all 15 findings fixed:
-
-- `--strategy full-harvest` now **exits 2** when no variant set can be
-  derived from `--query` and no `--queries` was supplied — i.e. the query
-  names neither trade, or names both. Pass 2's multi-query sweep is
-  full-harvest's entire coverage edge over grid, so running it on the base
-  query alone burns full wall time for grid-level results. Fix: pass
-  `--queries "v1,v2,..."`, or use `--grid`.
-- `--queries` with any strategy other than `full-harvest` now **exits 2**
-  instead of warning. `--bbox` / `--zip-csv` still only warn.
-- `--min-contacts` / `--max-depth` default to `None` (effective defaults
-  `DEFAULT_MIN_CONTACTS=500` / `DEFAULT_MAX_DEPTH=20` are applied inside
-  `run_end_to_end_pipeline`). Both now warn when combined with
-  grid/full-harvest, which ignore them. Both **exit 2** if non-positive.
-- Industry classification is word-boundary regex: `AC`/`A/C`/`boiler`/
-  `refrigeration`/`mini split`/`ductwork` classify as HVAC; `leak` alone
-  no longer implies plumbing; a query naming both trades returns `None`
-  (→ exit 2, see above) instead of resolving to whichever branch was
-  checked first. One vertical per run — see "Answered / settled" #4.
-
-**2026-07-29 (descriptive CSV filenames)**: local-CSV export fallback
-(`write_leads_to_local_csv` / `export_new_leads`) no longer hardcodes
-`data/leads_export.csv`. New `--csv-path` flag on both `run_pipeline.py`
-and `run_zip_batch.py` overrides explicitly; otherwise
-`run_pipeline._default_csv_path(query, location)` builds
-`data/leads_<location-slug>_<query-slug>_<YYYY-MM-DD>.csv` (e.g.
-`data/leads_sanjose_plumbing_2026-07-29.csv`). Batch runs
-(`run_zip_batch.py`) omit the location segment since one batch spans many
-ZIPs/cities under a single query — `data/leads_<query-slug>_<date>.csv`.
-This only affects the CSV fallback path; Sheets exports are unaffected
-(see #R1 for the separate mock-SPREADSHEET_ID short-circuit still open).
-
-**2026-08-02 (Pass 2 combined-query underperformance)**: full-harvest Pass
-2's combined multi-query call was silently dropping leads to a shared
-deduper/exiter in the vendored Go scraper — on SJ HVAC (8 variants), 4 raw
-leads combined vs 81 separate. Fixed Python-side: `--pass2-per-variant`
-(each variant its own subprocess, fresh deduper) is now the **default**
-for full-harvest; the old combined-call behavior is opt-in via
-`--pass2-combined`, kept for comparison/diagnostic use. Same run pruned
-`DEFAULT_HVAC_HARVEST_QUERIES` from 8 → 3 variants (the other 5
-contributed ~0 net-new businesses per-variant). See
-`plans/2026-08-02-pass2-dedup-investigation.md` for the full root-cause
-trace through the upstream source and the decision rationale.
-`DEFAULT_HARVEST_QUERIES` (plumbing) was re-run on fresh SJ plumbing data
-2026-08-02/03. The fresh rerun (`database/hvac_leads.san_jose_plumbing_rerun_2026-08-02c.db`) finished with 68 total contacts / 14 new exportable and showed Pass 2 lift concentrated in `Plumbing` and `Plumber`; the other six variants produced empty/missing outputs on that run. Python-side default was pruned from 8 → 2 variants accordingly. Follow-up shifted from "run the plumbing lift-table" to "use the new provenance fields below for cleaner downstream lift attribution on future runs."
-
-**2026-08-03 (scraper auto-update + local verifier)**: both vendored OSS
-tools were on a manual-pull-whenever basis; formalized both.
-`scripts/update_scraper.sh` pulls `../google-maps-scraper` (clean clone
-tracking `gosom/google-maps-scraper` upstream directly — not a submodule,
-since the only thing this repo consumes is the gitignored compiled binary),
-rebuilds to a temp path, smoke-tests the new binary with one live minimal
-scrape, and only swaps it into `app/scraper/google-maps-scraper` if the
-output still parses the way `run_scraper.py` expects — a failed build or a
-schema-incompatible new release leaves the existing binary untouched. Runs
-weekly via launchd (`com.apl.update-scraper`, Sundays 03:17) — plist
-tracked at `scripts/com.apl.update-scraper.plist`, symlinked into
-`~/Library/LaunchAgents/` and loaded with
-`launchctl bootstrap gui/$(id -u) <symlink path>` (per-machine install
-step; the symlink + bootstrap aren't themselves version-controlled).
-`EnvironmentVariables.PATH` is set explicitly in the plist since launchd's
-default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) has none of `go`, `git`
-(Homebrew), or `python3` (pyenv shim) on it. `StandardOutPath` /
-`StandardErrorPath` point at a separate `logs/update_scraper.launchd.log`,
-not `logs/update_scraper.log` — the script's own `log()` already tees into
-that file, so redirecting launchd's stdout there too would double-write
-every line; the launchd-only log exists to catch failures that happen
-before the script's logging starts (bad PATH, not executable). Check
-status with `launchctl print gui/$(id -u)/com.apl.update-scraper`.
-Separately, email verification moved off the single-instance Kamatera box
-onto a local Reacher instance — see "Local Reacher instance" below.
-
----
-
-## Pipeline flow (as-built)
+## Pipeline flow
 
 Three strategies via `--strategy {single-centroid, grid, full-harvest}`
-on `run_pipeline.py` **and** on `run_zip_batch.py` (as of 2026-07-29 —
-#R6). Default = `single-centroid` (legacy). Selection sugar: `--grid` ==
-`--strategy grid`.
+on `run_pipeline.py` and `run_zip_batch.py`. Default = `single-centroid`.
 
-**Single-centroid** (legacy depth-loop). Delegates to
-`run_location_pipeline()` — the same loop `run_zip_batch.py` uses, so
-there is one depth-loop implementation and one definition of "enough
-contacts":
-```
+**Single-centroid** delegates to `run_location_pipeline()` and keeps the
+legacy depth loop:
+
+```text
 init_db()
-lat, lon, _bbox = geocode_location(location)      # ONCE via Nominatim
-run_location_pipeline(query, location, lat=lat, lon=lon,   # centroid reused,
-                      max_depth, target_new_exportable):   # not re-geocoded
-  baseline = get_exportable_contact_count(dest)   # before the loop
+lat, lon, _bbox = geocode_location(location)
+run_location_pipeline(query, location, lat=lat, lon=lon,
+                      max_depth, target_new_exportable):
+  baseline = get_exportable_contact_count(dest)
   loop (depth 1 → max_depth, step +2):
     execute_scrape_and_ingest(query, location, lat, lon, depth)
     process_and_deduplicate_leads()
-    harvest_emails_from_websites()                # must stay in-loop, see #R7
+    harvest_emails_from_websites()
     new_exportable = get_exportable_contact_count(dest) - baseline
     if new_exportable >= target_new_exportable: break
     if depth >= max_depth: break
 export_new_leads()
 ```
-`stale_iterations_limit` is left `None` here, so single-centroid keeps its
-legacy behavior of running to target-or-max-depth. `run_zip_batch.py`
-passes `--stale-iterations` and does stop early on consecutive zero-yield
-depth bumps.
 
-**Grid** (v1, JS mode, requires Playwright):
-```
+`run_zip_batch.py` can add `--stale-iterations`; single-centroid in
+`run_pipeline.py` still runs to target-or-max-depth.
+
+**Grid** runs one bbox-based scrape, then dedupe/crawl/export:
+
+```text
 init_db()
-lat, lon, bbox = geocode_location(location)       # bbox from Nominatim
-                                                  # or --bbox override
-execute_scrape_and_ingest(query, location,
-                          bbox=bbox, cell_km=2.0, depth=3)
+lat, lon, bbox = geocode_location(location)
+execute_scrape_and_ingest(query, location, bbox=bbox, cell_km=2.0, depth=3)
 process_and_deduplicate_leads()
 harvest_emails_from_websites()
 export_new_leads()
 ```
 
-**Full-harvest** (v2, three passes):
-```
+**Full-harvest** runs three passes:
+
+```text
 init_db()
 lat, lon, bbox = geocode_location(location)
 
@@ -148,7 +81,7 @@ lat, lon, bbox = geocode_location(location)
 execute_scrape_and_ingest(query, location, bbox=bbox, cell_km, depth=3)
 process_and_deduplicate_leads()
 
-# PASS 2: per-variant slow at centroid (separate subprocess per variant)
+# PASS 2: per-variant slow at centroid
 for variant in DEFAULT_HARVEST_QUERIES:
   execute_scrape_and_ingest(variant, location, lat, lon, depth=10,
                             fast_mode=False)
@@ -161,23 +94,21 @@ for row in load_zip_csv(zip_csv):
                             depth=3, fast_mode=True)
 process_and_deduplicate_leads()
 
-harvest_emails_from_websites()                    # one crawl at end
+harvest_emails_from_websites()
 export_new_leads()
 ```
 
-All three strategies share one tail in `run_end_to_end_pipeline`:
-```
-if verify: verify_contacts_emails()               # --verify; failures warn
-export_new_leads(min_score=min_score)             # --min-score N
+All strategies share the same tail in `run_end_to_end_pipeline`:
+
+```text
+if verify: verify_contacts_emails()
+export_new_leads(min_score=min_score)
 ```
 
----
-
-## Strategy entrypoints (review #R6, shipped 2026-07-29)
+## Strategy entrypoints
 
 Each strategy is one function in `run_pipeline.py`, and both CLIs call the
-same three. `run_end_to_end_pipeline` is now geocode + dispatch + the
-verify/export tail; it holds no strategy body of its own.
+same three:
 
 | Function | Strategy | Returns |
 |---|---|---|
@@ -185,148 +116,80 @@ verify/export tail; it holds no strategy body of its own.
 | `run_location_grid()` | grid | `LocationRunMetrics` |
 | `run_location_full_harvest()` | full-harvest | `LocationRunMetrics` |
 
-All three return the same `LocationRunMetrics` shape, so a batch caller
-logs one line per row regardless of strategy. For the two non-looping
-strategies, `_location_metrics()` snapshots the DB counts; `depths_run` is
-a record of the passes (`(3,)` for grid, `(3, 10)` or `(3, 10, 3)` for
-full-harvest — Pass 3 contributes one entry total, not one per ZIP) and
-`stale_iterations` is 0 by construction, since a fixed set of passes has
-no consecutive zero-yield depth bumps to count.
-
-Grid and full-harvest **raise** when Nominatim returns no bounding box
-rather than degrading to a centroid scrape — a silent downgrade would
-report grid-strategy metrics for a single-centroid run.
+`run_end_to_end_pipeline` is geocode + dispatch + verify/export tail.
+Grid and full-harvest raise when Nominatim returns no bounding box rather
+than silently degrading to centroid mode.
 
 ### `run_zip_batch.py` flags
 
-New: `--strategy` / `--grid` / `--cell-km` / `--queries`, matching
-`run_pipeline.py`'s spelling and validation. `_resolve_strategy` and
-`_resolve_query_variants` are imported from `run_pipeline`, not
-reimplemented — both CLIs must agree on what `--grid` means and on when a
-full-harvest is refused for lacking a variant set (exit 2), since that
-check is the difference between a real sweep and grid-level results at
-full wall cost.
-
-- `--target-new-exportable` / `--max-depth` / `--stale-iterations` now
-  default to `None` and are **single-centroid only** — they warn and are
-  ignored under grid/full-harvest, which don't loop on depth. Non-positive
-  values still exit 2. Effective defaults: 20 / `DEFAULT_MAX_DEPTH` / 2.
-- `--cell-km` warns under single-centroid (no grid to size). Must be `> 0`.
+- `--strategy` / `--grid` / `--cell-km` / `--queries` match
+  `run_pipeline.py` spelling and validation.
+- `_resolve_strategy` and `_resolve_query_variants` are imported from
+  `run_pipeline`, not reimplemented.
+- `--target-new-exportable` / `--max-depth` / `--stale-iterations`
+  default to `None` and are single-centroid only. Effective defaults:
+  20 / `DEFAULT_MAX_DEPTH` / 2.
+- `--cell-km` warns under single-centroid and must be `> 0`.
 - Geocoding: single-centroid geocodes inside `run_location_pipeline`;
-  grid/full-harvest geocode in the batch loop to get each row's bbox. One
-  Nominatim call per row either way.
-- Batch full-harvest **never passes `zip_csv`** — Pass 3 is a fast ZIP
-  top-up, and the batch already *is* the ZIP sweep. It warns once up front
-  that each row costs a grid pass plus a multi-query centroid sweep.
+  grid/full-harvest geocode in the batch loop to get each row's bbox.
+- Batch full-harvest never passes `zip_csv` because the batch already is
+  the ZIP sweep.
 - A row that fails (unmappable ZIP, scraper error) is logged and skipped;
   the batch continues, and export still runs once at the end.
 
 Verification (`app/pipeline/verify_emails.py`) is wired into
-`run_pipeline.py` and is the supported path — opt in with `--verify`.
-When set, it runs after the email crawl and before export, for all three
-strategies. Export can be gated by `--min-score N`. Reacher score map
-(`_SCORE_BY_STATUS` in `verify_emails.py`): **safe=95, risky=50,
-unknown=25, invalid=10**. Verifier failures are warnings, not fatal — an
-unreachable Reacher instance scores everything `unknown` (25), so
-`--min-score 50` on a dead verifier exports nothing. Archived
-predecessor: `verify_emails_ARCHIVE.py` (BillionVerify — kept for
-reference).
+`run_pipeline.py` and is the supported path. Opt in with `--verify`.
+Export can be gated by `--min-score N`. Reacher score map:
+**safe=95, risky=50, unknown=25, invalid=10**. Verifier failures warn but
+are not fatal.
 
----
+## Crawl-attempt ledger
 
-## Crawl-attempt ledger (review #R7, shipped 2026-07-29)
-
-`harvest_emails_from_websites()` builds its skip-set from contacts with a
-non-null email. Before the ledger, a business that was crawled and yielded
-*nothing* left no trace, so it was indistinguishable from one never
-crawled — re-fetched on every depth iteration and on every re-run against
-the same DB. Two columns on `businesses` fix that:
+`harvest_emails_from_websites()` uses two `businesses` columns to avoid
+repeatedly crawling no-yield domains:
 
 | Column | Meaning |
 |---|---|
-| `last_crawled_at` | Stamped on **every** attempt — success, no-email, or exception. |
-| `crawl_attempts` | Count of *consecutive* no-email attempts. Reset to 0 the moment a crawl yields an email. |
+| `last_crawled_at` | Stamped on every attempt — success, no-email, or exception |
+| `crawl_attempts` | Count of consecutive no-email attempts; resets to 0 on success |
 
-The pending set is now a three-way split in `extract_emails.py`: already
-has an email → done; `crawl_attempts >= max_attempts` → given up;
-`last_crawled_at` inside the cooldown → skip this round; else crawl. The
-log line reports all four buckets.
+Pending set in `extract_emails.py`: already has email → done;
+`crawl_attempts >= max_attempts` → given up; `last_crawled_at` inside the
+cooldown → skip; else crawl.
 
-Tuning (env, both optional):
+Tuning:
 
-- `CRAWL_RETRY_AFTER_HOURS` — cooldown before retrying a domain that
-  yielded nothing. Default `720` (30 days): long enough that the depth
-  loop within one run never re-crawls, short enough that a site which
-  later publishes an address is picked up on a future run. `0` and
-  non-integers are **invalid** here and fall back to the default — a
-  zero-hour cooldown would restore the exact bug this prevents.
-- `CRAWL_MAX_ATTEMPTS` — give up after N consecutive no-email attempts.
-  Default `3`. `0` is valid and means no cap (cooldown still applies).
+- `CRAWL_RETRY_AFTER_HOURS`: default `720` (30 days). `0` and non-integers
+  are invalid and fall back to default.
+- `CRAWL_MAX_ATTEMPTS`: default `3`. `0` means no cap.
 
-Crawl errors count as spent attempts on purpose — a domain that reliably
-times out would otherwise be retried forever.
+Crawl errors count as spent attempts on purpose.
 
 To force a full re-crawl:
 `UPDATE businesses SET last_crawled_at = NULL, crawl_attempts = 0;`
 
----
-
-Closed review items and shipped fixes now live in `CHANGELOG.md` (not
-auto-loaded into context — read it on demand).
-
 ## Run tracking
 
-**Check `RUNS.md` before starting a new city/vertical run** — it's the
-city × vertical status table (done / stale / not-run) so you don't
-re-scrape a city that's already covered, or skip one that only has a
-throwaway experiment DB behind it. Update it after any real production
-run completes.
+**Check `RUNS.md` before starting a new city/vertical run.** Update it
+after any real production run completes.
 
-## TODO — next up
+## Open work
 
-Ordered. Top item is the one to pick up first.
+1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** so Sheets auth is not
+   attempted before CSV fallback.
+2. **#22 `robots.txt`** is still ignored. Per-host locking is in place.
+3. **Use provenance fields for future lift tables**: rely on
+   `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id`
+   instead of raw-lead first-seen inference.
 
-1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
-   Sheets auth before falling back to CSV.
-2. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
-3. **Exploit new provenance fields for future lift tables** — new
-   `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id` now
-   record which scrape run first created each downstream row. Use those
-   instead of first-seen raw-lead inference when auditing future variant
-   lift.
+## Intentional deferrals
 
-## Still open (intentional deferrals)
-
-### Review 2026-07-21 (commit 393a10c) — remaining backlog
-
-Findings not covered by 393a10c.
-
-- **#R1 SPREADSHEET_ID=`mock` still tries Sheets first** — `export_sheets.py`
-  always calls `append_leads_to_google_sheets()` when SPREADSHEET_ID is
-  "mock", fails auth, then falls through to CSV. Short-circuit when
-  destination is the mock literal.
-
-### #12 — Export pushes empty-email rows to Sheets *(deferred by request)*
-
-`export_sheets.py:129` — no `Contact.email IS NOT NULL` filter, so
-phone-only placeholder contacts (`email = NULL`) get exported with a
-blank Email column. Left as-is per project decision.
-
-`run_pipeline.get_exportable_contact_count()` and the export query were
-reconciled in a later fix; the remaining issue is the deliberate project
-decision to allow blank-email rows to export.
-
-### #20 — Commits inside per-business loop
-
-`extract_emails.py` batches every 25, which is acceptable. Not worth
-further tuning until we see real throughput numbers.
-
-### #22 — No `robots.txt` / no per-domain politeness
-
-Half-fixed: per-host locking is in place, `robots.txt` still ignored.
-Reasonable given we're crawling only shortlisted contact pages.
-
----
+- **#12 Export pushes empty-email rows to Sheets** — deliberate project
+  decision. Blank-email contacts may still export.
+- **#20 Commits inside per-business loop** — batching every 25 is
+  acceptable for now.
+- **#22 No `robots.txt` / no per-domain politeness** — per-host locking is
+  in place; `robots.txt` is still ignored.
 
 ## Environment / operational
 
@@ -340,152 +203,84 @@ Reasonable given we're crawling only shortlisted contact pages.
   source .venv/bin/activate
   pip install -r requirements.txt
   ```
-- Tests and CLI entrypoints (`run_pipeline.py`, `run_zip_batch.py`) should
-  be run from activated `.venv`, not arbitrary system Python.
+- Tests and CLI entrypoints should be run from activated `.venv`.
 
-### Local Reacher instance (formerly Kamatera)
+### Local Reacher instance
 
 - URL: `http://127.0.0.1:8080/v0/check_email`
-- `./scripts/start_local_verifier.sh` — starts it. Idempotent: no-ops if
-  already reachable (polls `GET /version`, a lightweight route with no SMTP
-  round-trip), restarts an existing-but-stopped `reacher-backend` container
-  instead of erroring on "name already in use". Prefers Docker
-  (`reacherhq/backend:latest`, matching production's `deploy_kamatera.sh`
-  invocation); falls back to compiling `../email-verifier/backend`
-  (`reacher_backend` bin) from source via Cargo if Docker isn't installed —
-  that path runs in the foreground.
-- `./scripts/stop_local_verifier.sh` — stops + removes the container. No-op
-  if nothing is running.
-- `REACHER_API_URL` is set to this local URL in `.env` and `verify_emails.py`.
+- `./scripts/start_local_verifier.sh` starts it. It no-ops if already
+  reachable, restarts an existing stopped `reacher-backend` container when
+  possible, prefers Docker, and falls back to building
+  `../email-verifier/backend` from source if Docker is unavailable.
+- `./scripts/stop_local_verifier.sh` stops and removes the container.
+- `REACHER_API_URL` is set to this local URL in `.env` and
+  `verify_emails.py`.
 - No auth on the endpoint itself.
-- Confirmed `can_connect_smtp: true` from this laptop against a real domain
-  — outbound port 25 is open, same as the old Kamatera box.
-- The published Docker image is `linux/amd64` only; on Apple Silicon it runs
-  under emulation (Docker prints a platform-mismatch warning on first pull —
-  harmless, just slightly slower per check).
-- (Legacy) The Kamatera remote server was previously used (`http://104.128.66.74:8080/v0/check_email`). `KAMATERA_ACCESS_KEY` / `KAMATERA_SECRET_KEY` are only consumed by the deploy scripts in the `autopilotlocal/email-verifier` repo.
+- Apple Silicon runs the published Docker image under emulation.
 
-### DB migration for `processed_at` + new constraints
+### Scraper auto-update
 
-**Automatic, as of 2026-07-29:** `init_db()` now runs
-`_apply_additive_columns()` after `create_all()`, which `ALTER TABLE ... ADD
-COLUMN`s any missing entry in `_ADDITIVE_COLUMNS` — currently
-`businesses.last_crawled_at`, `businesses.crawl_attempts`,
-`businesses.first_scrape_run_id`, `contacts.first_scrape_run_id`, and
-`export_history.exported_at` (added nullable on legacy SQLite DBs; backfill
-existing rows once if you care about historical timestamps). `create_all()`
-creates missing *tables* but never alters existing ones, so without this an
-older DB file would raise "no such column" on the first harvest/export that
-touched those fields. It is idempotent and additive-only; anything that
-drops, renames, or backfills still belongs in the manual SQL below.
+- `scripts/update_scraper.sh` pulls `../google-maps-scraper`, rebuilds,
+  smoke-tests, and only swaps in the new binary if output still matches
+  what `run_scraper.py` expects.
+- Weekly launchd job: `com.apl.update-scraper` (Sunday 03:17).
+- Tracked plist: `scripts/com.apl.update-scraper.plist`.
+- Check status with `launchctl print gui/$(id -u)/com.apl.update-scraper`.
+- Launchd logs to `logs/update_scraper.launchd.log`; script logs to
+  `logs/update_scraper.log`.
 
-The rest is **manual**. If you have an existing SQLite `hvac_leads.db`:
+### DB migration notes
+
+`init_db()` runs `_apply_additive_columns()` after `create_all()` to add
+missing additive columns, currently:
+
+- `businesses.last_crawled_at`
+- `businesses.crawl_attempts`
+- `businesses.first_scrape_run_id`
+- `contacts.first_scrape_run_id`
+- `export_history.exported_at`
+
+This is idempotent and additive-only. Backfills and non-additive changes
+still belong in manual SQL.
+
+Manual SQL for legacy SQLite DBs when needed:
 
 ```sql
--- Add processed_at column
 ALTER TABLE raw_leads ADD COLUMN processed_at TIMESTAMP;
-
--- Add domain uniqueness (fails if you have dupes — clean them first)
 CREATE UNIQUE INDEX ix_businesses_domain ON businesses(domain);
-
--- Add (business_id, email) composite unique on contacts
 CREATE UNIQUE INDEX uq_contact_biz_email ON contacts(business_id, email);
-
--- Backfill legacy export_history rows after auto-adding exported_at
 UPDATE export_history SET exported_at = CURRENT_TIMESTAMP WHERE exported_at IS NULL;
-
--- Disallow NULL contact_id on export_history if you are tightening legacy DBs
 ```
 
-`process_and_deduplicate_leads()` now copies `RawLead.scrape_run_id` onto new
-`Business` / `Contact` rows as `first_scrape_run_id`, so future lift-table
-queries can attribute downstream entities to the run that first introduced
-them without relying on raw-lead proxies.
+`process_and_deduplicate_leads()` copies `RawLead.scrape_run_id` onto new
+`Business` / `Contact` rows as `first_scrape_run_id` for future lift-table
+attribution.
 
-Manual follow-up for existing DBs:
+Legacy bad-domain check:
 
 ```sql
--- Inspect legacy bad domains from old case-sensitive scheme handling
 SELECT id, business_name, domain
 FROM businesses
 WHERE domain = 'http:' OR domain LIKE 'http:%';
 ```
 
-Or nuke `database/hvac_leads.db` and re-run — `init_db()` builds
-everything.
+## Settled decisions
 
----
+- Sheets export stays. `SPREADSHEET_ID=mock` should fall back to CSV; the
+  remaining bug is the auth short-circuit.
+- Category is not hardcoded. Scraper-reported categories win; query is the
+  fallback.
+- `min_contacts` means new exportable contacts produced by this run, not
+  cumulative DB contacts.
+- One vertical per run: HVAC and plumbing are not combined implicitly.
 
-## Answered / settled
+## Notes
 
-1. **Sheets export stays.** Default `SPREADSHEET_ID=mock` falls back to
-   CSV, but the Sheets path is kept — decision 2026-07-28. Remaining
-   nit is #R1 (short-circuit the `mock` literal before attempting auth).
+- `max_depth=20` is mostly legacy compatibility for single-centroid.
+- Prefer `new_exportable_contacts` over `total_contacts` when evaluating
+  batch runs.
+- `new exportable` does not mean verified or even non-blank-email-only.
+- Broad ZIP sweeps can still surface junk emails; spot-check exports
+  before outreach or verification.
 
-2. **Category is not hardcoded.** `run_scraper.py:220` computes
-   `effective_category = category if category else (query.strip() if
-   query else None)`, and line 393 writes `category=category_str or
-   effective_category` — so **scraper-reported categories win, with the
-   query as fallback**, and an explicit `category=` kwarg overrides the
-   query fallback. The old "`HVAC/Plumbing` hardcoded" claim was fixed
-   in `393a10c`. Precedence kept as-is 2026-07-28.
-
-3. **`min_contacts` = new exportable contacts produced by this run**
-   (decided 2026-07-28), not cumulative DB contacts. Implemented as
-   `get_exportable_contact_count()` minus a baseline captured before the
-   depth loop, so re-running against a populated DB still scrapes.
-   Single-centroid only — `grid` and `full-harvest` don't loop on depth
-   and warn if the flag is passed. Note this forces the email crawl to
-   stay inside the depth loop — the crawl-attempt ledger (#R7) is what
-   keeps that affordable.
-
-4. **One vertical per run.** A run is "plumbing in San Jose" *or* "HVAC
-   in San Jose", never both. `_default_harvest_queries()` returns `None`
-   for a query naming both trades, and full-harvest hard-errors (exit 2)
-   telling the operator to split the run or pass `--queries` — it does
-   not silently sweep both variant sets.
-
-## Unclear / questions
-
-1. **`max_depth=20`** — largely obsolete after 2026-07-20 experiment.
-   Fast-mode caps at ~19 results per invocation regardless of depth (see
-   `plans/scrape-strategy-experiments-2026-07-20.md`). Slow mode saturates
-   ~depth 10 (~110 leads). Grid mode uses depth 3 per cell. Flag retained
-   only for legacy `single-centroid` strategy compatibility.
-
-2. **Crawler proxy rotation** — current crawler shuffles proxies from `CRAWLER_PROXY_FILE` so it's not locked to proxy[0]. 
-
----
-
-## Batch ZIP yield / count semantics
-
-San Jose ZIP sweeps on 2026-07-20 showed strong diminishing returns after
-first few ZIPs. `95110` produced `new_exportable=22`, `95111` produced
-`16`, then many later ZIPs produced `0-6` and several stopped early on
-stale iterations (`95113`, `95120`, `95122`, `95123`, `95128`, `95130`).
-Repeated `Added 0 new businesses`, `Added 0 new contacts`, and
-`Harvested 0 unique email contacts` lines are normal signal that nearby
-ZIPs are overlapping same market, not necessarily pipeline failure.
-
-For batch evaluation, prefer `new_exportable_contacts` over
-`total_contacts`. In `run_pipeline.py`, `get_contact_count()` returns
-cumulative DB-wide contact count, while `get_exportable_contact_count()`
-counts contacts not yet exported for destination and
-`new_exportable_contacts` is computed as current exportable minus baseline
-for that location run.
-
-As of 2026-07-28 `--min-contacts` uses the same baseline-delta count, so
-it is "new this run" for both `run_zip_batch.py` and single-centroid
-`run_pipeline.py` — they share one depth-loop implementation
-(`run_location_pipeline`). `total_contacts` is still cumulative across
-existing DB state and is reported for information only.
-
-`new exportable` does **not** mean "new valid emails" or "new verified
-emails". `export_sheets.py` exports any contact missing `export_history`
-for the destination, including phone-only placeholder contacts with blank
-email if they still exist (see #12).
-
-Current data-quality caveat: harvested data can include suspicious junk
-emails (`example@mysite.com`, `info@mysite.com`,
-`wilvercasti@gami.com`). Spot-check exported CSV/Sheets before outreach or
-verification, especially after broad ZIP sweeps.
+See `CHANGELOG.md` for shipped history and closed review items.
