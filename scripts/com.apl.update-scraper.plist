@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.apl.update-scraper</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/scripts/update_scraper.sh</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner</string>
+
+	<!--
+	launchd jobs run with a stripped PATH (/usr/bin:/bin:/usr/sbin:/sbin) —
+	none of go, git (Homebrew), or python3 (pyenv shim) live there. Without
+	this, the job fails silently on first fire, before the script's own
+	logging exists to record why.
+	-->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/go/bin:/opt/homebrew/bin:/Users/lewis.chi/.pyenv/shims:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>0</integer>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>17</integer>
+	</dict>
+
+	<!--
+	Separate from logs/update_scraper.log on purpose: the script's own
+	log() already tees every line into that file, so pointing launchd's
+	redirect at the same path would double-write every line. This one
+	only catches failures that happen before the script's logging starts
+	(bad PATH, not executable, etc).
+	-->
+	<key>StandardOutPath</key>
+	<string>/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/logs/update_scraper.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/lewis.chi/git/apl/tools/email-scraper-verifer-cleaner/logs/update_scraper.launchd.log</string>
+
+	<key>RunAtLoad</key>
+	<false/>
+</dict>
+</plist>

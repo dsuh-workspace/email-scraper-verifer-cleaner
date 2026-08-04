@@ -3,8 +3,8 @@
 Living review + backlog. Updated 2026-07-29.
 
 Purpose: HVAC/Plumbing lead-gen pipeline. Scrapes Google Maps → SQL →
-dedupes → crawls sites for emails → optionally verifies via self-hosted
-Reacher on Kamatera → exports Sheets/CSV.
+dedupes → crawls sites for emails → optionally verifies via a self-hosted
+local Reacher instance → exports Sheets/CSV.
 Now captures rich map details (Review Count, Review Rating, Address, Status, Description, Place ID).
 
 **2026-07-21 (v1)**: pipeline supports native grid-mode scraping via
@@ -65,8 +65,34 @@ for full-harvest; the old combined-call behavior is opt-in via
 contributed ~0 net-new businesses per-variant). See
 `plans/2026-08-02-pass2-dedup-investigation.md` for the full root-cause
 trace through the upstream source and the decision rationale.
-`DEFAULT_HARVEST_QUERIES` (plumbing) hasn't had its own lift-table run —
-follow-up.
+`DEFAULT_HARVEST_QUERIES` (plumbing) was re-run on fresh SJ plumbing data
+2026-08-02/03. The fresh rerun (`database/hvac_leads.san_jose_plumbing_rerun_2026-08-02c.db`) finished with 68 total contacts / 14 new exportable and showed Pass 2 lift concentrated in `Plumbing` and `Plumber`; the other six variants produced empty/missing outputs on that run. Python-side default was pruned from 8 → 2 variants accordingly. Follow-up shifted from "run the plumbing lift-table" to "use the new provenance fields below for cleaner downstream lift attribution on future runs."
+
+**2026-08-03 (scraper auto-update + local verifier)**: both vendored OSS
+tools were on a manual-pull-whenever basis; formalized both.
+`scripts/update_scraper.sh` pulls `../google-maps-scraper` (clean clone
+tracking `gosom/google-maps-scraper` upstream directly — not a submodule,
+since the only thing this repo consumes is the gitignored compiled binary),
+rebuilds to a temp path, smoke-tests the new binary with one live minimal
+scrape, and only swaps it into `app/scraper/google-maps-scraper` if the
+output still parses the way `run_scraper.py` expects — a failed build or a
+schema-incompatible new release leaves the existing binary untouched. Runs
+weekly via launchd (`com.apl.update-scraper`, Sundays 03:17) — plist
+tracked at `scripts/com.apl.update-scraper.plist`, symlinked into
+`~/Library/LaunchAgents/` and loaded with
+`launchctl bootstrap gui/$(id -u) <symlink path>` (per-machine install
+step; the symlink + bootstrap aren't themselves version-controlled).
+`EnvironmentVariables.PATH` is set explicitly in the plist since launchd's
+default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) has none of `go`, `git`
+(Homebrew), or `python3` (pyenv shim) on it. `StandardOutPath` /
+`StandardErrorPath` point at a separate `logs/update_scraper.launchd.log`,
+not `logs/update_scraper.log` — the script's own `log()` already tees into
+that file, so redirecting launchd's stdout there too would double-write
+every line; the launchd-only log exists to catch failures that happen
+before the script's logging starts (bad PATH, not executable). Check
+status with `launchctl print gui/$(id -u)/com.apl.update-scraper`.
+Separately, email verification moved off the single-instance Kamatera box
+onto a local Reacher instance — see "Local Reacher instance" below.
 
 ---
 
@@ -122,10 +148,11 @@ lat, lon, bbox = geocode_location(location)
 execute_scrape_and_ingest(query, location, bbox=bbox, cell_km, depth=3)
 process_and_deduplicate_leads()
 
-# PASS 2: multi-query slow at centroid (8 variants in one input file)
-execute_scrape_and_ingest(query, location, lat, lon, depth=10,
-                          queries=DEFAULT_HARVEST_QUERIES, fast_mode=False)
-process_and_deduplicate_leads()
+# PASS 2: per-variant slow at centroid (separate subprocess per variant)
+for variant in DEFAULT_HARVEST_QUERIES:
+  execute_scrape_and_ingest(variant, location, lat, lon, depth=10,
+                            fast_mode=False)
+  process_and_deduplicate_leads()
 
 # PASS 3 (optional): fast ZIP top-up
 for row in load_zip_csv(zip_csv):
@@ -262,10 +289,11 @@ Ordered. Top item is the one to pick up first.
 1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** — stop attempting
    Sheets auth before falling back to CSV.
 2. **#22 `robots.txt`** — still ignored. Per-host locking is in place.
-3. **Plumbing Pass 2 lift-table** — `DEFAULT_HARVEST_QUERIES` (8 variants)
-   hasn't had the per-variant lift-table run HVAC got 2026-08-01/02 (see
-   "Pass 2 combined-query underperformance"); likely has similarly-dead
-   variants worth pruning.
+3. **Exploit new provenance fields for future lift tables** — new
+   `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id` now
+   record which scrape run first created each downstream row. Use those
+   instead of first-seen raw-lead inference when auditing future variant
+   lift.
 
 ## Still open (intentional deferrals)
 
@@ -315,26 +343,35 @@ Reasonable given we're crawling only shortlisted contact pages.
 - Tests and CLI entrypoints (`run_pipeline.py`, `run_zip_batch.py`) should
   be run from activated `.venv`, not arbitrary system Python.
 
-### Kamatera Reacher instance
+### Local Reacher instance (formerly Kamatera)
 
-- URL: `http://104.128.66.74:8080/v0/check_email`
-- No auth on the endpoint itself; `KAMATERA_ACCESS_KEY` /
-  `KAMATERA_SECRET_KEY` are only consumed by the deploy scripts in the
-  `autopilotlocal/email-verifier` repo.
-- Server is single-instance, no LB — if it goes down, verification
-  fails silently to `"unknown"` (score 25). Redeploy via
-  `deploy_kamatera.sh` in the sibling repo.
-- From this laptop right now, the endpoint is unreachable (network
-  timeout to `104.128.66.74:8080`). Test from the target deploy
-  environment or check Kamatera server status via `list_servers.sh` in
-  the sibling repo.
+- URL: `http://127.0.0.1:8080/v0/check_email`
+- `./scripts/start_local_verifier.sh` — starts it. Idempotent: no-ops if
+  already reachable (polls `GET /version`, a lightweight route with no SMTP
+  round-trip), restarts an existing-but-stopped `reacher-backend` container
+  instead of erroring on "name already in use". Prefers Docker
+  (`reacherhq/backend:latest`, matching production's `deploy_kamatera.sh`
+  invocation); falls back to compiling `../email-verifier/backend`
+  (`reacher_backend` bin) from source via Cargo if Docker isn't installed —
+  that path runs in the foreground.
+- `./scripts/stop_local_verifier.sh` — stops + removes the container. No-op
+  if nothing is running.
+- `REACHER_API_URL` is set to this local URL in `.env` and `verify_emails.py`.
+- No auth on the endpoint itself.
+- Confirmed `can_connect_smtp: true` from this laptop against a real domain
+  — outbound port 25 is open, same as the old Kamatera box.
+- The published Docker image is `linux/amd64` only; on Apple Silicon it runs
+  under emulation (Docker prints a platform-mismatch warning on first pull —
+  harmless, just slightly slower per check).
+- (Legacy) The Kamatera remote server was previously used (`http://104.128.66.74:8080/v0/check_email`). `KAMATERA_ACCESS_KEY` / `KAMATERA_SECRET_KEY` are only consumed by the deploy scripts in the `autopilotlocal/email-verifier` repo.
 
 ### DB migration for `processed_at` + new constraints
 
 **Automatic, as of 2026-07-29:** `init_db()` now runs
 `_apply_additive_columns()` after `create_all()`, which `ALTER TABLE ... ADD
 COLUMN`s any missing entry in `_ADDITIVE_COLUMNS` — currently
-`businesses.last_crawled_at`, `businesses.crawl_attempts`, and
+`businesses.last_crawled_at`, `businesses.crawl_attempts`,
+`businesses.first_scrape_run_id`, `contacts.first_scrape_run_id`, and
 `export_history.exported_at` (added nullable on legacy SQLite DBs; backfill
 existing rows once if you care about historical timestamps). `create_all()`
 creates missing *tables* but never alters existing ones, so without this an
@@ -359,6 +396,11 @@ UPDATE export_history SET exported_at = CURRENT_TIMESTAMP WHERE exported_at IS N
 
 -- Disallow NULL contact_id on export_history if you are tightening legacy DBs
 ```
+
+`process_and_deduplicate_leads()` now copies `RawLead.scrape_run_id` onto new
+`Business` / `Contact` rows as `first_scrape_run_id`, so future lift-table
+queries can attribute downstream entities to the run that first introduced
+them without relying on raw-lead proxies.
 
 Manual follow-up for existing DBs:
 

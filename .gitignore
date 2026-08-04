@@ -27,6 +27,7 @@ database/hvac_leads.db
 # Scraper Executable Binary
 app/scraper/google-maps-scraper.exe
 app/scraper/google-maps-scraper
+app/scraper/.google-maps-scraper.new.*
 
 # Output data exports
 data/leads_export.csv

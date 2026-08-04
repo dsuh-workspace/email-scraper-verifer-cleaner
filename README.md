@@ -93,8 +93,8 @@ DATABASE_URL=sqlite:///database/hvac_leads.db
 SPREADSHEET_ID=mock
 CREDENTIALS_FILE=credentials.json
 
-# Reacher email verifier (self-hosted on Kamatera; see below)
-REACHER_API_URL=http://104.128.66.74:8080/v0/check_email
+# Reacher email verifier (self-hosted locally; see below)
+REACHER_API_URL=http://127.0.0.1:8080/v0/check_email
 REACHER_TIMEOUT_SEC=30
 
 # Optional proxy config
@@ -354,8 +354,9 @@ Email verification is done against a self-hosted [Reacher
 backend deployed to a Kamatera server (Hetzner blocks outbound SMTP port
 25 for new accounts; Kamatera does not). Live instance:
 
-- URL: `http://104.128.66.74:8080/v0/check_email`
-- Deploy scripts, keys, and infra config live in the sibling repo
+- URL: `http://127.0.0.1:8080/v0/check_email`
+- You can start the verifier locally using the helper script: `./scripts/start_local_verifier.sh`. This uses Docker (via `reacherhq/backend:latest`) or compiles the backend from source via Cargo from the `../email-verifier` directory.
+- Deploy scripts for the legacy remote Kamatera instance live in the sibling repo
   `autopilotlocal/email-verifier`.
 
 To run verification against your current contacts:

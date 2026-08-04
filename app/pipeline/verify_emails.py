@@ -32,7 +32,7 @@ load_dotenv()
 # Reacher backend on Kamatera. Override in .env for local dev / new deploys.
 REACHER_API_URL = os.getenv(
     "REACHER_API_URL",
-    "http://104.128.66.74:8080/v0/check_email",
+    "http://127.0.0.1:8080/v0/check_email",
 )
 REACHER_TIMEOUT_SEC = int(os.getenv("REACHER_TIMEOUT_SEC", "30"))
 
