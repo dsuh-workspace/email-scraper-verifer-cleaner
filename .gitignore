@@ -15,7 +15,6 @@ __pycache__/
 # Environments and Secrets
 .env
 .env.*
-proxies.txt
 
 # Local Database files
 *.db
