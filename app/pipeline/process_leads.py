@@ -59,6 +59,16 @@ _PLACEHOLDER_EMAIL_SUBSTRINGS = (
     "godaddy.com",
 )
 
+# Mirrors extract_emails.EXCLUDE_EXTENSIONS, duplicated for the same reason as
+# the blocklist above. Needed on this side too: a retina asset filename like
+# "about-300x281@2x.png" passes validate_email (it parses as local-part
+# "about-300x281" at domain "2x.png"), so without this the scraper's own email
+# field carries asset names straight into contacts.
+_ASSET_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf",
+    ".webp", ".avif", ".ico", ".bmp", ".tiff", ".css", ".js",
+)
+
 # Raw scraper output separates emails with any of these — treat them all.
 _EMAIL_SPLIT_RE = re.compile(r'[,;\s]+')
 
@@ -129,6 +139,8 @@ def _parse_and_validate_emails(raw_email_field: str):
         except EmailNotValidError:
             continue
         if any(bad in email for bad in _PLACEHOLDER_EMAIL_SUBSTRINGS):
+            continue
+        if email.endswith(_ASSET_EXTENSIONS):
             continue
         if email in seen:
             continue

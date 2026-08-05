@@ -1,9 +1,8 @@
 """Consolidate the eight San Jose exports into one _final CSV per vertical.
 
-Reuses the pipeline's own placeholder blocklist (app.pipeline.extract_emails)
-rather than reinventing filter rules, plus the two extensions that list is
-currently missing (.avif/.ico) which is why asset filenames reached the
-exports in the first place.
+Reuses the pipeline's own placeholder blocklist and asset-extension list
+(app.pipeline.extract_emails) rather than reinventing filter rules, so the
+two stay in sync as that blocklist grows.
 
 Output shape matches the Santa Clarita _final convention: the standard
 14-column export header, one row per business, one email per business.
@@ -16,9 +15,7 @@ import sys
 sys.path.insert(0, ".")
 from app.pipeline.extract_emails import EMAIL_REGEX, EXCLUDE_DOMAINS, EXCLUDE_EXTENSIONS
 
-# .avif/.ico are absent from the pipeline's EXCLUDE_EXTENSIONS — that gap is
-# what let 9 Air Care asset filenames through into the 08-02 HVAC export.
-ASSET_EXT = tuple(EXCLUDE_EXTENSIONS) + (".avif", ".ico", ".bmp", ".tiff")
+ASSET_EXT = tuple(EXCLUDE_EXTENSIONS)
 
 # Placeholder domains seen in San Jose data that the blocklist doesn't cover.
 EXTRA_BLOCKED = ("address.com", "@mail.com")
@@ -40,7 +37,7 @@ HEADER = ["Export Date", "Contact Name", "Email", "Phone", "Job Title",
           "Review Rating", "Address", "Status", "Description", "Place ID"]
 
 SOURCES = [
-    "data/leads_sanjose_plumbing_rerun_2026-08-02c_verified.csv",
+    "data/archive/leads_sanjose_plumbing_rerun_2026-08-02c_verified.csv",
     "data/archive/leads_export_sanjose_zipcode.csv",
     "data/archive/leads_plumbing_2026-08-02.csv",
     "data/archive/leads_sanjose_hvac_2026-08-01.csv",

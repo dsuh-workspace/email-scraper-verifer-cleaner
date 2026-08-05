@@ -51,6 +51,17 @@ class TestExtractEmailsFromHtml:
         assert "real@acme.com" in emails
         assert not any(e.endswith(".jpg") for e in emails)
 
+    def test_retina_asset_filenames_excluded(self):
+        # "logo@2x.avif" survives the regex because "@2x" reads as a
+        # local-part/domain split. Real San Jose exports picked up nine of
+        # these before .avif/.ico were added to EXCLUDE_EXTENSIONS.
+        html = (
+            "<img src=\"logo@2x.avif\"><link rel=icon href=\"favicon@2x.ico\">"
+            " contact: real@acme.com"
+        )
+        emails = extract_emails_from_html(html)
+        assert emails == ["real@acme.com"]
+
     def test_sentry_dsn_excluded(self):
         html = (
             'Sentry.init({dsn: "abc123@o12345.ingest.sentry.io"});'

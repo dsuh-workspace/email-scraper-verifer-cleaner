@@ -110,6 +110,14 @@ class TestParseAndValidateEmails:
     def test_lowercased(self):
         assert _parse_and_validate_emails("Foo@Bar.COM") == ["foo@bar.com"]
 
+    def test_asset_filenames_dropped(self):
+        # These validate as real addresses ("about-300x281" at "2x.png"), so
+        # validate_email alone lets them through. The scraper's own email
+        # field carried them into contacts until _ASSET_EXTENSIONS was added.
+        assert _parse_and_validate_emails(
+            "about-300x281@2x.png, hero@1x.avif, logo@2x.WEBP, real@acme.com"
+        ) == ["real@acme.com"]
+
     def test_dedup(self):
         # Duplicate address after normalization → deduped.
         assert _parse_and_validate_emails("Foo@Bar.com, foo@bar.com") == [

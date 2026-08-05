@@ -42,9 +42,11 @@ logger = logging.getLogger(__name__)
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
 
 # Exclude asset paths that occasionally regex-match but are never emails.
+# Retina asset names ("logo@2x.avif") are the usual source: the "@2x" reads
+# as an address separator, so the filename survives the regex.
 EXCLUDE_EXTENSIONS = (
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf",
-    ".webp", ".css", ".js",
+    ".webp", ".avif", ".ico", ".bmp", ".tiff", ".css", ".js",
 )
 
 # Substring match against the full email. Blocks CDN/tracking noise plus
