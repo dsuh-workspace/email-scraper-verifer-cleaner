@@ -87,34 +87,19 @@ than silently degrading to centroid mode.
 
 Verification (`app/pipeline/verify_emails.py`) is wired into
 `run_pipeline.py` and is the supported path. Opt in with `--verify`.
-Export can be gated by `--min-score N`. Reacher score map:
-**safe=95, risky=50, unknown=25, invalid=10**. Verifier failures warn but
-are not fatal.
+Export can be gated by `--min-score N` — score map is in `README.md`
+("Verification"). Verifier failures warn but are not fatal.
 
 ## Crawl-attempt ledger
 
-`harvest_emails_from_websites()` uses two `businesses` columns to avoid
-repeatedly crawling no-yield domains:
+Column semantics, env tuning, and the force-re-crawl SQL live in
+`README.md` under "Crawl-attempt notes". Two details it doesn't cover:
 
-| Column | Meaning |
-|---|---|
-| `last_crawled_at` | Stamped on every attempt — success, no-email, or exception |
-| `crawl_attempts` | Count of consecutive no-email attempts; resets to 0 on success |
-
-Pending set in `extract_emails.py`: already has email → done;
-`crawl_attempts >= max_attempts` → given up; `last_crawled_at` inside the
-cooldown → skip; else crawl.
-
-Tuning:
-
-- `CRAWL_RETRY_AFTER_HOURS`: default `720` (30 days). `0` and non-integers
-  are invalid and fall back to default.
-- `CRAWL_MAX_ATTEMPTS`: default `3`. `0` means no cap.
-
-Crawl errors count as spent attempts on purpose.
-
-To force a full re-crawl:
-`UPDATE businesses SET last_crawled_at = NULL, crawl_attempts = 0;`
+- Pending set in `extract_emails.py`: already has email → done;
+  `crawl_attempts >= max_attempts` → given up; `last_crawled_at` inside
+  the cooldown → skip; else crawl.
+- `CRAWL_RETRY_AFTER_HOURS=0` and non-integer values are invalid and fall
+  back to the 720-hour default rather than erroring.
 
 ## Run tracking
 
@@ -191,26 +176,18 @@ Two hygiene rules for the next market test, both learned the hard way:
 
 ### Python / venv conventions
 
-- Repo pins Python via `.python-version` = `3.12.9`.
-- Run Python commands inside `.venv`.
-- Canonical setup:
-  ```bash
-  python -m venv .venv
-  source .venv/bin/activate
-  pip install -r requirements.txt
-  ```
-- Tests and CLI entrypoints should be run from activated `.venv`.
+Setup is in `README.md` ("Python version / virtualenv"). Run every Python
+command — tests and CLI entrypoints included — inside `.venv`.
 
 ### Local Reacher instance
 
-- URL: `http://127.0.0.1:8080/v0/check_email`
-- `./scripts/start_local_verifier.sh` starts it. It no-ops if already
-  reachable, restarts an existing stopped `reacher-backend` container when
-  possible, prefers Docker, and falls back to building
-  `../email-verifier/backend` from source if Docker is unavailable.
+URL, start script, and score map are in `README.md` ("Verification").
+Operator details it doesn't cover:
+
+- `start_local_verifier.sh` no-ops if the endpoint is already reachable
+  and restarts an existing stopped `reacher-backend` container when it
+  can, so re-running it is safe.
 - `./scripts/stop_local_verifier.sh` stops and removes the container.
-- `REACHER_API_URL` is set to this local URL in `.env` and
-  `verify_emails.py`.
 - No auth on the endpoint itself.
 - Apple Silicon runs the published Docker image under emulation.
 
