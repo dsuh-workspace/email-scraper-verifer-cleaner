@@ -15,7 +15,7 @@ file is the dated record.
   net-new HVAC contacts and 22 of 86 plumbing contacts, all of them with emails.
   `harvest_emails_from_websites()` now resolves `MAX(scrape_runs.id)` at harvest
   start and threads it through. Data written before this date still carries the
-  gap; a backfill query is in `CLAUDE.md`.
+  gap; a backfill query is in `MAINTENANCE_SQL.md`.
 - ✅ **Provenance tests fixed and extended** —
   `TestProcessLeadsProvenance::test_records_first_scrape_run_on_new_business_and_contact`
   had been failing on two unrelated bugs of its own: it referenced

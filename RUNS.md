@@ -194,12 +194,9 @@ python scripts/analysis/run_wallclock.py database/test_hvac_overlap.db 50
 
 ### Next-market hygiene
 
-Two changes remove the correction step entirely:
-
-1. Seed the candidate DB from a **single-vertical** baseline copy, so no
-   cross-vertical rows sit below the cohort cutoff.
-2. Run **one process at a time**. The 3 concurrent HVAC processes interleaved run
-   IDs and made the wall-clock figure incomparable to a sequential run's.
+Two setup rules remove the correction step entirely — single-vertical
+baseline, one process per DB. Stated in `CLAUDE.md` → "Market-overlap
+setup rules"; follow them before starting the next market test.
 
 ## Conventions
 

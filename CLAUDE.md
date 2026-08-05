@@ -110,25 +110,24 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
 
 ## Open work
 
-1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** so Sheets auth is not
+1. **Short-circuit the `mock` SPREADSHEET_ID** so Sheets auth is not
    attempted before CSV fallback.
-2. **#22 `robots.txt`** is still ignored. Per-host locking is in place.
-3. **Use provenance fields for future lift tables**: rely on
+2. **Use provenance fields for future lift tables**: rely on
    `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id`
    instead of raw-lead first-seen inference. **Two caveats apply to data
    written before 2026-08-04:** legacy rows have NULL provenance and were
-   never backfilled, and crawl-created contacts were never stamped at all
-   (fixed 2026-08-04 — see below). For historical cohorts, scope contacts by
-   their *business's* provenance and fall back to `MIN(raw_leads.scrape_run_id)`
-   for NULL businesses. `scripts/analysis/market_overlap.py` does both.
-4. **Backfill NULL `first_scrape_run_id`** on legacy `businesses` / `contacts`
+   never backfilled, and crawl-created contacts were never stamped at all.
+   For historical cohorts, scope contacts by their *business's* provenance
+   and fall back to `MIN(raw_leads.scrape_run_id)` for NULL businesses.
+   `scripts/analysis/market_overlap.py` does both.
+3. **Backfill NULL `first_scrape_run_id`** on legacy `businesses` / `contacts`
    rows from `MIN(raw_leads.scrape_run_id)`, so cohort queries stop needing the
-   inference fallback. Not done — belongs in manual SQL.
-5. **Give `export_new_leads()` an optional run-cohort filter.** It currently
+   inference fallback. Not done — queries are in `MAINTENANCE_SQL.md`.
+4. **Give `export_new_leads()` an optional run-cohort filter.** It currently
    emits every contact absent from `export_history`, which on a DB carrying a
    baseline is the whole DB. `scripts/analysis/export_cohort.py` works around
    this but the export path itself is still unscoped.
-6. **`tests/test_run_scraper.py` proxy-order tests are flaky** (5 failures,
+5. **`tests/test_run_scraper.py` proxy-order tests are flaky** (5 failures,
    pre-existing). They assert a fixed proxy order against code that shuffles
    randomly. Seed the shuffle or assert set-equality.
 
@@ -147,15 +146,14 @@ root-level `calculate_overlap.py` / `get_runtimes.py` could not run there):
 `market_overlap.py` replaces `calculate_overlap.py`, which matched raw leads to
 businesses on `place_id` — a key the pipeline never uses for dedupe.
 
-## Market-overlap findings (2026-08-04)
+## Market-overlap setup rules
 
-San Jose ↔ Sunnyvale/Santa Clara overlap is **10.8% (plumbing, 7 ZIPs)** and
-**12.6% (HVAC, 3 ZIPs)** — i.e. the adjacent market is ~87–89% net-new and worth
-running on its own. Full numbers, caveats, and the continuation runbook are in
-`RUNS.md`. The overlap-methodology question is settled; what remains is finishing
-the crawl and export on both test DBs.
+San Jose ↔ Sunnyvale/Santa Clara overlap came in at **10.8% (plumbing)** and
+**12.6% (HVAC)** — the adjacent market is ~87–89% net-new. Numbers, caveats,
+and the continuation runbook are in `RUNS.md`; methodology is in
+`RUNBOOK_SQL_OVERLAP_ANALYSIS.md`.
 
-Two hygiene rules for the next market test, both learned the hard way:
+Two rules before starting any market test, both learned the hard way:
 
 - **Seed the candidate DB from a single-vertical baseline.** A shared baseline
   puts same-market/different-vertical runs below the cohort cutoff, where they
@@ -165,11 +163,11 @@ Two hygiene rules for the next market test, both learned the hard way:
 
 ## Intentional deferrals
 
-- **#12 Export pushes empty-email rows to Sheets** — deliberate project
+- **Export pushes empty-email rows to Sheets** — deliberate project
   decision. Blank-email contacts may still export.
-- **#20 Commits inside per-business loop** — batching every 25 is
+- **Commits inside per-business loop** — batching every 25 is
   acceptable for now.
-- **#22 No `robots.txt` / no per-domain politeness** — per-host locking is
+- **No `robots.txt` / no per-domain politeness** — per-host locking is
   in place; `robots.txt` is still ignored.
 
 ## Environment / operational
@@ -213,52 +211,21 @@ missing additive columns, currently:
 - `contacts.first_scrape_run_id`
 - `export_history.exported_at`
 
-This is idempotent and additive-only. Backfills and non-additive changes
-still belong in manual SQL.
+This is idempotent and additive-only. Backfills, non-additive changes, and
+legacy-DB catch-up live in `MAINTENANCE_SQL.md`.
 
-Manual SQL for legacy SQLite DBs when needed:
+Provenance stamping, as currently implemented:
 
-```sql
-ALTER TABLE raw_leads ADD COLUMN processed_at TIMESTAMP;
-CREATE UNIQUE INDEX ix_businesses_domain ON businesses(domain);
-CREATE UNIQUE INDEX uq_contact_biz_email ON contacts(business_id, email);
-UPDATE export_history SET exported_at = CURRENT_TIMESTAMP WHERE exported_at IS NULL;
-```
+- `process_and_deduplicate_leads()` copies `RawLead.scrape_run_id` onto new
+  `Business` / `Contact` rows as `first_scrape_run_id`.
+- `harvest_emails_from_websites()` stamps crawl-discovered contacts using
+  `MAX(scrape_runs.id)` at harvest start. The crawl is not itself a scrape
+  run, so its contacts are attributed to the cohort whose pipeline
+  invocation produced them.
 
-`process_and_deduplicate_leads()` copies `RawLead.scrape_run_id` onto new
-`Business` / `Contact` rows as `first_scrape_run_id` for future lift-table
-attribution.
-
-`harvest_emails_from_websites()` stamps crawl-discovered contacts too, using
-`MAX(scrape_runs.id)` at harvest start — the crawl is not itself a scrape run, so
-its contacts are attributed to the cohort whose pipeline invocation produced
-them. Before this fix (2026-08-04) `_persist_emails_for_business()` omitted the
-field entirely, so every crawled email landed with NULL provenance and dropped
-out of contact-level lift tables. Data written before that date still carries the
-gap; scope those contacts by their business's provenance instead.
-
-Backfill for pre-fix rows, if you want contact-level cohort queries to work on
-historical data:
-
-```sql
-UPDATE contacts
-SET first_scrape_run_id = (
-    SELECT b.first_scrape_run_id FROM businesses b WHERE b.id = contacts.business_id
-)
-WHERE first_scrape_run_id IS NULL;
-```
-
-This attributes a crawled contact to the run that first found its business, which
-is a floor, not the true discovery run — good enough for cohort bucketing when
-the business and the crawl fall in the same cohort.
-
-Legacy bad-domain check:
-
-```sql
-SELECT id, business_name, domain
-FROM businesses
-WHERE domain = 'http:' OR domain LIKE 'http:%';
-```
+Rows written before 2026-08-04 predate the crawl-path stamping and carry
+NULL provenance — see Open work #3/#4 for how to work around it and
+`MAINTENANCE_SQL.md` for the backfill.
 
 ## Settled decisions
 
