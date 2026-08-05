@@ -4,6 +4,82 @@ Shipped changes, closed review items, and archived history that no longer
 belongs in `CLAUDE.md`. `CLAUDE.md` is the current operator guide; this
 file is the dated record.
 
+## 2026-08-04
+
+- 🐛 **Crawl-discovered contacts now carry provenance** —
+  `_persist_emails_for_business()` in `app/pipeline/extract_emails.py` omitted
+  `first_scrape_run_id` entirely, so every email found by website crawling landed
+  with NULL provenance. Only `process_leads.py` ever stamped the field. Effect:
+  contact-level lift tables built on `contacts.first_scrape_run_id` silently
+  undercounted exactly the crawl-sourced emails that matter most — 25 of 163
+  net-new HVAC contacts and 22 of 86 plumbing contacts, all of them with emails.
+  `harvest_emails_from_websites()` now resolves `MAX(scrape_runs.id)` at harvest
+  start and threads it through. Data written before this date still carries the
+  gap; a backfill query is in `CLAUDE.md`.
+- ✅ **Provenance tests fixed and extended** —
+  `TestProcessLeadsProvenance::test_records_first_scrape_run_on_new_business_and_contact`
+  had been failing on two unrelated bugs of its own: it referenced
+  `process_leads.sessionmaker`, which does not exist (the import is
+  function-local), and it read `run.id` after `session.close()`, raising
+  `DetachedInstanceError`. Both fixed, and
+  `test_records_first_scrape_run_on_crawl_discovered_contact` added as a
+  regression guard on the crawl path. Suite: 5 pre-existing flaky proxy-order
+  failures remain, down from 7.
+- ✅ **`scripts/analysis/` added; root-level analysis scripts retired** —
+  `market_overlap.py` (cohort overlap/lift), `export_cohort.py` (cohort-scoped
+  CSV export), `run_wallclock.py` (interval-merged cohort duration). Replaces
+  root-level `calculate_overlap.py` and `get_runtimes.py`, which both imported
+  **pandas — not a declared dependency** — and so could not run inside the pinned
+  `.venv`. The new scripts are stdlib + SQLAlchemy only.
+  `market_overlap.py` also drops `place_id` matching: the pipeline deduplicates on
+  base domain then `business_name` + E164 phone, never on `place_id`, so
+  place_id-based matching could group raw leads differently from the pipeline.
+- ✅ **Market overlap measured: San Jose ↔ Sunnyvale/Santa Clara** — 10.8%
+  business overlap for plumbing (7 ZIPs), 12.6% for HVAC (3 ZIPs, after
+  correcting for cross-vertical contamination; 19.6% uncorrected). The adjacent
+  market is ~87–89% net-new. Results, caveats, and a continuation runbook are in
+  `RUNS.md`.
+- 🧹 **Mislabeled export quarantined** — `data/hvac_overlap_test_{all,deduped}.csv`
+  were not HVAC and not a cohort: they were whole-DB exports (76/166 rows San
+  Jose, mostly *plumbing*) produced because `export_new_leads()` has no
+  run-cohort filter. Moved to
+  `data/archive/MISLABELED_wholedb_export_2026-08-04_*.csv` with a README
+  explaining the root cause.
+- 🧹 **Interrupted runs marked** — 6 rows hard-killed by the 2026-08-04 network
+  failure were sitting at `status = 'running'` (HVAC 56, 62, 63, 68; plumbing 22,
+  42) and now read `interrupted`. Not a code bug: the exception handler in
+  `execute_scrape_and_ingest()` does set `failed`, but SIGKILL never reaches it.
+- ✅ **Per-city `_final` exports for Sunnyvale / Santa Clara** — four outreach
+  files, one per city × vertical: Santa Clara HVAC 26, Sunnyvale HVAC 11, Santa
+  Clara plumbing 25, Sunnyvale plumbing 12 (74 rows). **A floor, not a final
+  count** — the crawl is unfinished on both DBs. Counts reconcile exactly against
+  the cohorts: HVAC 37 kept + 14 junk + 12 out-of-city = 63 emailed contacts;
+  plumbing 37 + 5 + 1 = 43.
+- ✅ **`export_cohort.py` gained `--city` and `--drop-junk`** — `--city` resolves
+  a business by its own address, falling back to the discovering run's ZIP when
+  the address is blank (45 of 106 emailed cohort contacts sit on blank-address
+  businesses, so an address-only filter would drop them), and prints the cities it
+  excluded so a filter never silently discards leads. `--drop-junk` imports the
+  crawler's own exclusion lists rather than copying them, so export cleanup cannot
+  drift from crawl-time filtering.
+- 🐛 **Three new email-filter exclusions**, all found in rows already exported:
+  - `EXCLUDE_LOCALPARTS` added, holding `impallari` — a font designer's address
+    embedded in webfont license headers, harvested from any site using his
+    fonts. It shipped as a Santa Clara HVAC lead. `EXCLUDE_DOMAINS` cannot
+    catch it: the address is `@gmail.com`, and blocking Gmail would drop most
+    owner-operator contractors. The foundry-domain equivalents
+    (`astigmatic.com`, `latofonts.com`) were already listed.
+  - `xxx.xxx` — the all-x placeholder, shipped as a COOLMAN HVAC SUPPLY lead.
+  - `address.com` — theme boilerplate `email@address.com`. The existing
+    `email.com` entry misses it because matching is substring-based and stops
+    at the `@`.
+  - `eliteonlinemedia.com` — a web-agency contact-form relay, found on two
+    unrelated plumbing sites. The same address on multiple businesses is the tell.
+  - Three regression tests added in `tests/test_extract_emails.py`.
+- 🧹 **ZIP files tidied** — `single_zip.csv` (untracked 1-ZIP scratch file)
+  removed in favor of `zips_hvac_remaining_2026-08-04.csv` and
+  `zips_plumbing_remaining_2026-08-04.csv`, which encode the ZIPs still owed work.
+
 ## 2026-08-03
 
 - ✅ **Operator guide trimmed and split from history** — `CLAUDE.md` now
