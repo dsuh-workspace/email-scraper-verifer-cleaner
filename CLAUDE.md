@@ -55,6 +55,10 @@ geocode + dispatch + that tail.
 - `--min-contacts` / `--max-depth` are single-centroid only. Under
   `grid`/`full-harvest` they warn and are ignored; non-positive values
   exit 2.
+- `--cell-km` is the mirror image: grid/full-harvest only, warns and is
+  ignored under single-centroid. Non-positive values exit 2 on both CLIs,
+  checked before strategy dispatch so `--cell-km 0` errors even where the
+  flag would otherwise just be ignored.
 - CSV fallback filenames are descriptive by default:
   `data/leads_<location>_<query>_<date>.csv` for single-location runs and
   `data/leads_<query>_<date>.csv` for batch runs. `--csv-path` overrides.
@@ -69,8 +73,8 @@ geocode + dispatch + that tail.
   to `None` and are single-centroid only. Effective defaults: 20 /
   `DEFAULT_MAX_DEPTH` / 2. `--stale-iterations` layers onto the same depth
   loop.
-- `--cell-km` warns under single-centroid and must be `> 0` — this check is
-  batch-only; `run_pipeline.py` does not validate it.
+- `--cell-km` validation is now shared with `run_pipeline.py`, and
+  `DEFAULT_CELL_KM` is imported from it rather than redefined.
 - Geocoding: single-centroid geocodes inside `run_location_pipeline`;
   grid/full-harvest geocode in the batch loop to get each row's bbox.
 - Batch full-harvest never passes `zip_csv` because the batch already is
@@ -122,9 +126,14 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    emits every contact absent from `export_history`, which on a DB carrying a
    baseline is the whole DB. `scripts/analysis/export_cohort.py` works around
    this but the export path itself is still unscoped.
-5. **`tests/test_run_scraper.py` proxy-order tests are flaky** (5 failures,
-   pre-existing). They assert a fixed proxy order against code that shuffles
-   randomly. Seed the shuffle or assert set-equality.
+5. **Proxy-order tests are flaky** (pre-existing). They assert a fixed proxy
+   order against code that shuffles randomly, so the failing set varies run
+   to run — observed 4–6 failures across `tests/test_run_scraper.py`
+   (`TestScraperProxyArgs`, `TestExecuteScrapeMultiQuery`) and
+   `tests/test_extract_emails.py` (`TestBuildCrawlerProxies`). Seed the
+   shuffle or assert set-equality. Everything else passes; when evaluating a
+   change, compare the failing set against a clean checkout rather than the
+   count.
 
 ## Analysis tooling
 

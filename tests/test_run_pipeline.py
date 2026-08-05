@@ -461,6 +461,106 @@ class TestMain:
         assert called["min_contacts"] == 1
         assert called["max_depth"] == 1
 
+    @pytest.mark.parametrize("value", ["0", "-1", "-2.5"])
+    def test_non_positive_cell_km_rejected(self, monkeypatch, modules, value):
+        """--cell-km goes straight to the scraper's -grid-cell; reject up front."""
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys, "argv",
+            ["run_pipeline.py", "--query", "Plumbing", "--location", "San Jose, CA",
+             "--grid", "--cell-km", value],
+        )
+        called = self._capture_pipeline_kwargs(monkeypatch, run_pipeline)
+
+        with pytest.raises(SystemExit) as exc:
+            run_pipeline.main()
+
+        assert exc.value.code == 2
+        assert called == {}
+
+    def test_non_positive_cell_km_rejected_under_single_centroid(
+        self, monkeypatch, modules
+    ):
+        """The bound is checked before strategy dispatch, so it errors even
+        where --cell-km would otherwise merely be ignored."""
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys, "argv",
+            ["run_pipeline.py", "--query", "Plumbing", "--location", "San Jose, CA",
+             "--cell-km", "0"],
+        )
+        called = self._capture_pipeline_kwargs(monkeypatch, run_pipeline)
+
+        with pytest.raises(SystemExit) as exc:
+            run_pipeline.main()
+
+        assert exc.value.code == 2
+        assert called == {}
+
+    def test_positive_cell_km_accepted(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys, "argv",
+            ["run_pipeline.py", "--query", "Plumbing", "--location", "San Jose, CA",
+             "--grid", "--cell-km", "1.5"],
+        )
+        called = self._capture_pipeline_kwargs(monkeypatch, run_pipeline)
+
+        run_pipeline.main()
+
+        assert called["cell_km"] == 1.5
+
+    def test_cell_km_warns_under_single_centroid(self, monkeypatch, modules):
+        """No None sentinel on --cell-km, so a non-default value is the only
+        signal the operator passed a flag single-centroid cannot honor."""
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys, "argv",
+            ["run_pipeline.py", "--query", "Plumbing", "--location", "San Jose, CA",
+             "--cell-km", "4"],
+        )
+        self._capture_pipeline_kwargs(monkeypatch, run_pipeline)
+        recorder = RecordingLogger()
+        monkeypatch.setattr(run_pipeline, "logger", recorder)
+
+        run_pipeline.main()
+
+        assert (
+            "--cell-km=4.00 supplied but strategy is single-centroid"
+            in recorder.joined("warning")
+        )
+
+    def test_default_cell_km_does_not_warn_under_single_centroid(
+        self, monkeypatch, modules
+    ):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys, "argv",
+            ["run_pipeline.py", "--query", "Plumbing", "--location", "San Jose, CA"],
+        )
+        self._capture_pipeline_kwargs(monkeypatch, run_pipeline)
+        recorder = RecordingLogger()
+        monkeypatch.setattr(run_pipeline, "logger", recorder)
+
+        run_pipeline.main()
+
+        assert "--cell-km" not in recorder.joined("warning")
+
+    def test_cell_km_not_warned_under_grid(self, monkeypatch, modules):
+        run_pipeline, _ = modules
+        monkeypatch.setattr(
+            sys, "argv",
+            ["run_pipeline.py", "--query", "Plumbing", "--location", "San Jose, CA",
+             "--grid", "--cell-km", "4"],
+        )
+        self._capture_pipeline_kwargs(monkeypatch, run_pipeline)
+        recorder = RecordingLogger()
+        monkeypatch.setattr(run_pipeline, "logger", recorder)
+
+        run_pipeline.main()
+
+        assert "--cell-km" not in recorder.joined("warning")
+
     def test_queries_with_non_full_harvest_is_an_error(self, monkeypatch, modules):
         """Silently dropping --queries is how users trust a bad harvest."""
         run_pipeline, _ = modules

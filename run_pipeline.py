@@ -37,6 +37,11 @@ LEGACY_EXPORT_DESTINATION = "local_csv_leads"
 DEFAULT_MIN_CONTACTS = 500
 DEFAULT_MAX_DEPTH = 20
 
+# Grid cell size. Unlike the depth-loop flags this has a real default rather
+# than None, so "did the user pass --cell-km?" is inferred by comparing
+# against this constant — which only works while it stays the argparse default.
+DEFAULT_CELL_KM = 2.0
+
 # Default query variants for full-harvest multi-query pass. Chosen from the
 # 2026-07-20 SJ experiment — "Leak repair" alone added 50 unique businesses
 # no other query surfaced, so the list favors breadth over redundancy.
@@ -642,8 +647,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cell-km",
         type=float,
-        default=2.0,
-        help="Grid cell size in km (default 2.0). Ignored without --grid.",
+        default=DEFAULT_CELL_KM,
+        help=(
+            f"Grid cell size in km (default {DEFAULT_CELL_KM}). Must be > 0. "
+            f"Ignored without --grid."
+        ),
     )
     parser.add_argument(
         "--bbox",
@@ -1014,11 +1022,18 @@ def _resolve_strategy(args: argparse.Namespace) -> str:
 def _validate_positive_counts(
     args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
-    """Reject non-positive values for the count/depth flags (review #16).
+    """Reject non-positive values for the count/depth/cell-size flags.
 
-    Both default to None ("flag not passed"), so only an explicitly supplied
-    value is checked. A `--min-contacts 0` target is met before the first
-    scrape; a `--max-depth 0` loop can't run an iteration at all.
+    The count/depth flags default to None ("flag not passed"), so only an
+    explicitly supplied value is checked. A `--min-contacts 0` target is met
+    before the first scrape; a `--max-depth 0` loop can't run an iteration at
+    all.
+
+    `--cell-km` always has a value, so it is checked unconditionally. It is
+    forwarded verbatim to the vendored scraper as `-grid-cell`, which owns the
+    grid layout — rather than hand that binary a degenerate cell size and
+    inherit whatever it does with it, reject up front. Matches
+    run_zip_batch.py.
     """
     for flag, value in (
         ("--min-contacts", args.min_contacts),
@@ -1026,6 +1041,9 @@ def _validate_positive_counts(
     ):
         if value is not None and value <= 0:
             parser.error(f"{flag} must be > 0 (got {value}).")
+
+    if args.cell_km <= 0:
+        parser.error(f"--cell-km must be > 0 (got {args.cell_km}).")
 
 
 def _resolve_query_variants(
@@ -1103,6 +1121,15 @@ def main() -> None:
                     strategy,
                     flag,
                 )
+    # Mirror image: --cell-km only shapes the grid, which single-centroid has
+    # none of. No None sentinel here, so a non-default value is the only signal
+    # that the operator passed the flag.
+    elif args.cell_km != DEFAULT_CELL_KM:
+        logger.warning(
+            "--cell-km=%.2f supplied but strategy is single-centroid, "
+            "which has no grid; ignored.",
+            args.cell_km,
+        )
 
     query_variants = _resolve_query_variants(args, strategy, parser)
 

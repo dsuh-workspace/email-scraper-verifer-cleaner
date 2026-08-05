@@ -4,6 +4,32 @@ Shipped changes, closed review items, and archived history that no longer
 belongs in `CLAUDE.md`. `CLAUDE.md` is the current operator guide; this
 file is the dated record.
 
+## 2026-08-05
+
+- 🐛 **`--cell-km` is now validated on `run_pipeline.py`** — the check existed
+  only in `run_zip_batch.py`, so `run_pipeline.py --grid --cell-km 0` was
+  accepted and forwarded verbatim to the vendored scraper as `-grid-cell 0`,
+  leaving the grid geometry up to the Go binary. `_validate_positive_counts()`
+  now rejects non-positive values, before strategy dispatch so `--cell-km 0`
+  errors even under single-centroid where the flag would otherwise be ignored.
+  Adds the mirror-image scope warning: `--cell-km` under single-centroid now
+  warns and is ignored, the same way `--min-contacts`/`--max-depth` do under
+  grid/full-harvest.
+- ♻️ **`DEFAULT_CELL_KM` moved to `run_pipeline.py`** — `run_zip_batch.py`
+  defined its own copy while importing `DEFAULT_MAX_DEPTH` from
+  `run_pipeline`. Grid cell size is a property of the grid, so it now follows
+  the same convention. Comparing against the constant is how "did the operator
+  pass `--cell-km`?" is inferred, so two copies could have diverged into a
+  warning that never fires.
+- 📄 **Docs consolidated** — `CLAUDE.md` 305 → ~250 lines. Sections restating
+  `README.md` (crawl-attempt ledger, local Reacher, score map, venv setup)
+  became pointers; the three overlapping strategy sections merged into one;
+  hand-run SQL moved to a new `MAINTENANCE_SQL.md`; the crawl-provenance
+  narrative left for this file. Dropped the `#R1`/`#12`/`#20`/`#22` prefixes —
+  they referred to code-review rounds whose numbering no longer matches — and
+  removed `robots.txt` from Open work, where it duplicated its own entry under
+  Intentional deferrals.
+
 ## 2026-08-04
 
 - 🐛 **Crawl-discovered contacts now carry provenance** —

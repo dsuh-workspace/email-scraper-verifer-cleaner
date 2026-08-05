@@ -14,6 +14,7 @@ from app.scraper.run_scraper import geocode_location
 # full-harvest is refused for lacking a variant set, since that check is the
 # difference between a full sweep and grid-level results at full wall cost.
 from run_pipeline import (
+    DEFAULT_CELL_KM,
     DEFAULT_MAX_DEPTH,
     _default_csv_path,
     _resolve_query_variants,
@@ -31,11 +32,11 @@ STRATEGIES = ("single-centroid", "grid", "full-harvest")
 # operator pass this?" is never inferred from comparing against a literal —
 # same reasoning as run_pipeline.py's DEFAULT_MIN_CONTACTS. The batch wants a
 # much lower per-ZIP target than a single metro run (nearby ZIPs overlap, so
-# marginal yield per ZIP is small), but the depth cap is a property of the
-# shared depth loop, so it comes from run_pipeline.
+# marginal yield per ZIP is small), but the depth cap and grid cell size are
+# properties of the shared depth loop and grid, so both come from run_pipeline
+# (DEFAULT_MAX_DEPTH, DEFAULT_CELL_KM).
 DEFAULT_TARGET_NEW_EXPORTABLE = 20
 DEFAULT_STALE_ITERATIONS = 2
-DEFAULT_CELL_KM = 2.0
 
 
 
