@@ -73,6 +73,10 @@ EXCLUDE_DOMAINS = (
     "santaclarita.gov",
     "2pointagency.com",
     "astigmatic.com",
+    # web-agency contact-form relay, not the business's own inbox. Found on
+    # two unrelated Sunnyvale/Santa Clara plumbing sites (2026-08-04) — the
+    # same address on multiple businesses is the tell.
+    "eliteonlinemedia.com",
     "cdn.",
     # documentation / spec placeholders
     "example.com",
@@ -86,6 +90,9 @@ EXCLUDE_DOMAINS = (
     "youremail.com",
     "yoursite.com",
     "email.com",
+    # "email@address.com" — theme boilerplate. Not caught by "email.com"
+    # above, which is matched as a substring and stops at the "@".
+    "address.com",
     # frequent template-site junk seen in scraped SJ/SC data
     "gami.com",
     "test.com",
@@ -93,6 +100,17 @@ EXCLUDE_DOMAINS = (
     # registrar / host placeholder shown by parked pages
     "godaddy.com",
     "sentry-cdn.com",
+    # all-x placeholder ("xxx@xxx.xxx") left in theme boilerplate
+    "xxx.xxx",
+)
+
+# Localparts to drop regardless of domain. Font designers ship a contact
+# address inside webfont license headers and CSS comments, so the crawler
+# harvests it from any site embedding that font — on a freemail domain, which
+# EXCLUDE_DOMAINS cannot filter without blocking real contractors. The
+# foundry-domain equivalents (astigmatic.com, latofonts.com) are above.
+EXCLUDE_LOCALPARTS = (
+    "impallari",  # Pablo Impallari / Impallari Type
 )
 
 # Paths to try in order. First hit that returns emails short-circuits.
@@ -160,6 +178,8 @@ def extract_emails_from_html(html_text: str) -> List[str]:
         if any(candidate.endswith(ext) for ext in EXCLUDE_EXTENSIONS):
             continue
         if any(bad in candidate for bad in EXCLUDE_DOMAINS):
+            continue
+        if candidate.partition("@")[0] in EXCLUDE_LOCALPARTS:
             continue
         try:
             email = validate_email(candidate, check_deliverability=False).normalized.lower()
@@ -261,10 +281,17 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
     return sorted(found)
 
 
-def _persist_emails_for_business(session, biz, emails: List[str]) -> int:
+def _persist_emails_for_business(
+    session, biz, emails: List[str], scrape_run_id: Optional[int] = None
+) -> int:
     """
     Add new Contact rows for each found email; remove phone-only placeholders
     once we have at least one real email for the business. Returns count added.
+
+    `scrape_run_id` is stamped onto new contacts as `first_scrape_run_id`.
+    Without it, every crawl-discovered email lands with NULL provenance and
+    contact-level lift tables silently undercount exactly the emails that
+    matter most (see `harvest_emails_from_websites`).
     """
     if not emails:
         return 0
@@ -298,6 +325,7 @@ def _persist_emails_for_business(session, biz, emails: List[str]) -> int:
             title="General Contact",
             email=email,
             lead_status="Not Contacted",
+            first_scrape_run_id=scrape_run_id,
         ))
         existing_emails.add(email)
         added += 1
@@ -374,12 +402,26 @@ def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
     """
     from sqlalchemy.orm import sessionmaker
 
+    from sqlalchemy import func
+
     from app.db.database import engine
-    from app.db.create_tables import Business, Contact, ExportHistory
+    from app.db.create_tables import Business, Contact, ExportHistory, ScrapeRun
 
     Session = sessionmaker(bind=engine)
     session = Session()
     try:
+        # Provenance for crawl-discovered emails. The harvest is not itself a
+        # scrape run, so attribute its contacts to the newest run in the DB —
+        # i.e. the cohort whose pipeline invocation produced them. Without this
+        # every crawled email lands with first_scrape_run_id = NULL and drops
+        # out of contact-level lift tables.
+        harvest_run_id = session.query(func.max(ScrapeRun.id)).scalar()
+        if harvest_run_id is None:
+            logger.warning(
+                "No scrape_runs rows found; crawl-discovered contacts will have "
+                "NULL first_scrape_run_id and will not appear in lift tables."
+            )
+
         crawler_proxies = _build_crawler_proxies(disable_proxy=disable_proxy)
         if crawler_proxies:
             logger.info("Crawler proxies enabled for %s.", ", ".join(sorted(crawler_proxies)))
@@ -453,7 +495,9 @@ def harvest_emails_from_websites(disable_proxy: bool = False) -> None:
 
                 if emails:
                     logger.info(f"[{i}/{len(pending)}] {biz.website} -> {', '.join(emails)}")
-                    added = _persist_emails_for_business(session, biz, emails)
+                    added = _persist_emails_for_business(
+                        session, biz, emails, scrape_run_id=harvest_run_id
+                    )
                     emails_harvested += added
 
                 _record_crawl_attempt(biz, attempted_at, found_email=bool(emails))

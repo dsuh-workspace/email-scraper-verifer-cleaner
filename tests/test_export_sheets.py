@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from app.pipeline import export_sheets, process_leads
+from sqlalchemy.orm import sessionmaker
+
+from app.pipeline import export_sheets, extract_emails, process_leads
 from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification, RawLead, ScrapeRun
 from app.db.database import engine
 
@@ -36,7 +38,7 @@ class TestProcessLeadsProvenance:
         Contact.__table__.create(engine)
         RawLead.__table__.create(engine)
 
-        session = process_leads.sessionmaker(bind=engine)()
+        session = sessionmaker(bind=engine)()
         run = ScrapeRun(query="Plumber", location="San Jose, CA", status="completed")
         session.add(run)
         session.flush()
@@ -50,19 +52,58 @@ class TestProcessLeadsProvenance:
             )
         )
         session.commit()
+        # Capture before close(): commit expires the instance, and reading
+        # run.id on a detached object raises DetachedInstanceError.
+        run_id = run.id
         session.close()
 
         process_leads.process_and_deduplicate_leads()
 
-        session = process_leads.sessionmaker(bind=engine)()
+        session = sessionmaker(bind=engine)()
         try:
             business = session.query(Business).one()
             contact = session.query(Contact).one()
+            assert business.first_scrape_run_id == run_id
+            assert contact.first_scrape_run_id == run_id
         finally:
             session.close()
 
-        assert business.first_scrape_run_id == run.id
-        assert contact.first_scrape_run_id == run.id
+    def test_records_first_scrape_run_on_crawl_discovered_contact(self):
+        """Emails found by the website crawl must carry provenance too.
+
+        Regression guard: `_persist_emails_for_business` used to omit
+        first_scrape_run_id entirely, so every crawl-discovered email landed
+        with NULL provenance and dropped out of contact-level lift tables.
+        """
+        Contact.__table__.drop(engine, checkfirst=True)
+        Business.__table__.drop(engine, checkfirst=True)
+        ScrapeRun.__table__.drop(engine, checkfirst=True)
+        ScrapeRun.__table__.create(engine)
+        Business.__table__.create(engine)
+        Contact.__table__.create(engine)
+
+        session = sessionmaker(bind=engine)()
+        try:
+            run = ScrapeRun(query="HVAC", location="Santa Clara, CA", status="completed")
+            session.add(run)
+            session.flush()
+            run_id = run.id
+
+            business = Business(business_name="Acme HVAC", domain="acmehvac.example")
+            session.add(business)
+            session.flush()
+
+            added = extract_emails._persist_emails_for_business(
+                session, business, ["info@acmehvac.example"], scrape_run_id=run_id
+            )
+            session.commit()
+
+            assert added == 1
+            contact = session.query(Contact).one()
+            assert contact.email == "info@acmehvac.example"
+            assert contact.first_scrape_run_id == run_id
+        finally:
+            session.close()
 
 
 class TestExportRunOutputs:
