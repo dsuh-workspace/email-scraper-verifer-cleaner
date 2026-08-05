@@ -71,6 +71,33 @@ class TestExtractEmailsFromHtml:
         assert "real@acme.com" in emails
         assert not any("sentry.io" in e for e in emails)
 
+    def test_font_designer_localpart_excluded(self):
+        """Webfont license headers leak the designer's freemail address.
+
+        EXCLUDE_DOMAINS cannot filter this one: it is @gmail.com, and blocking
+        gmail would drop most owner-operator contractors. The 2026-08-04 Santa
+        Clara HVAC export shipped impallari@gmail.com as a lead for a business
+        whose only connection was embedding one of his fonts.
+        """
+        html = (
+            "/* Copyright (c) Pablo Impallari (www.impallari.com|"
+            "impallari@gmail.com) */ contact: real@acme.com"
+        )
+        emails = extract_emails_from_html(html)
+        assert emails == ["real@acme.com"]
+
+    def test_all_x_placeholder_excluded(self):
+        html = "email: xxx@xxx.xxx -- contact: real@acme.com"
+        emails = extract_emails_from_html(html)
+        assert emails == ["real@acme.com"]
+
+    def test_theme_boilerplate_address_domain_excluded(self):
+        # "email@address.com" is theme filler. The existing "email.com" entry
+        # does not catch it -- substring matching stops at the "@".
+        html = "email@address.com then real@acme.com"
+        emails = extract_emails_from_html(html)
+        assert emails == ["real@acme.com"]
+
     def test_empty_html(self):
         assert extract_emails_from_html("") == []
 
