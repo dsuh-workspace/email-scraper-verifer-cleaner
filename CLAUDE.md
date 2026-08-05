@@ -173,6 +173,8 @@ To force a full re-crawl:
 **Check `RUNS.md` before starting a new city/vertical run.** Update it
 after any real production run completes.
 
+For manual SQL evaluation of incremental yield and market overlap between runs, see `RUNBOOK_SQL_OVERLAP_ANALYSIS.md`.
+
 ## Open work
 
 1. **#R1 Short-circuit the `mock` SPREADSHEET_ID** so Sheets auth is not
