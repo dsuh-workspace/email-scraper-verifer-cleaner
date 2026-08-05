@@ -37,73 +37,21 @@ status, description, place ID).
 
 Three strategies via `--strategy {single-centroid, grid, full-harvest}`
 on `run_pipeline.py` and `run_zip_batch.py`. Default = `single-centroid`.
+Step-by-step flow lives in the code — see `run_location_pipeline()`,
+`run_location_grid()`, `run_location_full_harvest()` in `run_pipeline.py`
+(full pseudocode moved to `CHANGELOG.md` if needed for reference).
 
-**Single-centroid** delegates to `run_location_pipeline()` and keeps the
-legacy depth loop:
-
-```text
-init_db()
-lat, lon, _bbox = geocode_location(location)
-run_location_pipeline(query, location, lat=lat, lon=lon,
-                      max_depth, target_new_exportable):
-  baseline = get_exportable_contact_count(dest)
-  loop (depth 1 → max_depth, step +2):
-    execute_scrape_and_ingest(query, location, lat, lon, depth)
-    process_and_deduplicate_leads()
-    harvest_emails_from_websites()
-    new_exportable = get_exportable_contact_count(dest) - baseline
-    if new_exportable >= target_new_exportable: break
-    if depth >= max_depth: break
-export_new_leads()
-```
-
-`run_zip_batch.py` can add `--stale-iterations`; single-centroid in
-`run_pipeline.py` still runs to target-or-max-depth.
-
-**Grid** runs one bbox-based scrape, then dedupe/crawl/export:
-
-```text
-init_db()
-lat, lon, bbox = geocode_location(location)
-execute_scrape_and_ingest(query, location, bbox=bbox, cell_km=2.0, depth=3)
-process_and_deduplicate_leads()
-harvest_emails_from_websites()
-export_new_leads()
-```
-
-**Full-harvest** runs three passes:
-
-```text
-init_db()
-lat, lon, bbox = geocode_location(location)
-
-# PASS 1: grid single-query
-execute_scrape_and_ingest(query, location, bbox=bbox, cell_km, depth=3)
-process_and_deduplicate_leads()
-
-# PASS 2: per-variant slow at centroid
-for variant in DEFAULT_HARVEST_QUERIES:
-  execute_scrape_and_ingest(variant, location, lat, lon, depth=10,
-                            fast_mode=False)
-  process_and_deduplicate_leads()
-
-# PASS 3 (optional): fast ZIP top-up
-for row in load_zip_csv(zip_csv):
-  zlat, zlon, _ = geocode_location(f"{city}, {state}, {zip}")
-  execute_scrape_and_ingest(query, zip_loc, lat=zlat, lon=zlon,
-                            depth=3, fast_mode=True)
-process_and_deduplicate_leads()
-
-harvest_emails_from_websites()
-export_new_leads()
-```
-
-All strategies share the same tail in `run_end_to_end_pipeline`:
-
-```text
-if verify: verify_contacts_emails()
-export_new_leads(min_score=min_score)
-```
+- **Single-centroid**: depth loop (step +2) up to `--max-depth`; each
+  iteration scrapes → dedupes → crawls, stopping early once
+  `target_new_exportable` new exportable contacts are reached.
+  `run_zip_batch.py` adds `--stale-iterations` on top of the same loop.
+- **Grid**: one bbox-based scrape (`cell_km`, depth=3), then a single
+  dedupe/crawl/export pass.
+- **Full-harvest**: grid Pass 1 → per-variant slow-centroid Pass 2
+  (depth=10, `fast_mode=False`) → optional fast ZIP top-up Pass 3
+  (depth=3, `fast_mode=True`) → one shared dedupe/crawl/export.
+- All strategies share the same tail: `--verify` runs
+  `verify_contacts_emails()`, then `export_new_leads(min_score=min_score)`.
 
 ## Strategy entrypoints
 
