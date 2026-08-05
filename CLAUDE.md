@@ -1,27 +1,53 @@
 # email-scraper-verifer-cleaner — Operator Notes
 
 Current operator guide for the HVAC/Plumbing lead-gen pipeline. Keep this
-file focused on present-tense behavior, open work, and runbook details.
-Shipped history and closed review items live in `CHANGELOG.md`.
+file focused on present-tense behavior, open work, and decisions — if a
+fact belongs in one of the docs below, put it there and link.
 
 Purpose: scrape Google Maps → ingest into SQLite → dedupe → crawl sites for
 emails → optionally verify via local Reacher → export to Sheets/CSV.
 The pipeline also captures rich map details (review count/rating, address,
 status, description, place ID).
 
-## Current strategy and CLI contract
+| Doc | Holds |
+|---|---|
+| `README.md` | Setup, env vars, CLI usage, proxies, verification, schema |
+| `CHANGELOG.md` | Dated shipped history and closed review items |
+| `RUNS.md` | Run tracker (city × vertical) and in-flight run continuations |
+| `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` | Cohort/lift/overlap analysis queries |
+| `MAINTENANCE_SQL.md` | Hand-run backfills, legacy schema catch-up, hygiene |
 
-- Three strategies are supported on both `run_pipeline.py` and
-  `run_zip_batch.py`: `single-centroid`, `grid`, and `full-harvest`.
-  `--grid` is shorthand for `--strategy grid`.
+## Strategies
+
+Three strategies via `--strategy {single-centroid, grid, full-harvest}` on
+both `run_pipeline.py` and `run_zip_batch.py`. Default = `single-centroid`;
+`--grid` is shorthand for `--strategy grid`. Each strategy is one function
+in `run_pipeline.py` and both CLIs call the same three:
+
+| Function | Strategy | Flow |
+|---|---|---|
+| `run_location_pipeline()` | single-centroid | Depth loop (step +2) up to `--max-depth`; each iteration scrapes → dedupes → crawls, stopping early once `target_new_exportable` new exportable contacts are reached |
+| `run_location_grid()` | grid | One bbox-based scrape (`cell_km`, depth=3), then a single dedupe/crawl pass |
+| `run_location_full_harvest()` | full-harvest | Grid Pass 1 → per-variant slow-centroid Pass 2 (depth=10, `fast_mode=False`) → optional fast ZIP top-up Pass 3 (depth=3, `fast_mode=True`) → one shared dedupe/crawl |
+
+All three return `LocationRunMetrics` and share the same tail: `--verify`
+runs `verify_contacts_emails()`, then
+`export_new_leads(min_score=min_score)`. `run_end_to_end_pipeline` is
+geocode + dispatch + that tail.
+
+### Behavior notes
+
 - `grid` requires Playwright via `./scripts/setup_scraper_playwright.sh`.
-- `full-harvest` runs grid pass 1, per-variant slow centroid pass 2, and
-  optional ZIP top-up pass 3.
+- Grid and full-harvest raise when Nominatim returns no bounding box rather
+  than silently degrading to centroid mode.
 - Pass 2 defaults to **per-variant subprocesses** (`--pass2-per-variant`)
   to avoid the vendored scraper's combined-query undercount. The old
-  combined behavior is opt-in via `--pass2-combined` for diagnostics only.
+  combined behavior is opt-in via `--pass2-combined`, for diagnostics only.
 - Default harvest query sets are intentionally pruned: HVAC defaults to 3
-  variants and plumbing defaults to 2 based on recent San Jose reruns.
+  variants and plumbing defaults to 2, based on recent San Jose reruns.
+
+### CLI validation
+
 - One vertical per run. A query that names both HVAC and plumbing does not
   silently sweep both; full-harvest exits 2 unless explicit `--queries`
   are supplied.
@@ -33,57 +59,26 @@ status, description, place ID).
   `data/leads_<location>_<query>_<date>.csv` for single-location runs and
   `data/leads_<query>_<date>.csv` for batch runs. `--csv-path` overrides.
 
-## Pipeline flow
-
-Three strategies via `--strategy {single-centroid, grid, full-harvest}`
-on `run_pipeline.py` and `run_zip_batch.py`. Default = `single-centroid`.
-Step-by-step flow lives in the code — see `run_location_pipeline()`,
-`run_location_grid()`, `run_location_full_harvest()` in `run_pipeline.py`
-(full pseudocode moved to `CHANGELOG.md` if needed for reference).
-
-- **Single-centroid**: depth loop (step +2) up to `--max-depth`; each
-  iteration scrapes → dedupes → crawls, stopping early once
-  `target_new_exportable` new exportable contacts are reached.
-  `run_zip_batch.py` adds `--stale-iterations` on top of the same loop.
-- **Grid**: one bbox-based scrape (`cell_km`, depth=3), then a single
-  dedupe/crawl/export pass.
-- **Full-harvest**: grid Pass 1 → per-variant slow-centroid Pass 2
-  (depth=10, `fast_mode=False`) → optional fast ZIP top-up Pass 3
-  (depth=3, `fast_mode=True`) → one shared dedupe/crawl/export.
-- All strategies share the same tail: `--verify` runs
-  `verify_contacts_emails()`, then `export_new_leads(min_score=min_score)`.
-
-## Strategy entrypoints
-
-Each strategy is one function in `run_pipeline.py`, and both CLIs call the
-same three:
-
-| Function | Strategy | Returns |
-|---|---|---|
-| `run_location_pipeline()` | single-centroid | `LocationRunMetrics` |
-| `run_location_grid()` | grid | `LocationRunMetrics` |
-| `run_location_full_harvest()` | full-harvest | `LocationRunMetrics` |
-
-`run_end_to_end_pipeline` is geocode + dispatch + verify/export tail.
-Grid and full-harvest raise when Nominatim returns no bounding box rather
-than silently degrading to centroid mode.
-
-### `run_zip_batch.py` flags
+### `run_zip_batch.py` deltas
 
 - `--strategy` / `--grid` / `--cell-km` / `--queries` match
-  `run_pipeline.py` spelling and validation.
-- `_resolve_strategy` and `_resolve_query_variants` are imported from
-  `run_pipeline`, not reimplemented.
-- `--target-new-exportable` / `--max-depth` / `--stale-iterations`
-  default to `None` and are single-centroid only. Effective defaults:
-  20 / `DEFAULT_MAX_DEPTH` / 2.
-- `--cell-km` warns under single-centroid and must be `> 0`.
+  `run_pipeline.py` spelling and validation. `_resolve_strategy` and
+  `_resolve_query_variants` are imported from `run_pipeline`, not
+  reimplemented.
+- `--target-new-exportable` / `--max-depth` / `--stale-iterations` default
+  to `None` and are single-centroid only. Effective defaults: 20 /
+  `DEFAULT_MAX_DEPTH` / 2. `--stale-iterations` layers onto the same depth
+  loop.
+- `--cell-km` warns under single-centroid and must be `> 0` — this check is
+  batch-only; `run_pipeline.py` does not validate it.
 - Geocoding: single-centroid geocodes inside `run_location_pipeline`;
   grid/full-harvest geocode in the batch loop to get each row's bbox.
 - Batch full-harvest never passes `zip_csv` because the batch already is
   the ZIP sweep.
 - A row that fails (unmappable ZIP, scraper error) is logged and skipped;
   the batch continues, and export still runs once at the end.
+
+### Verification and export tail
 
 Verification (`app/pipeline/verify_emails.py`) is wired into
 `run_pipeline.py` and is the supported path. Opt in with `--verify`.
@@ -224,7 +219,7 @@ Provenance stamping, as currently implemented:
   invocation produced them.
 
 Rows written before 2026-08-04 predate the crawl-path stamping and carry
-NULL provenance — see Open work #3/#4 for how to work around it and
+NULL provenance — see Open work #2/#3 for how to work around it and
 `MAINTENANCE_SQL.md` for the backfill.
 
 ## Settled decisions
