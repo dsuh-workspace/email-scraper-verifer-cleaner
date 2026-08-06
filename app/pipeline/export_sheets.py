@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact, Business, ExportHistory, EmailVerification
+from app.pipeline.email_filters import is_junk_email
 
 from app.logging_config import setup_logging
 
@@ -253,24 +254,6 @@ _BAD_EMAIL_PREFIXES = (
     "messages",
 )
 
-_BAD_EMAIL_DOMAINS = {
-    "2x.png",
-    "2x.ck7nhwq8.webp",
-    "gmaiil.com",
-    "ndiscovered.com",
-    "tel-us.biz",
-    "latofonts.com",
-    "pixelspread.com",
-    "rioradio.org",
-    "imtresidential.com",
-    "newapthome.com",
-    "engrain.com",
-    "santaclarita.gov",
-    "2pointagency.com",
-    "astigmatic.com",
-}
-
-
 def _normalize_host(value: str) -> str:
     value = value.strip().lower()
     if value.startswith("www."):
@@ -309,17 +292,18 @@ def _domain_matches_business(email_domain: str, website_domain: str) -> bool:
 
 
 def _is_bad_outreach_email(email: str) -> bool:
-    if not email or "@" not in email:
+    """Junk (shared filter) or an inbox we deliberately never pitch.
+
+    The junk half is `email_filters.is_junk_email` — the same list the crawler
+    and ingest path use, kept here as a rear guard for rows written before a
+    given domain was blocked. `_BAD_EMAIL_PREFIXES` is export-only on purpose:
+    careers@realplumber.com is a perfectly real inbox, just not a sales lead.
+    """
+    if is_junk_email(email):
         return True
 
-    local, domain = _email_parts(email)
-    if domain in _BAD_EMAIL_DOMAINS:
-        return True
-    if _matches_prefix(local, _BAD_EMAIL_PREFIXES):
-        return True
-    if any(domain.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".pdf")):
-        return True
-    return False
+    local, _domain = _email_parts(email)
+    return _matches_prefix(local, _BAD_EMAIL_PREFIXES)
 
 
 def _contact_priority(lead: tuple[Contact, Business]) -> tuple[int, int, int, str]:
@@ -451,6 +435,36 @@ def export_run_outputs(
     min_score: int = 0,
     csv_path: str | None = None,
 ):
+    """Write the three per-run CSVs and return their paths.
+
+    This — not `export_new_leads` — is what both CLI entrypoints call. Given
+    base path `data/leads_x.csv` it writes:
+
+    ``_all``
+        Every contact in the DB joined to its business, ignoring
+        `export_history` and ignoring `min_score`. **Opened in append mode**,
+        so re-running against the same base path re-appends the whole DB;
+        a stable per-run filename (the default carries the date) keeps runs
+        from stacking. Local file only — never pushed to Sheets.
+
+    ``_deduped``
+        Contacts with an email and no `export_history` row for `destination`.
+        This is the real export: it goes to Sheets when configured (CSV is
+        the fallback) and it is the only one that stamps `export_history`.
+        Deliberately called with `min_score=0` — verification gates the
+        _verified file, not what counts as "already sent". Changing that
+        would silently re-export low-score contacts on a later run once they
+        were verified, because they'd never have been marked exported.
+
+    ``_verified``
+        Contacts clearing `min_score`, collapsed to one best contact per
+        business by `_select_best_contacts_per_business`. This is the
+        outreach-ready file. Local only, and side-effect free — it does not
+        touch `export_history`, so it is safe to regenerate.
+
+    Ordering matters: the `_verified` candidate set is queried *before*
+    `export_new_leads` stamps history, otherwise it would come back empty.
+    """
     destination = destination or (
         SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else LEGACY_EXPORT_DESTINATION
     )

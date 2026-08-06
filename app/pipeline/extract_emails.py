@@ -2,14 +2,18 @@
 Website email harvester.
 
 For each Business that has a website but no email contacts yet, fetch a
-small shortlist of paths (homepage, /contact, /about, /team, ...), regex
-out email addresses, and persist them as Contact rows.
+shortlist of paths (see CONTACT_PATHS), regex out email addresses, and
+persist them as Contact rows.
 
 Design notes
 ------------
 - **Multi-page**: contact info almost never lives on the homepage alone —
   /contact, /contact-us, /about, and /team account for the majority of
-  hits in the HVAC/plumbing space.
+  hits in the HVAC/plumbing space. The list also covers /privacy,
+  /privacy-policy, /terms and /terms-of-service, which is where a site
+  that publishes no address elsewhere usually leaks one. Those legal pages
+  are also the main source of web-agency and webmaster addresses, which is
+  why email_filters.py exists.
 - **Concurrent**: crawling is I/O bound. We fan out per-business with a
   ThreadPoolExecutor, ~10 workers, so a run over 500 sites finishes in
   minutes instead of an hour.
@@ -32,6 +36,12 @@ from typing import List, Optional, Set
 import requests
 from email_validator import EmailNotValidError, validate_email
 
+from app.pipeline.email_filters import (
+    ASSET_EXTENSIONS,
+    EXCLUDE_LOCALPARTS,
+    JUNK_EMAIL_SUBSTRINGS,
+    is_junk_email,
+)
 from app.proxy_utils import load_proxy_file, validate_proxy_url
 
 logger = logging.getLogger(__name__)
@@ -41,77 +51,13 @@ logger = logging.getLogger(__name__)
 # HVAC/plumbing sites.
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
 
-# Exclude asset paths that occasionally regex-match but are never emails.
-# Retina asset names ("logo@2x.avif") are the usual source: the "@2x" reads
-# as an address separator, so the filename survives the regex.
-EXCLUDE_EXTENSIONS = (
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf",
-    ".webp", ".avif", ".ico", ".bmp", ".tiff", ".css", ".js",
-)
-
-# Substring match against the full email. Blocks CDN/tracking noise plus
-# well-known template-site placeholders that regex-match but never
-# resolve to real inboxes. Verifier catches most of these too, but
-# pre-filtering saves API calls + keeps junk out of the DB.
-EXCLUDE_DOMAINS = (
-    # tracking / CDN / build-tool noise
-    "sentry.io",
-    "sentry-next.wixpress.com",
-    "wixpress.com",
-    "wix.com",
-    "cloudflare.com",
-    "cloudfront.net",
-    "googleusercontent.com",
-    "gstatic.com",
-    # recurring non-business/support-site emails found on crawled pages
-    "latofonts.com",
-    "pixelspread.com",
-    "rioradio.org",
-    "imtresidential.com",
-    "newapthome.com",
-    "engrain.com",
-    "santaclarita.gov",
-    "2pointagency.com",
-    "astigmatic.com",
-    # web-agency contact-form relay, not the business's own inbox. Found on
-    # two unrelated Sunnyvale/Santa Clara plumbing sites (2026-08-04) — the
-    # same address on multiple businesses is the tell.
-    "eliteonlinemedia.com",
-    "cdn.",
-    # documentation / spec placeholders
-    "example.com",
-    "example.org",
-    "example.net",
-    "domain.com",
-    "yourdomain.com",
-    "your-domain.com",
-    "mysite.com",
-    "your-email.com",
-    "youremail.com",
-    "yoursite.com",
-    "email.com",
-    # "email@address.com" — theme boilerplate. Not caught by "email.com"
-    # above, which is matched as a substring and stops at the "@".
-    "address.com",
-    # frequent template-site junk seen in scraped SJ/SC data
-    "gami.com",
-    "test.com",
-    "sample.com",
-    # registrar / host placeholder shown by parked pages
-    "godaddy.com",
-    "sentry-cdn.com",
-    # all-x placeholder ("xxx@xxx.xxx") left in theme boilerplate
-    "xxx.xxx",
-)
-
-# Localparts to drop regardless of domain. Font designers ship a contact
-# address inside webfont license headers and CSS comments, so the crawler
-# harvests it from any site embedding that font — on a freemail domain, which
-# EXCLUDE_DOMAINS cannot filter without blocking real contractors. The
-# foundry-domain equivalents (astigmatic.com, latofonts.com) are above.
-EXCLUDE_LOCALPARTS = (
-    "impallari",  # Pablo Impallari / Impallari Type
-)
+# Junk filters live in email_filters.py so the crawler, the ingest path, and
+# the export gate all apply the same list (they used to keep three that
+# drifted). Re-exported under the historical names because
+# `scripts/analysis/export_cohort.py` and `scripts/consolidate_exports.py`
+# import them from this module.
+EXCLUDE_EXTENSIONS = ASSET_EXTENSIONS
+EXCLUDE_DOMAINS = JUNK_EMAIL_SUBSTRINGS
 
 # Paths to try in order. First hit that returns emails short-circuits.
 # Homepage first because many small biz sites do drop a mailto on it.
@@ -175,11 +121,7 @@ def extract_emails_from_html(html_text: str) -> List[str]:
     emails: Set[str] = set()
     for match in EMAIL_REGEX.findall(html_text):
         candidate = match.lower()
-        if any(candidate.endswith(ext) for ext in EXCLUDE_EXTENSIONS):
-            continue
-        if any(bad in candidate for bad in EXCLUDE_DOMAINS):
-            continue
-        if candidate.partition("@")[0] in EXCLUDE_LOCALPARTS:
+        if is_junk_email(candidate):
             continue
         try:
             email = validate_email(candidate, check_deliverability=False).normalized.lower()
@@ -243,7 +185,12 @@ def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, st
 def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[str]:
     """
     Fetch each path in CONTACT_PATHS in order, aggregating emails.
-    Short-circuits at the first page that yields at least one email.
+
+    Stops early only after /contact or /contact-us yields something — not at
+    the first hit of any kind. A homepage address is usually one of several,
+    while a contact page tends to carry the full set, so a homepage hit is
+    worth continuing past. If neither contact path ever hits, all ten paths
+    are fetched.
 
     Serialized per-host via _host_lock so we don't hit the same server
     with parallel bursts.

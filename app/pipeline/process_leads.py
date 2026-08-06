@@ -31,43 +31,9 @@ import phonenumbers
 from email_validator import EmailNotValidError, validate_email
 
 from app.logging_config import setup_logging
+from app.pipeline.email_filters import is_junk_email
 
 logger = logging.getLogger(__name__)
-
-# Substring match — same blocklist rationale as extract_emails.EXCLUDE_DOMAINS.
-# Keep the two lists loosely in sync; duplication here is deliberate so the
-# scraper-side email field is filtered before insert (crawler-side is
-# handled in extract_emails.py).
-_PLACEHOLDER_EMAIL_SUBSTRINGS = (
-    "sentry.io",
-    "wixpress.com",
-    "wix.com",
-    "example.com",
-    "example.org",
-    "example.net",
-    "domain.com",
-    "yourdomain.com",
-    "your-domain.com",
-    "mysite.com",
-    "yoursite.com",
-    "youremail.com",
-    "your-email.com",
-    "email.com",
-    "gami.com",
-    "test.com",
-    "sample.com",
-    "godaddy.com",
-)
-
-# Mirrors extract_emails.EXCLUDE_EXTENSIONS, duplicated for the same reason as
-# the blocklist above. Needed on this side too: a retina asset filename like
-# "about-300x281@2x.png" passes validate_email (it parses as local-part
-# "about-300x281" at domain "2x.png"), so without this the scraper's own email
-# field carries asset names straight into contacts.
-_ASSET_EXTENSIONS = (
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf",
-    ".webp", ".avif", ".ico", ".bmp", ".tiff", ".css", ".js",
-)
 
 # Raw scraper output separates emails with any of these — treat them all.
 _EMAIL_SPLIT_RE = re.compile(r'[,;\s]+')
@@ -138,9 +104,12 @@ def _parse_and_validate_emails(raw_email_field: str):
             email = validate_email(candidate, check_deliverability=False).normalized.lower()
         except EmailNotValidError:
             continue
-        if any(bad in email for bad in _PLACEHOLDER_EMAIL_SUBSTRINGS):
-            continue
-        if email.endswith(_ASSET_EXTENSIONS):
+        # Shared with the crawler and the export gate (email_filters.py).
+        # This side matters as much as the crawler's: a retina asset filename
+        # like "about-300x281@2x.png" passes validate_email, and until these
+        # two paths were unified the scraper's own email field also carried
+        # agency/CDN addresses the crawler had always rejected.
+        if is_junk_email(email):
             continue
         if email in seen:
             continue
