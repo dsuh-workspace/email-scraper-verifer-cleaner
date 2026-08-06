@@ -102,10 +102,24 @@ SCRAPER_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://proxy2.example
 SCRAPER_PROXIES_FILE=proxies.txt
 # Optional scraper tuning defaults
 # SCRAPER_CONCURRENCY=3
-# SCRAPER_BROWSER_POOL_SIZE=1
+# SCRAPER_BROWSER_POOL_SIZE=       # leave unset; see "Scraper runtime knobs"
 # SCRAPER_PAGES_PER_BROWSER=1
 # SCRAPER_PROXY_LIMIT=3
 # SCRAPER_DISABLE_PAGE_REUSE=1   # not read by wrapper; use CLI flag today
+
+# Optional pacing between scraper invocations (MIN:MAX seconds; off if unset)
+# SCRAPER_PACING_SEC=10:20
+
+# Optional block detection / proxy cooldown tuning (defaults shown)
+# BLOCK_DETECT_ENABLED=1
+# BLOCK_DETECT_ZERO_YIELD=1        # treat a 0-lead proxied run as a block
+# BLOCK_DETECT_MIN_HISTORY=3       # runs needed before the median rule applies
+# BLOCK_DETECT_LOW_YIELD_RATIO=0.25
+# PROXY_HEALTH_FILE=data/proxy_health.json
+# PROXY_COOLDOWN_SEC=600           # first strike
+# PROXY_RETIRE_AFTER_STRIKES=2
+# PROXY_RETIRE_SEC=86400           # effectively "retired for the run"
+# PROXY_WAIT_MAX_SEC=900           # max wait when the whole pool is cooling; 0 = fail fast
 CRAWLER_PROXY=http://user:pass@proxy3.example.com:8080
 CRAWLER_PROXY_FILE=proxies.txt
 # Or split crawler proxies by scheme
@@ -136,15 +150,29 @@ KAMATERA_SECRET_KEY=...
 python run_pipeline.py --query "Plumbing" --location "San Francisco, CA"
 # Disable both scraper + crawler proxies for this run
 python run_pipeline.py --query "Plumbing" --location "San Francisco, CA" --no-proxy
-# Conservative scraper tuning: 3 proxies, 1 page/browser, low concurrency
+# Conservative: 3 proxies, one browser each, one tab per browser.
+# Leave --scraper-browser-pool-size unset so upstream derives the pool as
+# ceil(concurrency / pages-per-browser) = 3 browsers -> 3 proxies in play.
 python run_pipeline.py \
   --query "Plumbing" \
   --location "San Jose, CA" \
   --scraper-proxy-limit 3 \
   --scraper-pages-per-browser 1 \
-  --scraper-browser-pool-size 1 \
   --scraper-concurrency 3
+
+# Same 3 proxies, two tabs each, once proxies have proven themselves.
+python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --scraper-proxy-limit 3 \
+  --scraper-pages-per-browser 2 \
+  --scraper-concurrency 6
 ```
+
+Do **not** pin `--scraper-browser-pool-size 1` to "be gentle". In JS mode a
+proxy is bound per browser context, so a one-browser pool puts the whole pass
+behind a single proxy and makes `--scraper-proxy-limit` almost meaningless.
+Lower `--scraper-concurrency` instead.
 
 `run_zip_batch.py` exposes the same scraper tuning knobs, including
 `--scraper-disable-page-reuse`, and forwards them into the selected
@@ -154,20 +182,114 @@ Defaults:
 - `--min-contacts 500` (applied when the flag is omitted; single-centroid only)
 - `--max-depth 20` (applied when the flag is omitted; single-centroid only)
 - scraper concurrency/browser pool use upstream defaults unless overridden
+  (upstream concurrency is effectively `1`, i.e. serial)
 - scraper pages per browser defaults to current wrapper value `2`
-- scraper forwards first `3` validated proxies by default unless overridden
+- scraper forwards `3` validated proxies by default unless overridden
 
 Scraper runtime knobs exposed by this wrapper:
-- `--scraper-concurrency` → upstream `-c`
-- `--scraper-browser-pool-size` → upstream `-browser-pool-size`
-- `--scraper-pages-per-browser` → upstream `-pages-per-browser`
-- `--scraper-proxy-limit` → wrapper-side cap; forwards first `N` validated proxies
+- `--scraper-concurrency` → upstream `-c`. Upstream's own default is
+  effectively `1`, so leaving this unset means serial scraping.
+- `--scraper-browser-pool-size` → upstream `-browser-pool-size`. Leave unset
+  (see the warning above); unset means upstream derives
+  `ceil(concurrency / pages-per-browser)`.
+- `--scraper-pages-per-browser` → upstream `-pages-per-browser`. Upstream
+  ignores a value of `1` (its own default), but this wrapper defaults to `2`,
+  so passing `1` does change the run.
+- `--scraper-proxy-limit` → wrapper-side cap; forwards `N` of the validated
+  proxies, chosen as a rotating window keyed by the query variant.
 - `--scraper-disable-page-reuse` → upstream `-disable-page-reuse`
 
-Not exposed here today:
+**Which knobs apply depends on the strategy**, because only JS mode drives a
+browser:
+
+| Strategy | Mode | Browser knobs apply? | Proxy rotation |
+|---|---|---|---|
+| `single-centroid` | fast (`-fast-mode`) | No — no browser at all | per request |
+| `grid` | JS | Yes | per browser context |
+| `full-harvest` Pass 1 | JS | Yes | per browser context |
+| `full-harvest` Pass 2 | JS (`fast_mode=False`) | Yes | per browser context |
+| `full-harvest` Pass 3 | fast | No | per request |
+
+So tuning the browser pool only affects `grid` and full-harvest Passes 1–2.
+Under `single-centroid` those flags are accepted and forwarded but inert.
+
+Not exposed here today (they need upstream changes — the scraper is a Go
+subprocess that takes no jitter arguments):
 - per-action delay / jitter
 - scroll timing or human-ish cadence
-- sticky proxy/session policies
+
+### Pacing between invocations
+
+Per-action jitter is not reachable, but the gap between scraper invocations
+is. Set `SCRAPER_PACING_SEC=MIN:MAX` (seconds) to sleep a jittered interval
+before each invocation after the first:
+
+- single-centroid: before each depth-loop iteration
+- full-harvest: before each Pass 2 variant and each Pass 3 ZIP
+- `run_zip_batch.py`: before each row after the first
+
+Off when unset, so run wall-clock stays comparable to the figures in
+`RUNS.md` until you opt in. A bare number (`SCRAPER_PACING_SEC=15`) is a fixed
+delay. Invalid values warn and disable pacing rather than failing the run.
+
+### Block detection and proxy cooldown
+
+Neither this wrapper nor upstream inspects pages for Google's `/sorry/`
+interstitial or a captcha, so a soft-blocked run used to look exactly like a
+thin market: few or zero leads, recorded as `completed`. Yield is the only
+signal that survives the subprocess boundary, so runs are now judged on it:
+
+- A proxied run that ingests **zero** leads is flagged `zero-yield`.
+- A run yielding less than `BLOCK_DETECT_LOW_YIELD_RATIO` (default 0.25) of
+  the median for the same query + location is flagged `low-yield`, once
+  `BLOCK_DETECT_MIN_HISTORY` (default 3) prior `completed` runs exist.
+
+A flagged run is stored as `scrape_runs.status = 'blocked'` instead of
+`'completed'`, and every proxy it used takes a strike in
+`data/proxy_health.json`: first strike parks the proxy for
+`PROXY_COOLDOWN_SEC`, `PROXY_RETIRE_AFTER_STRIKES` strikes park it for
+`PROXY_RETIRE_SEC`. A healthy run decays one strike. Blocked runs are excluded
+from future medians so a bad streak cannot drag the baseline down to meet it.
+
+Leads from a flagged run are still ingested — the flag is a signal for the
+operator, not a gate. Notes:
+
+- Detection never fails a run: if the history query errors it logs and skips.
+- If every proxy is cooling, the run **waits** for the shortest cooldown to
+  expire (up to `PROXY_WAIT_MAX_SEC`, default 900s) and retries. This matters
+  with a small pool: `--scraper-proxy-limit 3` against a 3-proxy pool means one
+  flagged run parks everything, and failing hard there would take the rest of a
+  ZIP batch down with it.
+- Only if the wait would exceed the cap — a retirement-length park, or
+  `PROXY_WAIT_MAX_SEC=0` — does the run raise `ProxyPoolExhausted`, rather than
+  scraping from your own IP. Add proxies or delete `data/proxy_health.json` if
+  the strikes were false positives. `run_zip_batch.py` logs the failed row and
+  continues.
+- The median is noisy by design: full-harvest runs the same query and location
+  at different depths and modes, which legitimately yield very different
+  counts. Hence the low default ratio.
+- Turn the whole thing off with `BLOCK_DETECT_ENABLED=0`.
+
+Inspect the ledger and recent flags with:
+
+```bash
+cat data/proxy_health.json
+sqlite3 database/hvac_leads.db \
+  "SELECT id, query, location, status FROM scrape_runs
+   WHERE status='blocked' ORDER BY id DESC LIMIT 20;"
+```
+
+### Sticky proxy assignment
+
+`--scraper-proxy-limit N` picks `N` proxies as a rotating window over the
+validated pool, offset by a stable hash of the query variant. The same variant
+therefore draws the same proxies on every invocation, while different variants
+spread across the pool.
+
+This replaced a random shuffle, which redrew a random subset per invocation —
+so no variant could hold a proxy across its run, and a proxy that got a run
+blocked was both unattributable and immediately eligible again. Proxies in
+cooldown are removed before the window is computed.
 
 ### Override campaign settings
 

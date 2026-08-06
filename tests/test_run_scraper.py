@@ -8,13 +8,18 @@ from app.scraper.run_scraper import _scraper_proxy_args
 
 
 @pytest.fixture(autouse=True)
-def _clear_scraper_proxy_env(monkeypatch):
+def _clear_scraper_proxy_env(monkeypatch, tmp_path):
     monkeypatch.delenv("SCRAPER_PROXIES", raising=False)
     monkeypatch.delenv("SCRAPER_PROXIES_FILE", raising=False)
     monkeypatch.delenv("SCRAPER_PROXY_LIMIT", raising=False)
     monkeypatch.delenv("SCRAPER_CONCURRENCY", raising=False)
     monkeypatch.delenv("SCRAPER_BROWSER_POOL_SIZE", raising=False)
     monkeypatch.delenv("SCRAPER_PAGES_PER_BROWSER", raising=False)
+    monkeypatch.delenv("SCRAPER_PACING_SEC", raising=False)
+    # Point the proxy health ledger at a throwaway file: tests must not read a
+    # real cooldown (which would hide proxies) or write strikes to real state.
+    monkeypatch.setenv("PROXY_HEALTH_FILE", str(tmp_path / "proxy_health.json"))
+    monkeypatch.setenv("PROXY_WAIT_MAX_SEC", "0")  # never sleep in tests
 
 
 class TestScraperProxyArgs:

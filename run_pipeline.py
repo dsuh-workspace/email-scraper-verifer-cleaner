@@ -25,6 +25,7 @@ from app.pipeline.export_sheets import export_run_outputs
 from app.pipeline.extract_emails import harvest_emails_from_websites
 from app.pipeline.process_leads import process_and_deduplicate_leads
 from app.pipeline.verify_emails import verify_contacts_emails
+from app.scraper.pacing import pace
 from app.scraper.run_scraper import execute_scrape_and_ingest, geocode_location
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,8 @@ def run_location_pipeline(
 
     while True:
         logger.info("--- Running scraping loop (depth=%d) ---", depth)
+        if depths_run:
+            pace(f"depth {depth}")
         depths_run.append(depth)
 
         execute_scrape_and_ingest(
@@ -499,7 +502,9 @@ def run_location_full_harvest(
             # fresh deduper/exiter — the combined call's shared instance is
             # what suppresses cross-variant yield (see docstring). Slower
             # than the combined call below — no shared browser context.
-            for variant in query_variants:
+            for variant_idx, variant in enumerate(query_variants):
+                if variant_idx:
+                    pace(f"PASS 2 variant {variant!r}")
                 execute_scrape_and_ingest(
                     variant,
                     location,
@@ -557,6 +562,8 @@ def run_location_full_harvest(
             # above, so one log-parser regex covers both outcomes.
             logger.info("  [%d/%d zip %s] scraping %s",
                         i, len(zip_rows), row["zip"], zip_loc)
+            if zip_scrapes:
+                pace(f"PASS 3 zip {row['zip']}")
             execute_scrape_and_ingest(
                 query,
                 zip_loc,

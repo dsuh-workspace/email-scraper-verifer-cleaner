@@ -43,4 +43,7 @@ plans/*.jsonl
 
 # Runtime logs
 logs/
+
+# Proxy health ledger (mutable local state; holds proxy identities)
+data/proxy_health.json
 .claude/worktrees/experiment-google_maps_scraper/

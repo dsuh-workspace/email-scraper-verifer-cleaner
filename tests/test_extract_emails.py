@@ -150,7 +150,10 @@ class TestBuildCrawlerProxies:
         with pytest.raises(ValueError, match="Unsupported crawler proxy scheme"):
             _build_crawler_proxies()
 
-    def test_uses_first_proxy_from_file(self, monkeypatch, tmp_path):
+    def test_uses_one_proxy_from_file(self, monkeypatch, tmp_path):
+        # The crawler shuffles its pool on purpose, so which line wins is
+        # random. Assert the shape — one validated proxy used for both schemes
+        # — rather than a fixed order, which made this test fail ~50% of runs.
         proxy_file = tmp_path / "proxies.txt"
         proxy_file.write_text(
             "# comment\nhttp://proxy1.example.com:8080\nhttp://proxy2.example.com:8081\n",
@@ -161,9 +164,12 @@ class TestBuildCrawlerProxies:
         monkeypatch.delenv("CRAWLER_HTTPS_PROXY", raising=False)
         monkeypatch.setenv("CRAWLER_PROXY_FILE", str(proxy_file))
 
-        assert _build_crawler_proxies() == {
-            "http": "http://proxy1.example.com:8080",
-            "https": "http://proxy1.example.com:8080",
+        proxies = _build_crawler_proxies()
+
+        assert proxies["http"] == proxies["https"]
+        assert proxies["http"] in {
+            "http://proxy1.example.com:8080",
+            "http://proxy2.example.com:8081",
         }
 
     def test_uses_compact_webshare_proxy_file(self, monkeypatch, tmp_path):
@@ -174,9 +180,12 @@ class TestBuildCrawlerProxies:
         )
         monkeypatch.setenv("CRAWLER_PROXY_FILE", str(proxy_file))
 
-        assert _build_crawler_proxies() == {
-            "http": "http://user1:pass1@p.webshare.io:80",
-            "https": "http://user1:pass1@p.webshare.io:80",
+        proxies = _build_crawler_proxies()
+
+        assert proxies["http"] == proxies["https"]
+        assert proxies["http"] in {
+            "http://user1:pass1@p.webshare.io:80",
+            "http://user2:pass2@p.webshare.io:80",
         }
 
     def test_disable_proxy_short_circuits(self, monkeypatch):

@@ -6,6 +6,45 @@ file is the dated record.
 
 ## 2026-08-05
 
+- ✨ **Block detection, proxy cooldown, sticky proxies, and pacing.** Neither
+  this wrapper nor upstream `gosom/google-maps-scraper` had any block
+  detection: a soft-blocked run came back with few or zero leads and was
+  recorded as a normal `completed`, so the next run reused the same burned
+  proxies. Four new pieces, all opt-out via env:
+  - `app/scraper/block_detect.py` infers a block from yield — zero leads on a
+    proxied run, or under `BLOCK_DETECT_LOW_YIELD_RATIO` (0.25) of the median
+    of the last `BLOCK_DETECT_MIN_HISTORY` (3) `completed` runs for the same
+    query+location. New `scrape_runs.status` value `blocked`; blocked runs are
+    excluded from the baseline so consecutive blocks stay visible. Leads are
+    still ingested and `_assess_run_health()` never raises.
+  - `app/scraper/proxy_health.py` keeps a strike/cooldown ledger in
+    `data/proxy_health.json` (gitignored, passwords never written). First
+    strike parks a proxy for `PROXY_COOLDOWN_SEC` (600s), the second for
+    `PROXY_RETIRE_SEC` (24h); a healthy run decays one strike. A fully-parked
+    pool waits out the shortest cooldown (`PROXY_WAIT_MAX_SEC`, 900s) and
+    retries, and only raises `ProxyPoolExhausted` if that can't help — a hard
+    failure there would kill every remaining row of a ZIP batch.
+  - Sticky proxy assignment replaces `random.shuffle` in
+    `_select_scraper_proxies()`: a `blake2b` hash of the session key (query by
+    default) picks a stable rotation offset, so the same variant keeps the same
+    proxies across separate processes. `hash()` would not work — it is salted
+    per process.
+  - `app/scraper/pacing.py` adds jittered sleeps *between* scraper
+    invocations via `SCRAPER_PACING_SEC="MIN:MAX"` (off unless set): depth
+    iterations, full-harvest Pass 2 variants and Pass 3 ZIPs, and
+    `run_zip_batch.py` rows. Never before the first invocation.
+- 🐛 **README scraper-tuning guidance corrected.** The "3 proxies × 1 tab"
+  recipe pinned `--scraper-browser-pool-size 1`, which in JS mode binds the
+  whole pass to a *single* proxy (`jshttp.go:344-345` binds per browser
+  context). Leave the pool unset so `scrapemate`'s
+  `derivedBrowserPoolSize() = ceil(concurrency / pagesPerBrowser)` derives 3.
+  Adds a strategy×mode table covering which knobs apply where and the
+  per-request (fast mode) vs per-browser (JS mode) rotation difference.
+- ✅ **Proxy-order test flakiness closed** (was `CLAUDE.md` open work #5).
+  Scraper-side ordering is now deterministic by construction; crawler-side
+  tests in `tests/test_extract_emails.py` assert set membership rather than a
+  fixed order, leaving the crawler's deliberate shuffle intact. Suite: 249
+  passed, deterministic across repeated runs.
 - 🐛 **`--cell-km` is now validated on `run_pipeline.py`** — the check existed
   only in `run_zip_batch.py`, so `run_pipeline.py --grid --cell-km 0` was
   accepted and forwarded verbatim to the vendored scraper as `-grid-cell 0`,

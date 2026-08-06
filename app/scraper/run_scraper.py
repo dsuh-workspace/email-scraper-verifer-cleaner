@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import json
@@ -13,6 +14,22 @@ from app.db.database import engine
 from app.db.create_tables import ScrapeRun, RawLead
 from app.logging_config import setup_logging
 from app.proxy_utils import load_proxy_file, normalize_proxy_line, validate_proxy_url
+from app.scraper.block_detect import (
+    STATUS_BLOCKED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    classify_yield,
+    detection_enabled,
+    recent_yields,
+)
+from app.scraper.proxy_health import (
+    ProxyPoolExhausted,
+    filter_cooling,
+    record_block,
+    record_success,
+    state_path,
+    wait_for_capacity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +71,35 @@ def _env_positive_int(env_name: str) -> int | None:
     return _resolve_positive_int(value, env_name)
 
 
-def _scraper_proxy_args(
+def _session_offset(session_key: str | None, count: int) -> int:
+    """Stable rotation offset for a sticky proxy session.
+
+    Uses a content hash, not `hash()`: str hashing is salted per process, so
+    `hash()` would hand the same variant a different proxy on every
+    invocation — the exact behaviour this replaces.
+    """
+    if not session_key or count <= 1:
+        return 0
+    digest = hashlib.blake2b(session_key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % count
+
+
+def _select_scraper_proxies(
     disable_proxy: bool = False,
     proxy_limit: int | None = None,
+    session_key: str | None = None,
 ) -> list[str]:
-    """Return upstream gosom proxy args from env string or file."""
+    """Resolve the proxy subset for one invocation.
+
+    Assignment is *sticky*: the same `session_key` (the query variant) always
+    lands on the same slice of the pool. This replaced a `random.shuffle`,
+    which redrew a random subset on every invocation — so a variant could not
+    hold one proxy across its run, and a proxy that got a run blocked was
+    unattributable and reshuffled straight back into the next one.
+
+    Proxies cooling down from an earlier suspected block are dropped first;
+    the rotation is computed over what is left.
+    """
     if disable_proxy:
         logger.info("Scraper proxies disabled for this run.")
         return []
@@ -86,8 +127,6 @@ def _scraper_proxy_args(
             "SCRAPER_PROXIES contains an empty entry. Remove trailing or double commas."
         )
 
-    import random
-
     proxies = []
     for proxy_url in proxy_values:
         proxies.append(
@@ -99,12 +138,93 @@ def _scraper_proxy_args(
             )
         )
 
-    random.shuffle(proxies)
+    usable, cooling = filter_cooling(proxies)
+    if cooling:
+        logger.warning(
+            "Skipping %d cooling proxy/proxies: %s.",
+            len(cooling),
+            ", ".join(
+                f"{pid} ({int(remaining.total_seconds() // 60)}m left)"
+                for pid, remaining in sorted(cooling.items())
+            ),
+        )
+    if not usable:
+        # Wait out the shortest cooldown before giving up: with a small pool
+        # one flagged run can park everything, and failing here would take the
+        # rest of a batch down with it.
+        if wait_for_capacity(proxies):
+            usable, _ = filter_cooling(proxies)
+
+    if not usable:
+        raise ProxyPoolExhausted(
+            f"All {len(proxies)} configured proxies are cooling down. "
+            "Wait for a cooldown to expire, add proxies, or clear "
+            f"{state_path()} if the strikes were false positives. "
+            "Pass --no-scraper-proxy only if scraping unproxied is acceptable."
+        )
+
+    offset = _session_offset(session_key, len(usable))
+    rotated = usable[offset:] + usable[:offset]
 
     if limit is not None:
-        proxies = proxies[:limit]
+        rotated = rotated[:limit]
 
-    logger.info("Scraper proxies enabled (%d configured).", len(proxies))
+    logger.info(
+        "Scraper proxies enabled (%d of %d usable%s).",
+        len(rotated),
+        len(usable),
+        f", sticky session {session_key!r}" if session_key else "",
+    )
+    return rotated
+
+
+def _assess_run_health(
+    session,
+    *,
+    query: str,
+    location: str,
+    ingested_count: int,
+    session_proxies: list[str],
+) -> str | None:
+    """Flag a suspected block and update the proxy ledger. Returns a reason.
+
+    Never raises: this is diagnostics layered onto a run that already
+    succeeded, so a broken history query must not lose the ingested leads.
+    """
+    if not detection_enabled():
+        return None
+
+    # With no proxies there is nothing to charge a block to, and a direct-IP
+    # run yielding zero is a different problem.
+    if not session_proxies:
+        return None
+
+    try:
+        history = recent_yields(session, query=query, location=location)
+        reason = classify_yield(ingested_count, history)
+        if reason:
+            record_block(session_proxies, reason)
+        else:
+            record_success(session_proxies)
+        return reason
+    except Exception as e:
+        logger.warning("Block detection skipped (%s).", e)
+        return None
+
+
+def _scraper_proxy_args(
+    disable_proxy: bool = False,
+    proxy_limit: int | None = None,
+    session_key: str | None = None,
+) -> list[str]:
+    """Upstream gosom proxy args for the selected subset."""
+    proxies = _select_scraper_proxies(
+        disable_proxy=disable_proxy,
+        proxy_limit=proxy_limit,
+        session_key=session_key,
+    )
+    if not proxies:
+        return []
     return ["-proxies", ",".join(proxies)]
 
 
@@ -157,6 +277,7 @@ def execute_scrape_and_ingest(
     pages_per_browser: int | None = None,
     proxy_limit: int | None = None,
     disable_page_reuse: bool = False,
+    proxy_session_key: str | None = None,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -296,13 +417,16 @@ def execute_scrape_and_ingest(
                 cmd.append("-fast-mode")
             if lat is not None and lon is not None:
                 cmd.extend(["-geo", f"{lat},{lon}"])
-        cmd.extend(
-            _scraper_proxy_args(
-                disable_proxy=disable_proxy,
-                proxy_limit=proxy_limit,
-            )
+        # Selected once and kept, so a suspected block can be charged back to
+        # the exact proxies that were in play.
+        session_proxies = _select_scraper_proxies(
+            disable_proxy=disable_proxy,
+            proxy_limit=proxy_limit,
+            session_key=proxy_session_key or query,
         )
-        
+        if session_proxies:
+            cmd.extend(["-proxies", ",".join(session_proxies)])
+
         logger.info("Executing: %s", " ".join(cmd))
         # Run the scraper.
         # Redirect stdout/stderr to capture runtime diagnostics.
@@ -329,6 +453,7 @@ def execute_scrape_and_ingest(
         
         logger.info("Scraper finished running successfully.")
         # 4. Read results and ingest into database
+        ingested_count = 0
         if os.path.exists(results_file_path) and os.path.getsize(results_file_path) > 0:
             with open(results_file_path, 'r', encoding='utf-8') as rf:
                 raw_text = rf.read().strip()
@@ -378,22 +503,39 @@ def execute_scrape_and_ingest(
                 raw_leads_to_insert.append(lead)
             
             if raw_leads_to_insert:
+                ingested_count = len(raw_leads_to_insert)
                 session.add_all(raw_leads_to_insert)
                 session.commit()
-                logger.info(f"Successfully ingested {len(raw_leads_to_insert)} raw leads into 'raw_leads' table.")
+                logger.info(f"Successfully ingested {ingested_count} raw leads into 'raw_leads' table.")
             else:
                 logger.info("No raw leads found to ingest.")
         else:
             logger.warning("Scraper output file is empty or missing.")
-        # Update ScrapeRun status
-        db_run.status = "completed"
+
+        # Does this yield look blocked rather than just thin?
+        block_reason = _assess_run_health(
+            session,
+            query=query,
+            location=location,
+            ingested_count=ingested_count,
+            session_proxies=session_proxies,
+        )
+
+        db_run.status = STATUS_BLOCKED if block_reason else STATUS_COMPLETED
         db_run.completed_at = datetime.now(timezone.utc)
         session.commit()
-        logger.info(f"[{datetime.now()}] Completed Scrape Run #{scrape_run_id}.")
+        if block_reason:
+            logger.warning(
+                "[%s] Scrape Run #%s marked %s (%s) — %d leads for %r in %r.",
+                datetime.now(), scrape_run_id, STATUS_BLOCKED, block_reason,
+                ingested_count, query, location,
+            )
+        else:
+            logger.info(f"[{datetime.now()}] Completed Scrape Run #{scrape_run_id}.")
     except Exception as e:
         logger.error(f"Error during scrape/ingest: {e}")
         # Log failure status to DB
-        db_run.status = "failed"
+        db_run.status = STATUS_FAILED
         db_run.completed_at = datetime.now(timezone.utc)
         session.commit()
         raise e

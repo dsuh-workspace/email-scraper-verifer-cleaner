@@ -100,6 +100,40 @@ Column semantics, env tuning, and the force-re-crawl SQL live in
 - `CRAWL_RETRY_AFTER_HOURS=0` and non-integer values are invalid and fall
   back to the 720-hour default rather than erroring.
 
+## Block detection, proxy cooldown, pacing
+
+Env vars and the operator-facing rules are in `README.md` ("Block detection
+and proxy cooldown", "Sticky proxy assignment", "Pacing between
+invocations"). Design points that doc doesn't carry:
+
+- Neither this wrapper nor upstream `gosom/google-maps-scraper` detects
+  blocks. A soft-blocked run returns few/zero leads and used to be recorded
+  as a normal completion. `app/scraper/block_detect.py` infers it from
+  yield instead — there is no HTTP/CAPTCHA signal to read.
+- New `scrape_runs.status` value: `blocked`. Nothing gates on status, so
+  adding it was safe, but the yield-history baseline counts only
+  `completed` runs — otherwise two blocked runs in a row make the second
+  look normal and the detector goes quiet exactly when it matters.
+- A flag is a signal, not a gate: leads from a flagged run are still
+  ingested, and `_assess_run_health()` swallows its own errors so a broken
+  history query can never lose them.
+- Ledger lives in `data/proxy_health.json` (gitignored), not the DB —
+  mutable local state an operator may want to reset by hand. Proxies are
+  keyed `user@host:port`; passwords are never written.
+- A healthy run **decays one strike** rather than resetting to zero. A
+  reset lets a proxy alternate block/success forever without ever retiring.
+- Full-pool exhaustion **waits** out the shortest cooldown (up to
+  `PROXY_WAIT_MAX_SEC`) and retries before raising `ProxyPoolExhausted`.
+  With `--scraper-proxy-limit 3` on a 3-proxy pool, one flagged run parks
+  everything; failing hard there would kill every remaining row of a ZIP
+  batch. Tests set `PROXY_WAIT_MAX_SEC=0` so they never sleep.
+- Sticky assignment uses `hashlib.blake2b`, not `hash()` — the builtin is
+  salted per process, so it would pick a different proxy for the same
+  query on every invocation. Verified stable across separate processes.
+- Pacing (`SCRAPER_PACING_SEC`) is off unless set, applies *between*
+  invocations only (depth iterations, Pass 2 variants, Pass 3 ZIPs, batch
+  rows) and never before the first one. Invalid values warn and disable.
+
 ## Run tracking
 
 **Check `RUNS.md` before starting a new city/vertical run.** Update it
@@ -109,8 +143,11 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
 
 ## Open work
 
-1. **Short-circuit the `mock` SPREADSHEET_ID** so Sheets auth is not
-   attempted before CSV fallback.
+1. **`mock` SPREADSHEET_ID ordering (cosmetic).** `export_sheets.py:47`
+   already short-circuits before any credential load, so no auth is
+   attempted — but it sits *after* the `CREDENTIALS_FILE` existence check,
+   so a mock run without a creds file logs the misleading "Credentials file
+   not found" warning. Swap the two checks.
 2. **Use provenance fields for future lift tables**: rely on
    `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id`
    instead of raw-lead first-seen inference. **Two caveats apply to data
@@ -126,14 +163,13 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    emits every contact absent from `export_history`, which on a DB carrying a
    baseline is the whole DB. `scripts/analysis/export_cohort.py` works around
    this but the export path itself is still unscoped.
-5. **Proxy-order tests are flaky** (pre-existing). They assert a fixed proxy
-   order against code that shuffles randomly, so the failing set varies run
-   to run — observed 4–6 failures across `tests/test_run_scraper.py`
-   (`TestScraperProxyArgs`, `TestExecuteScrapeMultiQuery`) and
-   `tests/test_extract_emails.py` (`TestBuildCrawlerProxies`). Seed the
-   shuffle or assert set-equality. Everything else passes; when evaluating a
-   change, compare the failing set against a clean checkout rather than the
-   count.
+Suite state: **249 passed, deterministic** across repeated runs. The
+long-standing proxy-order flakiness is fixed on both sides — scraper-side
+selection no longer shuffles (sticky assignment replaced it), and the
+crawler-side tests assert set membership instead of a fixed order. The
+crawler's own deliberate shuffle in `app/pipeline/extract_emails.py` is
+unchanged. If proxy tests start failing again, check for leaked env
+(`.env` injects `SCRAPER_PROXIES_FILE=proxies.txt`) before suspecting logic.
 
 ## Analysis tooling
 

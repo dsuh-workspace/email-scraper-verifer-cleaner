@@ -8,6 +8,7 @@ from pathlib import Path
 from app.db.create_tables import init_db
 from app.logging_config import setup_logging
 from app.pipeline.export_sheets import export_run_outputs
+from app.scraper.pacing import pace
 from app.scraper.run_scraper import geocode_location
 # _resolve_strategy / _resolve_query_variants are shared rather than
 # reimplemented: both CLIs must agree on what --grid means and on when a
@@ -289,7 +290,13 @@ def main() -> None:
         scraper_disable_page_reuse=args.scraper_disable_page_reuse,
     )
 
+    rows_attempted = 0
     for location in locations:
+        # Paced per row rather than per scrape: single-centroid already paces
+        # its own depth loop, so this only spaces out row boundaries.
+        if rows_attempted:
+            pace(f"batch row {location!r}")
+        rows_attempted += 1
         try:
             if strategy == "single-centroid":
                 # Geocodes internally, so the centroid still costs exactly one
