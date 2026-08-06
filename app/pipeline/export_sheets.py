@@ -168,6 +168,7 @@ def _build_export_query(
     destination: str,
     min_score: int = 0,
     exported_only: bool = False,
+    run_cohort_start: int | None = None,
 ):
     query = session.query(Contact, Business).join(
         Business, Contact.business_id == Business.id
@@ -190,6 +191,18 @@ def _build_export_query(
             latest.c.score >= min_score
         )
         logger.info("Gating export at min_score=%d (verifier score).", min_score)
+
+    if run_cohort_start is not None:
+        # Scoped by the *business's* provenance, same as
+        # `scripts/analysis/export_cohort.py` — see CLAUDE.md "Open work"
+        # for why (crawl-discovered contacts predating 2026-08-04 carry
+        # NULL `contacts.first_scrape_run_id`, so filtering on the
+        # contact's own column would drop them). Legacy businesses with
+        # NULL provenance are excluded rather than inferred here; use
+        # `scripts/analysis/export_cohort.py` for historical cohorts that
+        # need the `MIN(raw_leads.scrape_run_id)` fallback.
+        query = query.filter(Business.first_scrape_run_id >= run_cohort_start)
+        logger.info("Scoping export to run cohort >= %d.", run_cohort_start)
 
     return query
 
@@ -372,6 +385,7 @@ def export_new_leads(
     destination: str | None = None,
     min_score: int = 0,
     csv_path: str | None = None,
+    run_cohort_start: int | None = None,
 ):
     """
     Finds contacts that haven't been exported yet, exports them to Sheets
@@ -380,6 +394,13 @@ def export_new_leads(
     When min_score > 0, gate exports by the latest EmailVerification.score
     for each contact. Contacts with no verification row are treated as
     score=0 (unverified) and skipped.
+
+    When run_cohort_start is set, only contacts whose business has
+    `first_scrape_run_id >= run_cohort_start` are considered. Without it,
+    this emits every contact absent from `export_history` for the
+    destination — on a DB carrying a prior baseline, that is the whole DB,
+    not just new work (see `scripts/analysis/export_cohort.py`'s docstring
+    for the incident that motivated this parameter).
     """
     session = Session()
     destination = destination or (
@@ -392,6 +413,7 @@ def export_new_leads(
             destination=destination,
             min_score=min_score,
             exported_only=True,
+            run_cohort_start=run_cohort_start,
         ).all()
 
         if not new_leads:
@@ -434,6 +456,7 @@ def export_run_outputs(
     destination: str | None = None,
     min_score: int = 0,
     csv_path: str | None = None,
+    run_cohort_start: int | None = None,
 ):
     """Write the three per-run CSVs and return their paths.
 
@@ -464,6 +487,11 @@ def export_run_outputs(
 
     Ordering matters: the `_verified` candidate set is queried *before*
     `export_new_leads` stamps history, otherwise it would come back empty.
+
+    run_cohort_start, when set, scopes all three files to businesses with
+    `first_scrape_run_id >= run_cohort_start` — including `_all`, which is
+    otherwise unscoped by design (see CLAUDE.md "Open work"). Leave it
+    unset to keep today's whole-DB behavior.
     """
     destination = destination or (
         SPREADSHEET_ID if SPREADSHEET_ID.lower() != "mock" else LEGACY_EXPORT_DESTINATION
@@ -476,12 +504,14 @@ def export_run_outputs(
             session,
             destination=destination,
             exported_only=False,
+            run_cohort_start=run_cohort_start,
         ).all()
         verified_leads = _build_export_query(
             session,
             destination=destination,
             min_score=min_score,
             exported_only=True,
+            run_cohort_start=run_cohort_start,
         ).all()
     finally:
         session.close()
@@ -491,6 +521,7 @@ def export_run_outputs(
         destination=destination,
         min_score=0,
         csv_path=paths["deduped"],
+        run_cohort_start=run_cohort_start,
     )
     verified_best_leads = _select_best_contacts_per_business(verified_leads)
     _export_csv_only(verified_best_leads, paths["verified"])

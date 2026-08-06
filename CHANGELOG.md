@@ -4,6 +4,34 @@ Shipped changes, closed review items, and archived history that no longer
 belongs in `CLAUDE.md`. `CLAUDE.md` is the current operator guide; this
 file is the dated record.
 
+## 2026-08-06
+
+- ✅ **`export_new_leads()` / `export_run_outputs()` gain an optional
+  `run_cohort_start` param** (was `CLAUDE.md` open work #4). Filters on
+  `businesses.first_scrape_run_id >= run_cohort_start`, reaching all three
+  output files — including `_all`, previously unscoped by design.
+  `scripts/analysis/export_cohort.py` (its docstring names the incident
+  this closes: 76/166 of a supposedly-Sunnyvale/Santa-Clara cohort export
+  turned out to be San Jose) remains the tool for historical cohorts, since
+  it also falls back to `MIN(raw_leads.scrape_run_id)` for NULL-provenance
+  businesses; the new parameter does not. Neither CLI wires it to a flag
+  yet — call the functions directly. Tests in `TestRunCohortFilter`.
+- ♻️ **`_scraper_proxy_args()` collapsed into the production cmd-building
+  path** (was `CLAUDE.md` open work #6). It and `execute_scrape_and_ingest`
+  each formatted a selected proxy list into the upstream `-proxies` flag
+  separately; the formatting step is now one function,
+  `_format_proxy_cmd_args()`, called from both. `_scraper_proxy_args()`
+  keeps its existing signature (selection + formatting) for its test/smoke-
+  script callers. New test asserts the two paths produce identical flags
+  for the same session key.
+- 📄 **Provenance-fields guidance moved from Open work to Settled decisions**
+  (was `CLAUDE.md` open work #2). `scripts/analysis/market_overlap.py`
+  already implemented both halves of it — provenance-first with a
+  `MIN(raw_leads.scrape_run_id)` fallback for NULL businesses — so it was
+  describing current behavior, not a pending task. The still-open half (the
+  backfill that would let cohort queries drop the fallback) stays in Open
+  work, renumbered to #2.
+
 ## 2026-08-05
 
 - ✨ **Block detection, proxy cooldown, sticky proxies, and pacing.** Neither

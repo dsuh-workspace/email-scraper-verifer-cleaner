@@ -212,6 +212,16 @@ def _assess_run_health(
         return None
 
 
+def _format_proxy_cmd_args(proxies: list[str]) -> list[str]:
+    """Turn an already-selected proxy list into the upstream gosom `-proxies`
+    flag. The one place that formats proxies for the scraper CLI, shared by
+    `_scraper_proxy_args` (tests, `smoke_test_scraper_proxies.py`) and
+    `execute_scrape_and_ingest` (production) so they can't drift apart."""
+    if not proxies:
+        return []
+    return ["-proxies", ",".join(proxies)]
+
+
 def _scraper_proxy_args(
     disable_proxy: bool = False,
     proxy_limit: int | None = None,
@@ -223,9 +233,7 @@ def _scraper_proxy_args(
         proxy_limit=proxy_limit,
         session_key=session_key,
     )
-    if not proxies:
-        return []
-    return ["-proxies", ",".join(proxies)]
+    return _format_proxy_cmd_args(proxies)
 
 
 def geocode_location(location: str):
@@ -424,8 +432,7 @@ def execute_scrape_and_ingest(
             proxy_limit=proxy_limit,
             session_key=proxy_session_key or query,
         )
-        if session_proxies:
-            cmd.extend(["-proxies", ",".join(session_proxies)])
+        cmd.extend(_format_proxy_cmd_args(session_proxies))
 
         logger.info("Executing: %s", " ".join(cmd))
         # Run the scraper.

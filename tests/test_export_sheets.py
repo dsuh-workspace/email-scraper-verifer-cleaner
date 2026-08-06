@@ -163,3 +163,97 @@ class TestExportRunOutputs:
         assert (tmp_path / "leads_all.csv").exists()
         assert (tmp_path / "leads_deduped.csv").exists()
         assert (tmp_path / "leads_verified.csv").exists()
+
+
+class TestRunCohortFilter:
+    """`run_cohort_start` scopes exports to businesses.first_scrape_run_id >=
+    cutoff (CLAUDE.md Open work #4) — without it, a DB carrying a prior
+    baseline exports the whole DB, not just new work."""
+
+    def _seed_two_cohorts(self, session):
+        old_run = ScrapeRun(query="Plumber", location="San Jose, CA", status="completed")
+        new_run = ScrapeRun(query="Plumber", location="Sunnyvale, CA", status="completed")
+        session.add_all([old_run, new_run])
+        session.flush()
+
+        old_business = Business(
+            business_name="Old Co", domain="old.example", first_scrape_run_id=old_run.id
+        )
+        new_business = Business(
+            business_name="New Co", domain="new.example", first_scrape_run_id=new_run.id
+        )
+        session.add_all([old_business, new_business])
+        session.flush()
+
+        session.add_all([
+            Contact(business_id=old_business.id, email="owner@old.example", name="Owner"),
+            Contact(business_id=new_business.id, email="owner@new.example", name="Owner"),
+        ])
+        session.commit()
+        return new_run.id
+
+    def test_export_new_leads_scopes_to_cohort(self, tmp_path, monkeypatch):
+        engine = export_sheets.engine
+        for table in (Contact, Business, ScrapeRun, ExportHistory, EmailVerification):
+            table.__table__.drop(engine, checkfirst=True)
+        for table in (ScrapeRun, Business, Contact, EmailVerification, ExportHistory):
+            table.__table__.create(engine)
+
+        session = export_sheets.Session()
+        try:
+            new_run_id = self._seed_two_cohorts(session)
+        finally:
+            session.close()
+
+        monkeypatch.setattr(export_sheets, "append_leads_to_google_sheets", lambda leads: False)
+
+        def _exported_emails():
+            session = export_sheets.Session()
+            try:
+                return {
+                    email
+                    for (email,) in session.query(Contact.email).join(
+                        ExportHistory, ExportHistory.contact_id == Contact.id
+                    )
+                }
+            finally:
+                session.close()
+
+        export_sheets.export_new_leads(csv_path=str(tmp_path / "unscoped.csv"))
+        assert _exported_emails() == {"owner@old.example", "owner@new.example"}
+
+        session = export_sheets.Session()
+        try:
+            session.query(ExportHistory).delete()
+            session.commit()
+        finally:
+            session.close()
+
+        export_sheets.export_new_leads(
+            csv_path=str(tmp_path / "scoped.csv"), run_cohort_start=new_run_id
+        )
+        assert _exported_emails() == {"owner@new.example"}
+
+    def test_export_run_outputs_all_file_scopes_to_cohort(self, tmp_path, monkeypatch):
+        engine = export_sheets.engine
+        for table in (Contact, Business, ScrapeRun, ExportHistory, EmailVerification):
+            table.__table__.drop(engine, checkfirst=True)
+        for table in (ScrapeRun, Business, Contact, EmailVerification, ExportHistory):
+            table.__table__.create(engine)
+
+        session = export_sheets.Session()
+        try:
+            new_run_id = self._seed_two_cohorts(session)
+        finally:
+            session.close()
+
+        monkeypatch.setattr(export_sheets, "append_leads_to_google_sheets", lambda leads: False)
+
+        export_sheets.export_run_outputs(
+            csv_path=str(tmp_path / "leads.csv"), run_cohort_start=new_run_id
+        )
+
+        with open(tmp_path / "leads_all.csv", encoding="utf-8") as f:
+            all_rows = f.read()
+        assert "owner@new.example" in all_rows
+        assert "owner@old.example" not in all_rows

@@ -370,6 +370,39 @@ class TestExecuteScrapeMultiQuery:
         assert cmd[cmd.index("-browser-pool-size") + 1] == "2"
         assert cmd[cmd.index("-pages-per-browser") + 1] == "1"
 
+    def test_proxy_cmd_args_match_scraper_proxy_args(self, monkeypatch):
+        """Production's cmd-building must go through the same formatter as
+        `_scraper_proxy_args`, not a re-typed copy of it — regression guard
+        for the two paths drifting apart (CLAUDE.md Open work #6)."""
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        monkeypatch.setenv(
+            "SCRAPER_PROXIES",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080",
+        )
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+        )
+        cmd = captured[0]
+        i = cmd.index("-proxies")
+        assert cmd[i : i + 2] == run_scraper._scraper_proxy_args(
+            session_key="Plumbing"
+        )
+
+    def test_no_proxies_omits_flag(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+        )
+        assert "-proxies" not in captured[0]
+
     def test_scraper_tuning_env_defaults_forwarded(self, monkeypatch):
         captured, files = [], []
         self._stub_all(monkeypatch, captured, files)

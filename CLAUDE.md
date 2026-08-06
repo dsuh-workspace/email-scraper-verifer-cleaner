@@ -48,7 +48,7 @@ outputs (see "Verification and export tail").
   variants and plumbing defaults to 2, based on recent San Jose reruns.
   The published "39% more than grid alone" figure predates both this
   pruning and the per-variant switch — treat it as historical until
-  re-measured (Open work #5).
+  re-measured (Open work #3).
 
 ### CLI validation
 
@@ -111,10 +111,19 @@ Consequences worth holding onto:
 
 - `--min-score` gates **only** `_verified`. The `_deduped` push — the one
   that reaches Sheets and marks contacts exported — is called with a
-  hardcoded `min_score=0` (`export_sheets.py`). This is deliberate: if
-  score gated what counts as "already sent", a contact held back today
-  would re-export the moment it was verified later. Do not "fix" it
-  without solving that.
+  hardcoded `min_score=0` (`export_sheets.py`). **Open question, not a
+  settled decision** (see Open work #4): before the three-file split
+  (13f9b4b, 2026-08-02), `--min-score` gated `export_new_leads()` itself —
+  the same function now reused for `_deduped` — so it gated the actual
+  Sheets push (393a10c, 2026-07-21). The split hardcoded `min_score=0` at
+  that call site, silently dropping the gate on Sheets and moving it to
+  the local-only `_verified` file instead; neither commit message states
+  this as intentional, and the test added alongside it only covers a
+  contact scoring *above* the threshold. The "held-back contacts would
+  re-export later" rationale for keeping it this way is plausible but
+  unconfirmed — don't cite it as prior intent, and don't "fix" it without
+  deciding, with the operator, whether unverified leads should reach
+  Sheets at all.
 - `_all` is opened in **append** mode and ignores `export_history`, so
   re-running with the same `--csv-path` re-appends the whole DB. The
   dated default filename is what keeps runs from stacking.
@@ -123,6 +132,15 @@ Consequences worth holding onto:
 - `_all` and `_verified` are always local files; only `_deduped` attempts
   Sheets. With Sheets configured, `_deduped` may not exist on disk at all.
 - `_verified` is side-effect free and safe to regenerate.
+- `export_new_leads()` and `export_run_outputs()` both take an optional
+  `run_cohort_start` (a `scrape_runs.id` cutoff) that scopes every file —
+  including `_all` — to `businesses.first_scrape_run_id >= run_cohort_start`.
+  Neither CLI wires it to a flag yet; pass it when calling the functions
+  directly (e.g. from an analysis script). Unset, behavior is unchanged:
+  `_all` is the whole DB. `scripts/analysis/export_cohort.py` remains the
+  tool for historical cohorts that need the `MIN(raw_leads.scrape_run_id)`
+  fallback for NULL-provenance businesses — this parameter does not do that
+  fallback, it filters straight on `first_scrape_run_id`.
 
 ### Email junk filters
 
@@ -200,24 +218,11 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    attempted — but it sits *after* the `CREDENTIALS_FILE` existence check,
    so a mock run without a creds file logs the misleading "Credentials file
    not found" warning. Swap the two checks.
-2. **Use provenance fields for future lift tables**: rely on
-   `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id`
-   instead of raw-lead first-seen inference. **Two caveats apply to data
-   written before 2026-08-04:** legacy rows have NULL provenance and were
-   never backfilled, and crawl-created contacts were never stamped at all.
-   For historical cohorts, scope contacts by their *business's* provenance
-   and fall back to `MIN(raw_leads.scrape_run_id)` for NULL businesses.
-   `scripts/analysis/market_overlap.py` does both.
-3. **Backfill NULL `first_scrape_run_id`** on legacy `businesses` / `contacts`
+2. **Backfill NULL `first_scrape_run_id`** on legacy `businesses` / `contacts`
    rows from `MIN(raw_leads.scrape_run_id)`, so cohort queries stop needing the
-   inference fallback. Not done — queries are in `MAINTENANCE_SQL.md`.
-4. **Give `export_new_leads()` an optional run-cohort filter.** It currently
-   emits every contact absent from `export_history`, which on a DB carrying a
-   baseline is the whole DB. `scripts/analysis/export_cohort.py` works around
-   this but the export path itself is still unscoped. The same is true of
-   `export_run_outputs`'s `_all` file, which is unscoped *by design* — a
-   cohort filter would want to reach both.
-5. **Re-measure full-harvest lift against current defaults.** The "39% more
+   inference fallback described under "Settled decisions". Not done — queries
+   are in `MAINTENANCE_SQL.md`.
+3. **Re-measure full-harvest lift against current defaults.** The "39% more
    than grid alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 →
    +ZIP=504) was measured with the 8-variant Pass 2 set **and** the combined
    Pass 2 call. Both have since changed — 2/3 variants, per-variant
@@ -225,13 +230,18 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    full-harvest now costs ~Nx Pass 2 wall time on the strength of it. Doc
    sites now flag it as historical; the measurement itself is still owed.
    Command is in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
-6. **`_scraper_proxy_args()` is dead in production.** `run_scraper.py:215`
-   is called only by tests and `scripts/smoke_test_scraper_proxies.py`;
-   `execute_scrape_and_ingest` inlines the same logic. So ~11 assertions in
-   `tests/test_run_scraper.py` cover a function the pipeline never runs,
-   and the inlined path is not directly covered. Collapse one into the other.
+4. **Decide whether `_deduped` (the Sheets-bound export) should be gated
+   by `--min-score`.** It currently isn't — see "Verification and export
+   tail" above. Before the three-file split (13f9b4b, 2026-08-02),
+   `--min-score` gated the same function now backing `_deduped`, so score
+   *did* gate Sheets (393a10c, 2026-07-21); the split hardcoded
+   `min_score=0` there without either commit stating that as intentional,
+   and without test coverage of a below-threshold contact. Net effect:
+   unverified/low-score leads currently reach Sheets and get marked
+   exported same as anything else. Resolve one way or the other, then
+   update this doc to say which.
 
-Suite state: **263 passed, deterministic** across repeated runs. The
+Suite state: **267 passed, deterministic** across repeated runs. The
 long-standing proxy-order flakiness is fixed on both sides — scraper-side
 selection no longer shuffles (sticky assignment replaced it), and the
 crawler-side tests assert set membership instead of a fixed order. The
@@ -332,8 +342,9 @@ Provenance stamping, as currently implemented:
   invocation produced them.
 
 Rows written before 2026-08-04 predate the crawl-path stamping and carry
-NULL provenance — see Open work #2/#3 for how to work around it and
-`MAINTENANCE_SQL.md` for the backfill.
+NULL provenance — see "Settled decisions" below for how analysis scripts
+work around it, and Open work #2 for the backfill that would retire the
+workaround.
 
 ## Settled decisions
 
@@ -344,6 +355,14 @@ NULL provenance — see Open work #2/#3 for how to work around it and
 - `min_contacts` means new exportable contacts produced by this run, not
   cumulative DB contacts.
 - One vertical per run: HVAC and plumbing are not combined implicitly.
+- Lift/overlap analysis relies on `businesses.first_scrape_run_id` /
+  `contacts.first_scrape_run_id`, not raw-lead first-seen inference.
+  **Two caveats apply to data written before 2026-08-04:** legacy rows
+  have NULL provenance and were never backfilled (Open work #2), and
+  crawl-created contacts were never stamped at all. For historical
+  cohorts, scope contacts by their *business's* provenance and fall back
+  to `MIN(raw_leads.scrape_run_id)` for NULL businesses.
+  `scripts/analysis/market_overlap.py` does both.
 
 ## Notes
 
