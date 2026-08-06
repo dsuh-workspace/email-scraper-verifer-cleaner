@@ -415,6 +415,93 @@ LIMIT 20;
 
 (`raw_leads` has no `domain` column — see the note in section 5. And per section 6's caveat, this returns rows only where the matched business already carries a baseline `first_scrape_run_id`; on a legacy baseline it may return nothing even when real overlap exists.)
 
+## 11. Full-harvest per-pass lift (re-measuring the "39%")
+
+The published figure — full-harvest yields 39% more unique businesses than
+grid alone (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) — was
+measured with the **8-variant** Pass 2 set and the **combined** Pass 2 call.
+Both have since changed (2–3 variants, per-variant subprocesses), so the
+number no longer describes what the code runs. This is how to redo it.
+
+Because Pass 2 now runs one invocation per variant, every pass has its own
+`scrape_runs` rows and `businesses.first_scrape_run_id` attributes each
+business to the pass that first surfaced it. No instrumentation needed.
+
+**Run it on a fresh DB** — a populated one has already absorbed these
+businesses, so every pass would report near-zero lift:
+
+```bash
+DB=database/lift_test_$(date +%Y%m%d).db
+DATABASE_URL="sqlite:///$DB" .venv/bin/python run_pipeline.py \
+  --query "Plumbing" \
+  --location "San Jose, CA" \
+  --strategy full-harvest \
+  --cell-km 2.0 \
+  --zip-csv san_jose_zips.csv
+```
+
+Swap `--query "HVAC"` for the other vertical. Keep one pipeline process per
+DB (see CLAUDE.md, "Market-overlap setup rules"). Omit `--zip-csv` to
+measure Passes 1–2 only.
+
+Then attribute net-new businesses per pass. Pass 1 and Pass 3 use the base
+query; Pass 2's rows carry the variant text, so grouping by
+`scrape_runs.query` separates them:
+
+```sql
+SELECT
+  sr.query,
+  sr.location,
+  COUNT(*) AS net_new_businesses
+FROM businesses b
+JOIN scrape_runs sr ON sr.id = b.first_scrape_run_id
+GROUP BY 1, 2
+ORDER BY 3 DESC;
+```
+
+Pass 1 is the single base-query row whose location is the metro; Pass 3 is
+the base-query rows whose locations are ZIPs. The headline number is then:
+
+```sql
+-- grid-only baseline vs everything full-harvest added
+SELECT
+  SUM(CASE WHEN pass = 1 THEN n ELSE 0 END)                      AS pass1_grid,
+  SUM(CASE WHEN pass = 2 THEN n ELSE 0 END)                      AS pass2_multiquery,
+  SUM(CASE WHEN pass = 3 THEN n ELSE 0 END)                      AS pass3_zip,
+  ROUND(
+    100.0 * SUM(CASE WHEN pass > 1 THEN n ELSE 0 END)
+          / NULLIF(SUM(CASE WHEN pass = 1 THEN n ELSE 0 END), 0),
+    1
+  ) AS pct_lift_over_grid
+FROM (
+  SELECT
+    CASE
+      WHEN sr.query <> :base_query THEN 2          -- Pass 2 variant rows
+      WHEN sr.location <> :metro   THEN 3          -- Pass 3 ZIP rows
+      ELSE 1                                       -- Pass 1 grid
+    END AS pass,
+    COUNT(*) AS n
+  FROM businesses b
+  JOIN scrape_runs sr ON sr.id = b.first_scrape_run_id
+  GROUP BY sr.id
+);
+```
+
+Bind `:base_query` to the `--query` value and `:metro` to the `--location`
+value, or inline them. Sanity checks before believing the result:
+
+- `SELECT status, COUNT(*) FROM scrape_runs GROUP BY 1;` — any `blocked`
+  row invalidates the comparison; a soft-blocked Pass 2 reads as "the
+  variants added nothing."
+- Expect one `scrape_runs` row per Pass 2 variant. Fewer means a variant
+  errored and was skipped.
+- `SELECT COUNT(*) FROM businesses WHERE first_scrape_run_id IS NULL;`
+  should be 0 on a fresh DB. Anything else means the DB was not fresh.
+
+Also worth capturing while you have the run: `scripts/analysis/run_wallclock.py`
+gives the active wall-clock cost, which is the other half of the decision —
+Pass 2 now costs roughly Nx a single invocation.
+
 ## Verification
 
 Before trusting the result:

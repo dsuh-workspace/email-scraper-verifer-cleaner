@@ -1,12 +1,15 @@
 """
 Email verification via self-hosted Reacher (check-if-email-exists) backend.
 
-Live instance is deployed to Kamatera (see the autopilotlocal/email-verifier
-repo, CLAUDE.md — Hetzner blocks outbound port 25 for new accounts by
-default, Kamatera does not). The Reacher backend itself has no auth.
+The supported instance is now local: `./scripts/start_local_verifier.sh` runs
+the Reacher backend in Docker on 127.0.0.1:8080. A remote Kamatera deployment
+was the original host (Hetzner blocks outbound port 25 for new accounts by
+default, Kamatera does not) and its deploy scripts still live in the sibling
+repo autopilotlocal/email-verifier, but it is legacy — point REACHER_API_URL
+at it only if you have re-provisioned it. The backend has no auth either way.
 
 The Kamatera *deploy* scripts read KAMATERA_ACCESS_KEY / KAMATERA_SECRET_KEY
-from .env, but those are only needed to (re)provision the server — not to
+from .env, but those are only needed to (re)provision that server — not to
 call the /v0/check_email endpoint. This module needs only REACHER_API_URL.
 
 API contract:
@@ -29,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Reacher backend on Kamatera. Override in .env for local dev / new deploys.
+# Local Reacher backend by default. Override in .env to target a remote one.
 REACHER_API_URL = os.getenv(
     "REACHER_API_URL",
     "http://127.0.0.1:8080/v0/check_email",

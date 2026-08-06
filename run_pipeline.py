@@ -5,8 +5,17 @@ Stages:
     1. Scrape Google Maps → raw_leads
     2. Clean/dedupe → businesses + contacts
     3. Crawl business websites → email contacts
-    4. Loop 1-3 at increasing scraper depth until min_contacts hit
-    5. Export new leads to Sheets (or CSV fallback)
+    4. Optionally verify emails via Reacher (--verify)
+    5. Export via export_run_outputs() → three CSVs (all/deduped/verified)
+
+How stages 1-3 are driven depends on --strategy:
+
+    single-centroid  loop 1-3 at increasing depth until min_contacts hit
+    grid             one bbox-cell scrape, then a single 2-3 pass
+    full-harvest     grid pass + per-variant centroid pass + optional ZIP
+                     top-up, then a single 2-3 pass
+
+Only single-centroid loops, and only it reads min_contacts/max_depth.
 """
 
 import argparse
@@ -43,9 +52,16 @@ DEFAULT_MAX_DEPTH = 20
 # against this constant — which only works while it stays the argparse default.
 DEFAULT_CELL_KM = 2.0
 
-# Default query variants for full-harvest multi-query pass. Chosen from the
-# 2026-07-20 SJ experiment — "Leak repair" alone added 50 unique businesses
-# no other query surfaced, so the list favors breadth over redundancy.
+# Default query variants for the full-harvest multi-query pass (plumbing).
+# Pruned from the original 8-variant breadth-over-redundancy set — which came
+# from the 2026-07-20 SJ experiment, where "Leak repair" alone added 50 unique
+# businesses — down to these 2 after the same per-variant lift table that
+# pruned the HVAC set below. Everything else contributed ~0 net-new businesses
+# over Pass 1's grid.
+#
+# NOTE: the "39% more than grid alone" figure quoted elsewhere was measured on
+# the old 8-variant set *and* the old combined Pass 2 call. It has not been
+# re-measured against these defaults — see CLAUDE.md "Open work".
 DEFAULT_HARVEST_QUERIES = (
     "Plumbing",
     "Plumber",
@@ -57,8 +73,9 @@ DEFAULT_HARVEST_QUERIES = (
 # "Furnace repair", "AC installation", "Heat pump service", and "Ductwork"
 # each contributed ~0 net-new businesses over Pass 1 grid + the other
 # variants — only "Heating and cooling" and "HVAC contractor" surfaced real
-# incremental lift. "HVAC" is kept as the anchor/base query. See CLAUDE.md
-# ("Pass 2 combined-query underperformance") for the full root-cause writeup.
+# incremental lift. "HVAC" is kept as the anchor/base query. The root-cause
+# writeup for why the diagnostic had to run per-variant is in
+# run_location_full_harvest's docstring below.
 DEFAULT_HVAC_HARVEST_QUERIES = (
     "HVAC",
     "Heating and cooling",
@@ -423,8 +440,9 @@ def run_location_full_harvest(
     feed-parse has already claimed them — regardless of whether that sibling
     "should" get credit. Empirically (SJ HVAC, 2026-08-01/02): one combined
     8-variant call yielded 4 raw leads total; the same 8 variants run
-    separately yielded 81. See CLAUDE.md ("Pass 2 combined-query
-    underperformance") for the full source-level writeup and why this isn't
+    separately yielded 81. `app/scraper/run_scraper.py`'s
+    `execute_scrape_and_ingest` docstring carries the same finding from the
+    scraper side, including why grid mode is unaffected and why this isn't
     being patched upstream. Costs roughly len(variants)x Pass 2 wall time
     since separate invocations can't reuse one browser context — pass
     `pass2_per_variant=False` (CLI: `--pass2-combined`) to opt back into the
@@ -657,7 +675,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CELL_KM,
         help=(
             f"Grid cell size in km (default {DEFAULT_CELL_KM}). Must be > 0. "
-            f"Ignored without --grid."
+            f"grid and full-harvest only; ignored under single-centroid, "
+            f"which has no grid."
         ),
     )
     parser.add_argument(
@@ -665,8 +684,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Explicit bounding box 'min_lat,min_lon,max_lat,max_lon' for "
-            "grid mode. Overrides Nominatim-derived bbox. Ignored without --grid."
+            "Explicit bounding box 'min_lat,min_lon,max_lat,max_lon'. "
+            "Overrides the Nominatim-derived bbox. Used by grid and "
+            "full-harvest (Pass 1); ignored under single-centroid."
         ),
     )
     parser.add_argument(
@@ -691,7 +711,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Scrape strategy. 'single-centroid' (legacy depth loop), "
             "'grid' (== --grid), 'full-harvest' (grid + multi-query slow + "
-            "fast ZIP top-up; empirically 39%% more coverage than grid alone). "
+            "fast ZIP top-up; measured at 39%% more coverage than grid alone "
+            "in 2026-07, but on the since-pruned 8-variant set — not "
+            "re-measured against current defaults). "
             "Defaults to 'grid' if --grid set, else 'single-centroid'."
         ),
     )
@@ -700,10 +722,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Comma-separated query variants for the multi-query pass "
-            "(full-harvest strategy only). Defaults to the 8-variant set matching "
-"--query's vertical (plumbing or HVAC). Required when --query names "
-"neither vertical, or names both — one vertical per run."
+            f"Comma-separated query variants for the multi-query pass "
+            f"(full-harvest strategy only). Defaults to the built-in set "
+            f"matching --query's vertical: "
+            f"{len(DEFAULT_HARVEST_QUERIES)} variants for plumbing "
+            f"({', '.join(DEFAULT_HARVEST_QUERIES)}), "
+            f"{len(DEFAULT_HVAC_HARVEST_QUERIES)} for HVAC "
+            f"({', '.join(DEFAULT_HVAC_HARVEST_QUERIES)}). Required when "
+            f"--query names neither vertical, or names both — one vertical "
+            f"per run."
         ),
     )
     parser.add_argument(
@@ -772,11 +799,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Only export contacts whose latest EmailVerification.score is >= N. "
-            "0 (default) exports everything. Reacher scoring (see "
-            "_SCORE_BY_STATUS in app/pipeline/verify_emails.py): safe=95, "
-            "risky=50, unknown=25, invalid=10. Contacts with no verification "
-            "row are treated as score=0 and skipped when min-score > 0."
+            "Gates the _verified CSV ONLY: it keeps one best contact per "
+            "business whose latest EmailVerification.score is >= N. The "
+            "_deduped CSV and the export_history/Sheets push are NOT gated "
+            "and still carry every unexported contact regardless of score. "
+            "0 (default) means the _verified file is unfiltered. Reacher "
+            "scoring (_SCORE_BY_STATUS in app/pipeline/verify_emails.py): "
+            "safe=95, risky=50, unknown=25, invalid=10. Contacts with no "
+            "verification row are treated as score=0 and dropped from "
+            "_verified when min-score > 0."
         ),
     )
     parser.add_argument(
@@ -784,9 +815,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Path for the local CSV export fallback (used only if Sheets "
-            "export fails or SPREADSHEET_ID is unset/mock). Defaults to a "
-            "descriptive 'data/leads_<location>_<query>_<date>.csv'."
+            "Base path for the three CSVs this run writes: <base>_all.csv "
+            "(every contact in the DB, appended each run), <base>_deduped.csv "
+            "(contacts not yet in export_history — the Sheets fallback, and "
+            "the only one that stamps export_history), and "
+            "<base>_verified.csv (best contact per business clearing "
+            "--min-score). _all and _verified are always written locally and "
+            "never go to Sheets. Defaults to "
+            "'data/leads_<location>_<query>_<date>.csv'."
         ),
     )
     return parser
@@ -885,8 +921,10 @@ def run_end_to_end_pipeline(
       (Nominatim-derived, or explicit `bbox` arg). No depth loop. Grid+d3
       is empirically 4-25x richer than a curated ZIP sweep.
     - full-harvest: grid + multi-query slow at centroid + optional fast
-      ZIP top-up. Empirically 39% more coverage than grid alone
-      (SJ 2026-07-20: grid=362, +multi-query=473, +fast-ZIP=504).
+      ZIP top-up. Measured at 39% more coverage than grid alone
+      (SJ 2026-07-20: grid=362, +multi-query=473, +fast-ZIP=504) — but that
+      run used the 8-variant Pass 2 set and the combined call, both since
+      changed. Treat the figure as historical until re-measured.
 
     `min_contacts` / `max_depth` gate the single-centroid depth loop only;
     grid and full-harvest ignore them, so non-single-centroid callers should
@@ -899,6 +937,11 @@ def run_end_to_end_pipeline(
     variant as its own scrape, tagged separately in scrape_runs, instead of
     one combined multi-query call. See run_location_full_harvest docstring
     for why this is the default rather than a diagnostic opt-in.
+
+    Whatever the strategy, the tail is the same: optional `verify`, then
+    `export_run_outputs()`, which writes three CSVs (all / deduped /
+    verified). `min_score` gates only the verified one — see that function
+    and the `--min-score` help for what that does and does not filter.
     """
     setup_logging()
 

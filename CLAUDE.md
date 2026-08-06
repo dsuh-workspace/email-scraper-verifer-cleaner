@@ -31,9 +31,10 @@ in `run_pipeline.py` and both CLIs call the same three:
 | `run_location_full_harvest()` | full-harvest | Grid Pass 1 → per-variant slow-centroid Pass 2 (depth=10, `fast_mode=False`) → optional fast ZIP top-up Pass 3 (depth=3, `fast_mode=True`) → one shared dedupe/crawl |
 
 All three return `LocationRunMetrics` and share the same tail: `--verify`
-runs `verify_contacts_emails()`, then
-`export_new_leads(min_score=min_score)`. `run_end_to_end_pipeline` is
-geocode + dispatch + that tail.
+runs `verify_contacts_emails()`, then `export_run_outputs(min_score=...)`
+— **not** `export_new_leads()`, which it calls internally for one of three
+outputs (see "Verification and export tail").
+`run_end_to_end_pipeline` is geocode + dispatch + that tail.
 
 ### Behavior notes
 
@@ -45,6 +46,9 @@ geocode + dispatch + that tail.
   combined behavior is opt-in via `--pass2-combined`, for diagnostics only.
 - Default harvest query sets are intentionally pruned: HVAC defaults to 3
   variants and plumbing defaults to 2, based on recent San Jose reruns.
+  The published "39% more than grid alone" figure predates both this
+  pruning and the per-variant switch — treat it as historical until
+  re-measured (Open work #5).
 
 ### CLI validation
 
@@ -86,8 +90,56 @@ geocode + dispatch + that tail.
 
 Verification (`app/pipeline/verify_emails.py`) is wired into
 `run_pipeline.py` and is the supported path. Opt in with `--verify`.
-Export can be gated by `--min-score N` — score map is in `README.md`
-("Verification"). Verifier failures warn but are not fatal.
+Score map is in `README.md` ("Verification"). Verifier failures warn but
+are not fatal.
+
+**`run_zip_batch.py` has no `--verify` flag.** It accepts `--min-score`,
+but nothing in a batch run verifies, so any `N > 0` yields an empty
+`_verified` file unless a prior run verified those contacts. Verify out of
+band (`python -m app.pipeline.verify_emails`) and re-export.
+
+Both CLIs end in `export_run_outputs()`, which writes **three** CSVs off
+the `--csv-path` base — this is the part most easily misread:
+
+| File | Contents | Gated by `--min-score`? | Stamps `export_history`? | Can go to Sheets? |
+|---|---|---|---|---|
+| `_all` | every contact in the DB | no | no | no |
+| `_deduped` | contacts with no `export_history` row for the destination | **no** | **yes** | yes |
+| `_verified` | best contact per business clearing the score | **yes** | no | no |
+
+Consequences worth holding onto:
+
+- `--min-score` gates **only** `_verified`. The `_deduped` push — the one
+  that reaches Sheets and marks contacts exported — is called with a
+  hardcoded `min_score=0` (`export_sheets.py`). This is deliberate: if
+  score gated what counts as "already sent", a contact held back today
+  would re-export the moment it was verified later. Do not "fix" it
+  without solving that.
+- `_all` is opened in **append** mode and ignores `export_history`, so
+  re-running with the same `--csv-path` re-appends the whole DB. The
+  dated default filename is what keeps runs from stacking.
+  `data/archive/MISLABELED_wholedb_export_2026-08-04_all.csv` is this
+  having already bitten us once.
+- `_all` and `_verified` are always local files; only `_deduped` attempts
+  Sheets. With Sheets configured, `_deduped` may not exist on disk at all.
+- `_verified` is side-effect free and safe to regenerate.
+
+### Email junk filters
+
+One list, `app/pipeline/email_filters.py`, applied at all three points an
+address can enter or leave: ingest (`process_leads.py`), crawl
+(`extract_emails.py`), export (`export_sheets.py`). Add new junk there.
+
+Before 2026-08-06 each path kept its own list and they had drifted (37 /
+18 / 14 entries), so 19 domains the crawler rejected still reached
+`contacts` whenever the *scraper's* email field supplied the address
+rather than the crawl. `tests/test_email_filters.py` asserts the three
+paths agree.
+
+`export_sheets._BAD_EMAIL_PREFIXES` (careers@, jobs@, webmaster@) stays
+export-local on purpose — those are real inboxes we decline to pitch, not
+junk. Filtering them earlier would lose the business outright when it is
+the only address on the site.
 
 ## Crawl-attempt ledger
 
@@ -162,8 +214,24 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
 4. **Give `export_new_leads()` an optional run-cohort filter.** It currently
    emits every contact absent from `export_history`, which on a DB carrying a
    baseline is the whole DB. `scripts/analysis/export_cohort.py` works around
-   this but the export path itself is still unscoped.
-Suite state: **249 passed, deterministic** across repeated runs. The
+   this but the export path itself is still unscoped. The same is true of
+   `export_run_outputs`'s `_all` file, which is unscoped *by design* — a
+   cohort filter would want to reach both.
+5. **Re-measure full-harvest lift against current defaults.** The "39% more
+   than grid alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 →
+   +ZIP=504) was measured with the 8-variant Pass 2 set **and** the combined
+   Pass 2 call. Both have since changed — 2/3 variants, per-variant
+   subprocesses — so the number no longer describes what the code runs, and
+   full-harvest now costs ~Nx Pass 2 wall time on the strength of it. Doc
+   sites now flag it as historical; the measurement itself is still owed.
+   Command is in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
+6. **`_scraper_proxy_args()` is dead in production.** `run_scraper.py:215`
+   is called only by tests and `scripts/smoke_test_scraper_proxies.py`;
+   `execute_scrape_and_ingest` inlines the same logic. So ~11 assertions in
+   `tests/test_run_scraper.py` cover a function the pipeline never runs,
+   and the inlined path is not directly covered. Collapse one into the other.
+
+Suite state: **263 passed, deterministic** across repeated runs. The
 long-standing proxy-order flakiness is fixed on both sides — scraper-side
 selection no longer shuffles (sticky assignment replaced it), and the
 crawler-side tests assert set membership instead of a fixed order. The
