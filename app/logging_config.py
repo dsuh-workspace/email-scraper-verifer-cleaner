@@ -13,6 +13,7 @@ DEBUG for verbose runs. Format is human-readable to stderr; add a
 FileHandler here if we ever want persistent logs.
 """
 
+from __future__ import annotations
 import logging
 import os
 import sys

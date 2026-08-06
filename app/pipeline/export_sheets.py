@@ -1,7 +1,8 @@
+from __future__ import annotations
 import logging
 import os
 import csv
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -427,7 +428,7 @@ def export_new_leads(
                 history = ExportHistory(
                     contact_id=contact.id,
                     destination=destination,
-                    exported_at=datetime.now(UTC),
+                    exported_at=datetime.now(timezone.utc),
                 )
                 session.add(history)
             session.commit()
