@@ -459,44 +459,85 @@ GROUP BY 1, 2
 ORDER BY 3 DESC;
 ```
 
-Pass 1 is the single base-query row whose location is the metro; Pass 3 is
-the base-query rows whose locations are ZIPs. The headline number is then:
+**Do not classify Pass 2 by query text.** The first default variant is
+identical to the base query (`DEFAULT_HARVEST_QUERIES[0] == "Plumbing"`,
+`DEFAULT_HVAC_HARVEST_QUERIES[0] == "HVAC"`), so Pass 1 and Pass 2's first
+variant share both query *and* location and are indistinguishable that way.
+Use run order instead — Pass 1 is always the earliest completed run at the
+metro location:
 
 ```sql
 -- grid-only baseline vs everything full-harvest added
+WITH per_run AS (
+  SELECT
+    sr.id,
+    CASE
+      WHEN sr.location <> :metro THEN 3                  -- Pass 3 ZIP rows
+      WHEN sr.id = (
+        SELECT MIN(id) FROM scrape_runs
+        WHERE location = :metro AND status = 'completed'
+      ) THEN 1                                           -- Pass 1 grid
+      ELSE 2                                             -- Pass 2 variants
+    END AS pass,
+    COUNT(b.id) AS n
+  FROM scrape_runs sr
+  LEFT JOIN businesses b ON b.first_scrape_run_id = sr.id
+  WHERE sr.status = 'completed'
+  GROUP BY sr.id
+)
 SELECT
-  SUM(CASE WHEN pass = 1 THEN n ELSE 0 END)                      AS pass1_grid,
-  SUM(CASE WHEN pass = 2 THEN n ELSE 0 END)                      AS pass2_multiquery,
-  SUM(CASE WHEN pass = 3 THEN n ELSE 0 END)                      AS pass3_zip,
+  SUM(CASE WHEN pass = 1 THEN n ELSE 0 END) AS pass1_grid,
+  SUM(CASE WHEN pass = 2 THEN n ELSE 0 END) AS pass2_multiquery,
+  SUM(CASE WHEN pass = 3 THEN n ELSE 0 END) AS pass3_zip,
   ROUND(
     100.0 * SUM(CASE WHEN pass > 1 THEN n ELSE 0 END)
           / NULLIF(SUM(CASE WHEN pass = 1 THEN n ELSE 0 END), 0),
     1
   ) AS pct_lift_over_grid
-FROM (
-  SELECT
-    CASE
-      WHEN sr.query <> :base_query THEN 2          -- Pass 2 variant rows
-      WHEN sr.location <> :metro   THEN 3          -- Pass 3 ZIP rows
-      ELSE 1                                       -- Pass 1 grid
-    END AS pass,
-    COUNT(*) AS n
-  FROM businesses b
-  JOIN scrape_runs sr ON sr.id = b.first_scrape_run_id
-  GROUP BY sr.id
-);
+FROM per_run;
 ```
 
-Bind `:base_query` to the `--query` value and `:metro` to the `--location`
-value, or inline them. Sanity checks before believing the result:
+Bind `:metro` to the `--location` value, or inline it.
 
-- `SELECT status, COUNT(*) FROM scrape_runs GROUP BY 1;` — any `blocked`
-  row invalidates the comparison; a soft-blocked Pass 2 reads as "the
-  variants added nothing."
-- Expect one `scrape_runs` row per Pass 2 variant. Fewer means a variant
-  errored and was skipped.
-- `SELECT COUNT(*) FROM businesses WHERE first_scrape_run_id IS NULL;`
-  should be 0 on a fresh DB. Anything else means the DB was not fresh.
+### Sanity checks — run these before believing any lift number
+
+1. **Pass 1 must have actually worked.** This is the denominator; if it
+   under-delivers, lift is inflated by exactly that much. Compare against a
+   known-good grid pass for the market — San Jose plumbing grid produced
+   **362 businesses** on 2026-07-20. A Pass 1 yielding tens rather than
+   hundreds is broken, not thin, and the run should be discarded.
+
+   ```sql
+   SELECT sr.id, sr.query, sr.location,
+          COUNT(b.id) AS net_new,
+          (SELECT COUNT(*) FROM raw_leads rl WHERE rl.scrape_run_id = sr.id) AS raw,
+          ROUND((julianday(sr.completed_at) - julianday(sr.started_at)) * 86400) AS secs
+   FROM scrape_runs sr
+   LEFT JOIN businesses b ON b.first_scrape_run_id = sr.id
+   WHERE sr.status = 'completed'
+   GROUP BY sr.id ORDER BY sr.id;
+   ```
+
+   Cross-check the cell count too: a 2 km grid over San Jose's Nominatim
+   bbox is ~420 cells. Seconds-per-cell near 1 s means cells are failing
+   fast, not being scraped — JS mode drives a browser and cannot be that
+   quick.
+
+   **Block detection will not catch this here.** The low-yield rule needs
+   `BLOCK_DETECT_MIN_HISTORY` (default 3) prior *completed* runs for the
+   same query + location, and a fresh DB has none — so only the zero-yield
+   rule is live, and a badly degraded pass that still returns something is
+   recorded as `completed`. The fresh-DB requirement that makes attribution
+   clean is exactly what disarms the safeguard. Check Pass 1 by hand.
+
+2. `SELECT status, COUNT(*) FROM scrape_runs GROUP BY 1;` — any `blocked`
+   row invalidates the comparison; a soft-blocked Pass 2 reads as "the
+   variants added nothing." A `failed` row from an aborted earlier attempt
+   is harmless (the queries above filter to `completed`).
+3. Expect one `scrape_runs` row per Pass 2 variant. Fewer means a variant
+   errored and was skipped.
+4. `SELECT COUNT(*) FROM businesses WHERE first_scrape_run_id IS NULL;`
+   should be 0 on a fresh DB. Anything else means the DB was not fresh.
 
 Also worth capturing while you have the run: `scripts/analysis/run_wallclock.py`
 gives the active wall-clock cost, which is the other half of the decision —
