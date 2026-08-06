@@ -1,5 +1,6 @@
 """Batch zip-code runner with per-zip new-exportable gating."""
 
+from __future__ import annotations
 import argparse
 import csv
 import logging

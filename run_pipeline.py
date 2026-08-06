@@ -18,6 +18,7 @@ How stages 1-3 are driven depends on --strategy:
 Only single-centroid loops, and only it reads min_contacts/max_depth.
 """
 
+from __future__ import annotations
 import argparse
 import logging
 import re
@@ -33,6 +34,7 @@ from app.logging_config import setup_logging
 from app.pipeline.export_sheets import export_run_outputs
 from app.pipeline.extract_emails import harvest_emails_from_websites
 from app.pipeline.process_leads import process_and_deduplicate_leads
+from app.pipeline.tomba_enricher import enrich_businesses_with_tomba
 from app.pipeline.verify_emails import verify_contacts_emails
 from app.scraper.pacing import pace
 from app.scraper.run_scraper import execute_scrape_and_ingest, geocode_location
@@ -927,6 +929,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pass upstream -disable-page-reuse for this run.",
     )
     parser.add_argument(
+        "--use-tomba",
+        action="store_true",
+        help=(
+            "Run Tomba Domain Search API enrichment for all business domains "
+            "to find decision maker names, positions, and direct emails. "
+            "Requires TOMBA_API_KEY and TOMBA_SECRET_KEY in .env."
+        ),
+    )
+    parser.add_argument(
+        "--tomba-fallback",
+        action="store_true",
+        help=(
+            "Run Tomba Domain Search API enrichment ONLY for business domains "
+            "where website crawling yielded 0 emails (saves API credits)."
+        ),
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help=(
@@ -1100,6 +1119,8 @@ def run_end_to_end_pipeline(
     strategy: str = "single-centroid",
     queries: tuple[str, ...] | None = None,
     zip_csv: str | None = None,
+    use_tomba: bool = False,
+    tomba_fallback: bool = False,
     verify: bool = False,
     min_score: int = 0,
     csv_path: str | None = None,
@@ -1261,6 +1282,13 @@ def run_end_to_end_pipeline(
                 contact_target,
                 metrics.total_contacts,
             )
+
+        if use_tomba or tomba_fallback:
+            logger.info("--- Running Tomba Decision Maker Enrichment ---")
+            try:
+                enrich_businesses_with_tomba(fallback_only=not use_tomba)
+            except Exception as te:  # noqa: BLE001
+                logger.warning("Tomba enrichment pass failed: %s", te)
 
         if verify:
             logger.info("--- Verifying harvested emails via Reacher ---")
@@ -1444,6 +1472,8 @@ def main() -> None:
         strategy=strategy,
         queries=query_variants,
         zip_csv=args.zip_csv,
+        use_tomba=args.use_tomba,
+        tomba_fallback=args.tomba_fallback,
         verify=args.verify,
         min_score=args.min_score,
         csv_path=args.csv_path,
