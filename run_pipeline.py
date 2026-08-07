@@ -895,6 +895,62 @@ def _default_csv_path(query: str, location: str | None = None) -> str:
     return f"data/{'_'.join(parts)}.csv"
 
 
+def _latest_scrape_run_id() -> int:
+    """Highest `scrape_runs.id` right now, or 0 if that can't be read.
+
+    Deferred imports, and never raises: this only feeds the closing summary,
+    so it must not be able to fail a pipeline that otherwise worked. Same
+    stance as `run_scraper._assess_run_health`.
+    """
+    try:
+        from sqlalchemy import func
+
+        from app.db.create_tables import ScrapeRun
+
+        session = Session()
+        try:
+            return session.query(func.max(ScrapeRun.id)).scalar() or 0
+        finally:
+            session.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not read the scrape-run marker (%s).", e)
+        return 0
+
+
+def _timed_out_runs_since(marker_id: int) -> list[tuple[int, str, str]]:
+    """(id, query, location) for runs after `marker_id` that were truncated.
+
+    A timed-out scrape now salvages its partial output and lets the pipeline
+    continue (see `execute_scrape_and_ingest`), which is what makes a
+    30-minute sweep worth something — but it also means a partial run would
+    otherwise end in the same "PIPELINE EXECUTED SUCCESSFULLY" banner as a
+    complete one. This is how the closing summary tells them apart.
+
+    Best-effort for the same reason as `_latest_scrape_run_id`.
+    """
+    try:
+        from app.db.create_tables import ScrapeRun
+        from app.scraper.block_detect import STATUS_TIMEOUT
+
+        session = Session()
+        try:
+            return [
+                (row.id, row.query, row.location)
+                for row in session.query(ScrapeRun)
+                .filter(
+                    ScrapeRun.id > marker_id,
+                    ScrapeRun.status == STATUS_TIMEOUT,
+                )
+                .order_by(ScrapeRun.id)
+                .all()
+            ]
+        finally:
+            session.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not check for truncated runs (%s).", e)
+        return []
+
+
 def run_end_to_end_pipeline(
     query: str,
     location: str,
@@ -968,6 +1024,7 @@ def run_end_to_end_pipeline(
     logger.info("=" * 60)
 
     init_db()
+    run_marker_id = _latest_scrape_run_id()
 
     try:
         lat, lon, geo_bbox = geocode_location(location)
@@ -1061,7 +1118,26 @@ def run_end_to_end_pipeline(
             csv_path=csv_path or _default_csv_path(query, location),
         )
         logger.info("=" * 60)
-        logger.info("PIPELINE EXECUTED SUCCESSFULLY")
+        truncated = _timed_out_runs_since(run_marker_id)
+        if truncated:
+            # A salvaged timeout no longer aborts the pipeline, so without
+            # this the banner would read identically to a complete sweep.
+            logger.warning("PIPELINE EXECUTED WITH PARTIAL COVERAGE")
+            logger.warning(
+                "%d scrape run(s) were killed at SCRAPER_TIMEOUT_SEC and "
+                "salvaged; the area below was NOT fully swept:",
+                len(truncated),
+            )
+            for run_id, run_query, run_location in truncated:
+                logger.warning(
+                    "  run #%s  %r in %r", run_id, run_query, run_location
+                )
+            logger.warning(
+                "Raise SCRAPER_TIMEOUT_SEC, shrink --bbox, or raise "
+                "--cell-km, then re-run to complete coverage."
+            )
+        else:
+            logger.info("PIPELINE EXECUTED SUCCESSFULLY")
         logger.info("=" * 60)
 
     except Exception as e:

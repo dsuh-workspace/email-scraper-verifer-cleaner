@@ -7,8 +7,14 @@ rows, no evidence of how far the sweep got. Two San Jose grid runs on
 
 The scraper streams results as jobs complete, so that file normally holds most
 of a long run. These cover: the partial rows get ingested, the run is recorded
-as `timeout` rather than `failed` or `completed`, a copy of the file survives
-under `logs/`, and the TimeoutExpired still propagates.
+as `timeout` rather than `failed` or `completed`, and a copy of the file
+survives under `logs/`.
+
+Whether the TimeoutExpired propagates depends on whether anything was
+salvaged. With rows recovered it is swallowed so the caller's dedupe / crawl /
+export still run — re-raising discarded 342 usable leads after a 30-minute
+sweep on 2026-08-07. With nothing recovered it propagates, so an empty run
+never passes for a thin market.
 """
 
 import json
@@ -78,10 +84,11 @@ class TestTimeoutSalvage:
     ):
         _stub_timeout(monkeypatch, tmp_path, _jsonl(LEADS))
 
-        with pytest.raises(subprocess.TimeoutExpired):
-            run_scraper.execute_scrape_and_ingest(
-                "Plumbing", "San Jose, CA", lat=37.3, lon=-121.9,
-            )
+        # Salvage succeeded, so the timeout is swallowed and the caller's
+        # dedupe/crawl/export still get to run over what the sweep paid for.
+        run_scraper.execute_scrape_and_ingest(
+            "Plumbing", "San Jose, CA", lat=37.3, lon=-121.9,
+        )
 
         session = factory()
         try:
@@ -98,10 +105,9 @@ class TestTimeoutSalvage:
         """A kill mid-write leaves a partial last line; earlier ones stand."""
         _stub_timeout(monkeypatch, tmp_path, _jsonl(LEADS) + '{"title": "Half W')
 
-        with pytest.raises(subprocess.TimeoutExpired):
-            run_scraper.execute_scrape_and_ingest(
-                "Plumbing", "San Jose, CA", lat=37.3, lon=-121.9,
-            )
+        run_scraper.execute_scrape_and_ingest(
+            "Plumbing", "San Jose, CA", lat=37.3, lon=-121.9,
+        )
 
         session = factory()
         try:
@@ -137,10 +143,9 @@ class TestTimeoutSalvage:
     ):
         _stub_timeout(monkeypatch, tmp_path, _jsonl(LEADS))
 
-        with pytest.raises(subprocess.TimeoutExpired):
-            run_scraper.execute_scrape_and_ingest(
-                "Plumbing", "San Jose, CA", lat=37.3, lon=-121.9,
-            )
+        run_scraper.execute_scrape_and_ingest(
+            "Plumbing", "San Jose, CA", lat=37.3, lon=-121.9,
+        )
 
         kept = list((tmp_path / "logs").glob("timeout_run*.json"))
         assert len(kept) == 1
@@ -164,3 +169,60 @@ class TestTimeoutSalvage:
         assert not (tmp_path / "logs").exists() or not list(
             (tmp_path / "logs").glob("timeout_run*.json")
         )
+
+
+class TestPipelineSummaryFlagsPartialCoverage:
+    """The closing banner must distinguish a partial sweep from a full one.
+
+    Continue-on-salvage means a truncated run reaches `export_run_outputs`
+    exactly like a complete one, so without this the operator's only cue that
+    a city was half-swept would be a warning 30 minutes earlier in the log.
+    """
+
+    def test_reports_truncated_runs_and_suppresses_success_banner(
+        self, factory, monkeypatch, tmp_path
+    ):
+        import run_pipeline
+
+        monkeypatch.setattr(run_pipeline, "Session", factory)
+
+        session = factory()
+        session.add(ScrapeRun(query="Plumbing", location="San Jose, CA",
+                              status="completed"))
+        session.commit()
+        marker = run_pipeline._latest_scrape_run_id()
+        session.add(ScrapeRun(query="Plumbing", location="San Jose, CA",
+                              status=STATUS_TIMEOUT))
+        session.commit()
+        session.close()
+
+        truncated = run_pipeline._timed_out_runs_since(marker)
+
+        assert len(truncated) == 1
+        assert truncated[0][1:] == ("Plumbing", "San Jose, CA")
+
+    def test_complete_runs_report_nothing(self, factory, monkeypatch, tmp_path):
+        import run_pipeline
+
+        monkeypatch.setattr(run_pipeline, "Session", factory)
+
+        marker = run_pipeline._latest_scrape_run_id()
+        session = factory()
+        session.add(ScrapeRun(query="Plumbing", location="San Jose, CA",
+                              status="completed"))
+        session.commit()
+        session.close()
+
+        assert run_pipeline._timed_out_runs_since(marker) == []
+
+    def test_summary_helpers_never_raise_on_a_broken_session(self, monkeypatch):
+        """Diagnostics must not be able to fail a pipeline that worked."""
+        import run_pipeline
+
+        def exploding_session():
+            raise RuntimeError("db gone")
+
+        monkeypatch.setattr(run_pipeline, "Session", exploding_session)
+
+        assert run_pipeline._latest_scrape_run_id() == 0
+        assert run_pipeline._timed_out_runs_since(0) == []

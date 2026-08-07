@@ -600,20 +600,38 @@ def execute_scrape_and_ingest(
             logger.warning("Scraper output file is empty or missing.")
 
         if timed_out is not None:
-            # Record the salvage, then let the timeout propagate. Block
-            # detection is deliberately skipped: a truncated run's yield says
-            # nothing about the proxies, and scoring it would strike working
-            # ones for a wall-clock problem.
+            # Block detection is deliberately skipped: a truncated run's yield
+            # says nothing about the proxies, and scoring it would strike
+            # working ones for a wall-clock problem.
             db_run.status = STATUS_TIMEOUT
             db_run.completed_at = datetime.now(timezone.utc)
             session.commit()
+
+            if ingested_count == 0:
+                # Nothing recovered, so there is nothing downstream to do.
+                # Fail loudly rather than let an empty run look like a thin
+                # market.
+                logger.error(
+                    "[%s] Scrape Run #%s marked %s with nothing salvageable.",
+                    datetime.now(), scrape_run_id, STATUS_TIMEOUT,
+                )
+                raise timed_out
+
+            # Salvage succeeded: swallow the timeout so the caller's
+            # dedupe/crawl/export still run over what we paid for. Re-raising
+            # here used to discard 342 usable leads after a 30-minute sweep
+            # (2026-08-07) and forced a manual recovery every time. The
+            # partial-ness is not lost — `status='timeout'` is durable, is
+            # excluded from `recent_yields()`, and `run_end_to_end_pipeline`
+            # reports it in the closing summary.
             logger.warning(
                 "[%s] Scrape Run #%s marked %s — salvaged %d leads for %r in "
-                "%r before the kill.",
+                "%r before the kill. Continuing with partial coverage; this "
+                "run does NOT represent the full area.",
                 datetime.now(), scrape_run_id, STATUS_TIMEOUT,
                 ingested_count, query, location,
             )
-            raise timed_out
+            return
 
         # Does this yield look blocked rather than just thin?
         block_reason = _assess_run_health(

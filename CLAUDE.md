@@ -201,7 +201,19 @@ run now:
 - ingests whatever the scraper had already streamed to `-results`,
 - copies that file to `logs/timeout_run<ID>_<UTC>.json`,
 - records `scrape_runs.status = 'timeout'`,
-- re-raises `TimeoutExpired` so callers still fail loudly.
+- **continues the pipeline** if anything was salvaged — dedupe, crawl and
+  export still run over what the sweep paid for. Re-raising here discarded
+  342 usable leads after a 30-minute grid sweep (2026-08-07) and forced a
+  manual recovery every time.
+- re-raises `TimeoutExpired` only when **nothing** was salvaged, so an empty
+  run never passes for a thin market.
+
+Partial-ness is not lost by continuing: `run_end_to_end_pipeline` snapshots
+`MAX(scrape_runs.id)` at start and checks for `timeout` runs above it at the
+end, replacing the "PIPELINE EXECUTED SUCCESSFULLY" banner with an explicit
+partial-coverage warning naming each truncated run. Both summary helpers
+swallow their own errors — a diagnostic must never fail a pipeline that
+otherwise worked.
 
 `timeout` is a distinct status from `failed` so a wall-clock truncation
 isn't read as a crash, and like `blocked` it's excluded from

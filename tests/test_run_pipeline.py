@@ -22,6 +22,9 @@ class RecordingLogger:
         msg, params = args[0], args[1:]
         self.messages.setdefault(level, []).append(msg % params if params else msg)
 
+    def debug(self, *args, **kwargs):
+        self._log("debug", args)
+
     def info(self, *args, **kwargs):
         self._log("info", args)
 
