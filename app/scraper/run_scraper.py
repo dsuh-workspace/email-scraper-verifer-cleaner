@@ -295,9 +295,13 @@ def execute_scrape_and_ingest(
     - Single-centroid (default): pass lat/lon (or let it geocode from
       location), scraper uses -geo and -fast-mode. ~10-20 businesses per run.
     - Grid mode: pass bbox=(min_lat, min_lon, max_lat, max_lon) and cell_km.
-      Scraper iterates cells internally in JS mode (much richer, 4-5x more
-      businesses than a curated ZIP sweep, per 2026-07-20 experiment).
-      -fast-mode is dropped; scraper rejects it with -grid-bbox.
+      Scraper iterates cells internally in JS mode. -fast-mode is dropped;
+      scraper rejects it with -grid-bbox. The "4-5x more businesses than a
+      curated ZIP sweep" figure is from the 2026-07-20 experiment, which
+      ran unproxied over a tight hand-picked bbox at 3km cells. Note that
+      JS mode binds one proxy per browser context and the pool defaults to
+      one, so a proxied grid pass sends every cell through a single IP —
+      see README, "Grid mode and proxy binding".
     - Multi-query mode: pass `queries=[q1, q2, ...]`. All are written to
       the scraper's -input file (one per line as "{q} in {location}"), so
       the scraper reuses its browser context across queries — faster than

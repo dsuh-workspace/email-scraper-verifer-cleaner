@@ -373,7 +373,7 @@ class TestExecuteScrapeMultiQuery:
     def test_proxy_cmd_args_match_scraper_proxy_args(self, monkeypatch):
         """Production's cmd-building must go through the same formatter as
         `_scraper_proxy_args`, not a re-typed copy of it — regression guard
-        for the two paths drifting apart (CLAUDE.md Open work #6)."""
+        for the two paths drifting apart, which they had until 132dd93."""
         captured, files = [], []
         self._stub_all(monkeypatch, captured, files)
         monkeypatch.setenv(

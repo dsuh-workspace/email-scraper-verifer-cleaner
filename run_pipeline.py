@@ -665,8 +665,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Use native grid-mode scraping (JS-mode, requires Playwright). "
-            "One scrape iterates cells over the location's bounding box. "
-            "Empirically 4-25x higher coverage than single-centroid mode."
+            "One scrape iterates cells over the location's bounding box. The "
+            "published '4-25x higher coverage than single-centroid' figure "
+            "was measured unproxied over a hand-picked tight bbox at 3km "
+            "cells; with proxies on and a Nominatim bbox it does not "
+            "reproduce. See README 'Grid mode and proxy binding' — the "
+            "default browser pool is one context, so every cell shares one "
+            "proxy."
         ),
     )
     parser.add_argument(
@@ -918,13 +923,18 @@ def run_end_to_end_pipeline(
     - single-centroid (legacy): loop at increasing depths until
       min_contacts hit or max_depth reached.
     - grid: one scrape iterates cells over the location's bounding box
-      (Nominatim-derived, or explicit `bbox` arg). No depth loop. Grid+d3
-      is empirically 4-25x richer than a curated ZIP sweep.
+      (Nominatim-derived, or explicit `bbox` arg). No depth loop. The
+      "4-25x richer than a curated ZIP sweep" figure was measured
+      unproxied over a hand-picked tight bbox at 3km cells (72 cells); a
+      default proxied run over a Nominatim bbox at 2km (~420 cells for
+      San Jose) did not reproduce it — 10 and 4 businesses on 2026-08-06.
+      See README, "Grid mode and proxy binding".
     - full-harvest: grid + multi-query slow at centroid + optional fast
       ZIP top-up. Measured at 39% more coverage than grid alone
       (SJ 2026-07-20: grid=362, +multi-query=473, +fast-ZIP=504) — but that
       run used the 8-variant Pass 2 set and the combined call, both since
-      changed. Treat the figure as historical until re-measured.
+      changed, and the 2026-08-06 re-measurement was invalidated by the
+      grid baseline above. Treat the figure as historical.
 
     `min_contacts` / `max_depth` gate the single-centroid depth loop only;
     grid and full-harvest ignore them, so non-single-centroid callers should

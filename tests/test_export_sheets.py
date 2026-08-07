@@ -167,8 +167,8 @@ class TestExportRunOutputs:
 
 class TestRunCohortFilter:
     """`run_cohort_start` scopes exports to businesses.first_scrape_run_id >=
-    cutoff (CLAUDE.md Open work #4) — without it, a DB carrying a prior
-    baseline exports the whole DB, not just new work."""
+    cutoff — without it, a DB carrying a prior baseline exports the whole
+    DB, not just new work (see data/archive/MISLABELED_wholedb_export_*)."""
 
     def _seed_two_cohorts(self, session):
         old_run = ScrapeRun(query="Plumber", location="San Jose, CA", status="completed")

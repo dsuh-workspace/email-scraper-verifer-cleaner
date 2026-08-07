@@ -48,7 +48,7 @@ outputs (see "Verification and export tail").
   variants and plumbing defaults to 2, based on recent San Jose reruns.
   The published "39% more than grid alone" figure predates both this
   pruning and the per-variant switch — treat it as historical until
-  re-measured (Open work #3).
+  re-measured (Open work #4).
 
 ### CLI validation
 
@@ -112,7 +112,7 @@ Consequences worth holding onto:
 - `--min-score` gates **only** `_verified`. The `_deduped` push — the one
   that reaches Sheets and marks contacts exported — is called with a
   hardcoded `min_score=0` (`export_sheets.py`). **Open question, not a
-  settled decision** (see Open work #4): before the three-file split
+  settled decision** (see Open work #5): before the three-file split
   (13f9b4b, 2026-08-02), `--min-score` gated `export_new_leads()` itself —
   the same function now reused for `_deduped` — so it gated the actual
   Sheets push (393a10c, 2026-07-21). The split hardcoded `min_score=0` at
@@ -222,15 +222,37 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    rows from `MIN(raw_leads.scrape_run_id)`, so cohort queries stop needing the
    inference fallback described under "Settled decisions". Not done — queries
    are in `MAINTENANCE_SQL.md`.
-3. **Re-measure full-harvest lift against current defaults.** The "39% more
-   than grid alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 →
-   +ZIP=504) was measured with the 8-variant Pass 2 set **and** the combined
-   Pass 2 call. Both have since changed — 2/3 variants, per-variant
-   subprocesses — so the number no longer describes what the code runs, and
-   full-harvest now costs ~Nx Pass 2 wall time on the strength of it. Doc
-   sites now flag it as historical; the measurement itself is still owed.
-   Command is in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
-4. **Decide whether `_deduped` (the Sheets-bound export) should be gated
+3. **Grid mode does not reproduce its published numbers — fix this first.**
+   Two runs on 2026-08-06 with shipped defaults (`--cell-km 2.0`, Nominatim
+   bbox, proxies on) returned **10 and 4 businesses** for San Jose plumbing,
+   in 7.6 and 6.3 min. The reference `Dt` experiment got 362 — but ran
+   **unproxied**, over a **hand-picked tight bbox** (~27 x 21 km) at **3 km**
+   cells, i.e. 72 cells vs ~420 today. Two independent gaps:
+
+   - **Proxy binding.** JS mode binds one proxy per browser context; the
+     pool derives as `ceil(concurrency / pages-per-browser)` and upstream
+     `-c` defaults to 1, so the default pool is **one context** and every
+     cell shares **one** proxy regardless of `--scraper-proxy-limit` or the
+     20k-line proxy file. README warns against *pinning* pool size to 1;
+     the defaults already do it. Workaround is `--scraper-concurrency 6
+     --scraper-pages-per-browser 1 --scraper-proxy-limit 6`.
+   - **Geometry.** Nominatim's metro bbox is much larger than the dense
+     core the experiment targeted, so default cell counts are ~6x higher
+     with most cells in low-density areas.
+
+   Not yet established which dominates, or whether the 2026-08-06 scraper
+   rebuild (upstream `4676350`) contributes. Neither run was flagged
+   `blocked` — on a fresh DB the low-yield rule has no history to compare
+   against (see #4).
+4. **Re-measure full-harvest lift — blocked on #3.** The "39% more than grid
+   alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) was
+   measured with the 8-variant Pass 2 set **and** the combined Pass 2 call,
+   both since changed, so it no longer describes what the code runs — and
+   full-harvest now costs ~Nx Pass 2 wall time on the strength of it. The
+   2026-08-06 attempt was invalid: Pass 1 is the denominator and it returned
+   10 businesses, against Pass 2's 47 and Pass 3's 41. Procedure and the
+   Pass 1 sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
+5. **Decide whether `_deduped` (the Sheets-bound export) should be gated
    by `--min-score`.** It currently isn't — see "Verification and export
    tail" above. Before the three-file split (13f9b4b, 2026-08-02),
    `--min-score` gated the same function now backing `_deduped`, so score

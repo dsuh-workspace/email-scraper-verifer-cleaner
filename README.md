@@ -324,8 +324,46 @@ python run_pipeline.py \
 
 Uses the scraper's native `-grid-bbox` mode (JS mode via Playwright).
 Iterates cells over the location's Nominatim-derived bounding box in one
-scraper invocation. Empirically **4-25× more unique businesses** than
-single-centroid mode (see `plans/generalized-city-coverage-method-2026-07-20.md`).
+scraper invocation.
+
+> **The published grid numbers do not describe this command.** The
+> "4-25× more unique businesses than single-centroid" and "362 businesses
+> for San Jose plumbing" figures come from the 2026-07-20 `Dt` experiment,
+> which ran **unproxied**, over a **hand-picked tight bbox**
+> (`37.20,-121.99,37.44,-121.75`, ~27 × 21 km) at **3 km** cells — 72 cells
+> in 10.1 min. The defaults above give a materially different run: San
+> Jose's Nominatim bbox is 40.7 × 38.4 km, which at `--cell-km 2.0` is
+> **~420 cells**, and proxies are on.
+>
+> Measured 2026-08-06 with those defaults: **10 and 4 businesses** across
+> two runs (6.3 and 7.6 min). See "Grid mode and proxy binding" below
+> before running a grid pass you intend to trust.
+
+#### Grid mode and proxy binding
+
+In JS mode the scraper binds **one proxy per browser context**, and the
+default browser pool is **one context** — upstream `-c` defaults to 1 and
+the pool derives as `ceil(concurrency / pages-per-browser)`. So a default
+grid run puts every cell behind a **single** proxy, no matter how large
+your pool is or what `--scraper-proxy-limit` says. Several hundred cells
+through one IP in a few minutes is the shape of a run that gets soft-blocked
+partway through and returns a fraction of its yield.
+
+The existing warning below ("Do not pin `--scraper-browser-pool-size 1`")
+understates this: you do not have to pin it — **the defaults already give
+you a pool of one.** To spread a grid pass across proxies, raise
+concurrency so the derived pool is larger:
+
+```bash
+python run_pipeline.py \
+  --query "Plumbing" --location "San Jose, CA" --grid --cell-km 2.0 \
+  --scraper-concurrency 6 \
+  --scraper-pages-per-browser 1 \
+  --scraper-proxy-limit 6        # -> 6 browser contexts, 6 proxies
+```
+
+Tightening the bbox with `--bbox` to the dense core also cuts cell count
+directly, which is what the reference experiment did.
 
 One-time setup: run `./scripts/setup_scraper_playwright.sh` to install the
 Playwright driver + Chromium + FFmpeg (~265 MB). Also handles the
@@ -368,12 +406,19 @@ variants' results (SJ HVAC 2026-08-01/02: 4 raw leads combined vs 81 run
 separately). `--pass2-combined` opts back in, for diagnostics only. The
 cost is roughly Nx Pass 2 wall time.
 
-> **Coverage claim is stale.** Full-harvest was measured at 39% more unique
-> businesses than grid alone (SJ 2026-07-20: grid=362 → +multi-query=473 →
-> +ZIP=504, see `plans/scrape-strategy-experiments-2026-07-20.md`). That run
-> used the 8-variant set *and* the combined call, both since changed. Treat
-> 39% as historical until re-measured — `RUNBOOK_SQL_OVERLAP_ANALYSIS.md`
-> §11 has the procedure.
+> **Coverage claim is stale, and cannot currently be re-measured.**
+> Full-harvest was measured at 39% more unique businesses than grid alone
+> (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504, see
+> `plans/scrape-strategy-experiments-2026-07-20.md`). That run used the
+> 8-variant set *and* the combined call, both since changed.
+>
+> A 2026-08-06 re-measurement attempt failed because Pass 1 — the grid
+> baseline, i.e. the denominator — returned 10 businesses under default
+> settings (see the grid warning above). Passes 2 and 3 worked normally
+> (47 and 41 net-new). Until a grid pass yields something comparable to
+> the reference, there is no valid baseline to measure lift against.
+> `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11 has the procedure and the Pass 1
+> floor to check first.
 
 ### Batch zip-file mode
 

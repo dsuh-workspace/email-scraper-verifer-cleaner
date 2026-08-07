@@ -507,6 +507,14 @@ Bind `:metro` to the `--location` value, or inline it.
    **362 businesses** on 2026-07-20. A Pass 1 yielding tens rather than
    hundreds is broken, not thin, and the run should be discarded.
 
+   **This is not hypothetical and the 362 is not like-for-like.** The
+   2026-08-06 attempt returned `pass1=10, pass2=47, pass3=41` — reporting
+   +880% lift purely because the denominator collapsed. A standalone grid
+   re-run the same day returned 4. The reference figure came from an
+   unproxied run over a hand-picked tight bbox at 3 km cells (72 cells);
+   defaults give ~420 cells through a single proxy. See CLAUDE.md open
+   work #3 before trusting any Pass 1.
+
    ```sql
    SELECT sr.id, sr.query, sr.location,
           COUNT(b.id) AS net_new,
