@@ -48,7 +48,7 @@ outputs (see "Verification and export tail").
   variants and plumbing defaults to 2, based on recent San Jose reruns.
   The published "39% more than grid alone" figure predates both this
   pruning and the per-variant switch — treat it as historical until
-  re-measured (Open work #6).
+  re-measured (Open work #7).
 
 ### CLI validation
 
@@ -112,7 +112,7 @@ Consequences worth holding onto:
 - `--min-score` gates **only** `_verified`. The `_deduped` push — the one
   that reaches Sheets and marks contacts exported — is called with a
   hardcoded `min_score=0` (`export_sheets.py`). **Open question, not a
-  settled decision** (see Open work #7): before the three-file split
+  settled decision** (see Open work #8): before the three-file split
   (13f9b4b, 2026-08-02), `--min-score` gated `export_new_leads()` itself —
   the same function now reused for `_deduped` — so it gated the actual
   Sheets push (393a10c, 2026-07-21). The split hardcoded `min_score=0` at
@@ -225,7 +225,7 @@ strike working ones for a wall-clock problem.
 Two limits worth knowing. `subprocess.run(timeout=)` discards stdout/stderr
 when it kills the process, so the preserved file is the only record of how
 far the sweep got — and it shows *what* was scraped, not *which cell* it
-reached (Open work #4). And single-centroid mode emits a JSON array rather
+reached (Open work #5). And single-centroid mode emits a JSON array rather
 than JSONL, so a killed one is unterminated and nothing is recoverable from
 it; the parser logs and continues rather than raising.
 
@@ -281,20 +281,29 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    rows from `MIN(raw_leads.scrape_run_id)`, so cohort queries stop needing the
    inference fallback described under "Settled decisions". Not done — queries
    are in `MAINTENANCE_SQL.md`.
-3. **Surface `--bbox` on `run_zip_batch.py`.** `run_pipeline.py` has it
+3. **Orphaned scraper processes outlive their parent.** Found 2026-08-07: a
+   `google-maps-scraper` child from a 00:09 run was still going at 15:38
+   elapsed, burning **2.0 GB of proxy bandwidth at a 39% failure rate** long
+   after its pipeline had died. `subprocess.run(timeout=)` reaps the child on
+   timeout, but nothing covers the parent being killed another way (Ctrl-C,
+   SIGKILL, a crashed shell) — the Go process keeps scraping and keeps
+   spending. Wants a process-group kill in the `finally`, and a stale-process
+   check at startup. Until then, check `pgrep -f google-maps-scraper` before
+   trusting any bandwidth measurement.
+4. **Surface `--bbox` on `run_zip_batch.py`.** `run_pipeline.py` has it
    (line ~688, parsed by `_parse_bbox`, overrides the Nominatim box for grid
    and full-harvest Pass 1). The batch runner has no equivalent — it geocodes
    each row and takes whatever bbox Nominatim returns, so there is no way to
    tighten a batch row to its dense core. Cell count scales with bbox area,
    so this is the batch-side version of the geometry half of #5.
-4. **Stream scraper progress instead of buffering it.**
+5. **Stream scraper progress instead of buffering it.**
    `subprocess.run(..., timeout=)` discards stdout/stderr when it kills the
    process, so a timed-out sweep leaves no record of which cell it reached.
    Partial `-results` are now salvaged and copied to `logs/` (see "Scrape
    timeouts"), which recovers the *leads* but not the *position*. Getting
    that needs `Popen` plus a reader thread — deferred as the more invasive
    half of the same problem.
-5. **Grid mode does not reproduce its published numbers.**
+6. **Grid mode does not reproduce its published numbers.**
    Two runs on 2026-08-06 with shipped defaults (`--cell-km 2.0`, Nominatim
    bbox, proxies on) returned **10 and 4 businesses** for San Jose plumbing,
    in 7.6 and 6.3 min. The reference `Dt` experiment got 362 — but ran
@@ -318,11 +327,11 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    entry until it returns (`gmaps/place.go:132`). 93.8% of observed raw
    leads have a website, so grid was doing ~2 browser visits per result
    across ~420 cells. `-email` now defaults off for grid — see "Inline email
-   extraction" below. Re-test #5 with that in place before digging further.
+   extraction" below. Re-test #6 with that in place before digging further.
 
    Neither of the two low-yield runs was flagged `blocked` — on a fresh DB
-   the low-yield rule has no history to compare against (see #6).
-6. **Re-measure full-harvest lift — blocked on #5.** The "39% more than grid
+   the low-yield rule has no history to compare against (see #7).
+7. **Re-measure full-harvest lift — blocked on #6.** The "39% more than grid
    alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) was
    measured with the 8-variant Pass 2 set **and** the combined Pass 2 call,
    both since changed, so it no longer describes what the code runs — and
@@ -330,7 +339,7 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    2026-08-06 attempt was invalid: Pass 1 is the denominator and it returned
    10 businesses, against Pass 2's 47 and Pass 3's 41. Procedure and the
    Pass 1 sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
-7. **Decide whether `_deduped` (the Sheets-bound export) should be gated
+8. **Decide whether `_deduped` (the Sheets-bound export) should be gated
    by `--min-score`.** It currently isn't — see "Verification and export
    tail" above. Before the three-file split (13f9b4b, 2026-08-02),
    `--min-score` gated the same function now backing `_deduped`, so score

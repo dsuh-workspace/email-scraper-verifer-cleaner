@@ -147,6 +147,107 @@ def _default_harvest_queries(query: str) -> tuple[str, ...] | None:
     return None
 
 
+# --- grid geometry -------------------------------------------------------
+# Cell count is the master variable for a grid sweep: wall clock, bandwidth
+# and block risk all scale with it, and it is the one thing Nominatim gives
+# you no control over. An admin bbox is whatever the city's boundary happens
+# to be — San Jose's is 40.7 x 38.4 km of mostly exurban sprawl, while the
+# hand-picked box that produced the reference 362-business run was 27 x 21 km
+# of dense core. Same flag, wildly different jobs. `--radius-km` replaces that
+# lottery with a number the operator chooses.
+KM_PER_DEG_LAT = 111.0
+
+# Seconds per cell, measured 2026-08-07: a 72-cell San Jose grid at -c 6
+# through 6 proxies reached ~89% in 1800s => ~28 s/cell. The same geometry
+# unproxied at -c 1 ran 8.4 s/cell, so proxy latency costs ~3.3x. Includes a
+# margin so a derived timeout doesn't sit exactly on the measured mean.
+SECONDS_PER_CELL_PROXIED = 36
+
+# Refuse a sweep bigger than this unless the operator raises it explicitly.
+# 200 cells is ~2h at the rate above; past that you almost certainly wanted a
+# tighter radius or a larger cell, not a longer night.
+DEFAULT_MAX_CELLS = 200
+
+
+def _bbox_from_radius(
+    lat: float, lon: float, radius_km: float
+) -> tuple[float, float, float, float]:
+    """Square bbox of `radius_km` around a centroid, as (min_lat, min_lon,
+    max_lat, max_lon).
+
+    Longitude degrees shrink with latitude, so the lon half-width is divided
+    by cos(lat) — without that the box is noticeably narrow in the north.
+    """
+    import math
+
+    if radius_km <= 0:
+        raise ValueError(f"radius_km must be > 0, got {radius_km}")
+
+    d_lat = radius_km / KM_PER_DEG_LAT
+    # cos() guarded so a pole-adjacent centroid can't divide by ~0.
+    d_lon = radius_km / (KM_PER_DEG_LAT * max(math.cos(math.radians(lat)), 0.01))
+    return (lat - d_lat, lon - d_lon, lat + d_lat, lon + d_lon)
+
+
+def estimate_grid_cells(
+    bbox: tuple[float, float, float, float], cell_km: float
+) -> int:
+    """How many cells the scraper will iterate for this bbox at this size.
+
+    Mirrors the vendored scraper's own layout closely enough to plan with —
+    it is a bound to reason about, not a contract with the binary.
+    """
+    import math
+
+    min_lat, min_lon, max_lat, max_lon = bbox
+    mid_lat = (min_lat + max_lat) / 2
+    height_km = (max_lat - min_lat) * KM_PER_DEG_LAT
+    width_km = (max_lon - min_lon) * KM_PER_DEG_LAT * math.cos(math.radians(mid_lat))
+    return max(1, math.ceil(width_km / cell_km) * math.ceil(height_km / cell_km))
+
+
+def _grid_preflight(
+    bbox: tuple[float, float, float, float],
+    cell_km: float,
+    max_cells: int | None,
+    timeout_sec: int | None,
+) -> int:
+    """Log the size of a grid sweep before starting it, and derive a timeout.
+
+    Every grid failure so far has been the same shape: a sweep far too large
+    for its window, discovered 30 minutes in. The numbers to catch that are
+    all knowable up front.
+
+    Returns the timeout to use. Raises if the sweep exceeds `max_cells`.
+    """
+    import math
+
+    cells = estimate_grid_cells(bbox, cell_km)
+    derived = timeout_sec or cells * SECONDS_PER_CELL_PROXIED
+
+    logger.info(
+        "Grid preflight: %d cells (%.1f x %.1f km at %.1f km), "
+        "est. %d min, timeout %ds%s.",
+        cells,
+        (bbox[3] - bbox[1]) * KM_PER_DEG_LAT
+        * math.cos(math.radians((bbox[0] + bbox[2]) / 2)),
+        (bbox[2] - bbox[0]) * KM_PER_DEG_LAT,
+        cell_km,
+        round(cells * SECONDS_PER_CELL_PROXIED / 60),
+        derived,
+        " (SCRAPER_TIMEOUT_SEC)" if timeout_sec else " (derived)",
+    )
+
+    if max_cells is not None and cells > max_cells:
+        raise ValueError(
+            f"Grid would iterate {cells} cells, over the {max_cells}-cell "
+            f"limit (~{round(cells * SECONDS_PER_CELL_PROXIED / 60)} min). "
+            f"Raise --cell-km, shrink --radius-km/--bbox, or pass "
+            f"--max-cells {cells} to accept it."
+        )
+    return derived
+
+
 @dataclass(frozen=True)
 class LocationRunMetrics:
     depths_run: tuple[int, ...]
@@ -355,6 +456,8 @@ def run_location_grid(
     scraper_pages_per_browser: int | None = None,
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
+    max_cells: int | None = DEFAULT_MAX_CELLS,
+    timeout_sec: int | None = None,
 ) -> LocationRunMetrics:
     """Grid-scrape one location's bounding box. One scrape, no depth loop.
 
@@ -369,6 +472,7 @@ def run_location_grid(
             f"for {location!r} and no --bbox override was supplied."
         )
 
+    grid_timeout = _grid_preflight(bbox, cell_km, max_cells, timeout_sec)
     baseline_exportable = get_exportable_contact_count(export_destination)
 
     logger.info("--- Grid scrape (bbox=%s cell_km=%.2f) ---", bbox, cell_km)
@@ -378,6 +482,7 @@ def run_location_grid(
         bbox=bbox,
         cell_km=cell_km,
         depth=3,
+        timeout_sec=grid_timeout,
         disable_proxy=disable_scraper_proxy,
         concurrency=scraper_concurrency,
         browser_pool_size=scraper_browser_pool_size,
@@ -416,6 +521,8 @@ def run_location_full_harvest(
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
     pass2_per_variant: bool = True,
+    max_cells: int | None = DEFAULT_MAX_CELLS,
+    timeout_sec: int | None = None,
 ) -> LocationRunMetrics:
     """Grid + multi-query slow at centroid + optional fast ZIP top-up.
 
@@ -462,6 +569,8 @@ def run_location_full_harvest(
             "non-empty sequence of query variants"
         )
 
+    # Pass 1 is a grid, so it gets the same size check and derived timeout.
+    grid_timeout = _grid_preflight(bbox, cell_km, max_cells, timeout_sec)
     baseline_exportable = get_exportable_contact_count(export_destination)
     depths_run: list[int] = []
     # Pass 2's variant list is resolved inside the Pass 2 guard below, so an
@@ -477,6 +586,7 @@ def run_location_full_harvest(
         bbox=bbox,
         cell_km=cell_km,
         depth=3,
+        timeout_sec=grid_timeout,
         disable_proxy=disable_scraper_proxy,
         concurrency=scraper_concurrency,
         browser_pool_size=scraper_browser_pool_size,
@@ -682,6 +792,33 @@ def _build_parser() -> argparse.ArgumentParser:
             f"Grid cell size in km (default {DEFAULT_CELL_KM}). Must be > 0. "
             f"grid and full-harvest only; ignored under single-centroid, "
             f"which has no grid."
+        ),
+    )
+    parser.add_argument(
+        "--radius-km",
+        type=float,
+        default=None,
+        help=(
+            "Build the grid box as a square of this radius around the "
+            "location's centroid, instead of using Nominatim's administrative "
+            "bounding box. Preferred for anything multi-city: an admin box is "
+            "whatever the city boundary happens to be (San Jose's is 40.7 x "
+            "38.4 km, mostly exurban), so cell count — and therefore runtime "
+            "and cost — varies wildly between cities for no useful reason. "
+            "12 km approximates the dense core of a large US metro. "
+            "grid/full-harvest only; --bbox overrides it."
+        ),
+    )
+    parser.add_argument(
+        "--max-cells",
+        type=int,
+        default=DEFAULT_MAX_CELLS,
+        help=(
+            f"Refuse a grid sweep larger than this many cells (default "
+            f"{DEFAULT_MAX_CELLS}, ~{DEFAULT_MAX_CELLS * SECONDS_PER_CELL_PROXIED // 60} "
+            f"min). Cell count is what actually decides runtime; a default "
+            f"2km grid over a metro admin bbox is ~420 cells and will not "
+            f"finish. 0 disables the check."
         ),
     )
     parser.add_argument(
@@ -972,6 +1109,8 @@ def run_end_to_end_pipeline(
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
     pass2_per_variant: bool = True,
+    radius_km: float | None = None,
+    max_cells: int | None = DEFAULT_MAX_CELLS,
 ) -> None:
     """
     Orchestrate pipeline. Three strategies:
@@ -1034,7 +1173,24 @@ def run_end_to_end_pipeline(
         # Grid and full-harvest need a box; an explicit --bbox beats
         # Nominatim's. Both raise on None rather than degrading to a centroid
         # scrape — see run_location_grid.
-        effective_bbox = bbox if bbox is not None else geo_bbox
+        # Precedence: explicit --bbox, then --radius-km around the centroid,
+        # then Nominatim's admin box. The middle one is what makes a run
+        # reproducible across cities; see the grid-geometry notes above.
+        if bbox is not None:
+            effective_bbox = bbox
+        elif radius_km is not None and lat is not None and lon is not None:
+            effective_bbox = _bbox_from_radius(lat, lon, radius_km)
+            logger.info(
+                "Using a %.1f km radius box around (%.4f, %.4f) instead of "
+                "Nominatim's admin bbox.", radius_km, lat, lon,
+            )
+        else:
+            effective_bbox = geo_bbox
+            if radius_km is not None:
+                logger.warning(
+                    "--radius-km given but %r has no centroid; falling back "
+                    "to the Nominatim bbox.", location,
+                )
 
         if strategy == "grid":
             run_location_grid(
@@ -1049,6 +1205,7 @@ def run_end_to_end_pipeline(
                 scraper_pages_per_browser=scraper_pages_per_browser,
                 scraper_proxy_limit=scraper_proxy_limit,
                 scraper_disable_page_reuse=scraper_disable_page_reuse,
+                max_cells=max_cells,
             )
         elif strategy == "full-harvest":
             run_location_full_harvest(
@@ -1069,6 +1226,7 @@ def run_end_to_end_pipeline(
                 scraper_proxy_limit=scraper_proxy_limit,
                 scraper_disable_page_reuse=scraper_disable_page_reuse,
                 pass2_per_variant=pass2_per_variant,
+                max_cells=max_cells,
             )
         else:
             # single-centroid legacy — the only strategy that reads
@@ -1298,6 +1456,9 @@ def main() -> None:
         # legacy combined call. Irrelevant (Pass 2 doesn't run) for other
         # strategies, so it always resolves to the default there.
         pass2_per_variant=not (strategy == "full-harvest" and args.pass2_combined),
+        radius_km=args.radius_km,
+        # 0 means "no ceiling"; argparse can't express that as None.
+        max_cells=args.max_cells if args.max_cells else None,
     )
 
 

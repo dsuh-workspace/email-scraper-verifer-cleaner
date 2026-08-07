@@ -311,6 +311,7 @@ def execute_scrape_and_ingest(
     disable_page_reuse: bool = False,
     proxy_session_key: str | None = None,
     extract_email: bool | None = None,
+    timeout_sec: int | None = None,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -502,7 +503,11 @@ def execute_scrape_and_ingest(
         # legitimately take a while, but we never want a hung Playwright
         # instance to freeze the pipeline forever. Override via
         # SCRAPER_TIMEOUT_SEC env var if needed.
-        scraper_timeout = int(os.getenv("SCRAPER_TIMEOUT_SEC", "1800"))
+        # Explicit caller value wins, then the env override, then 30 min.
+        # Grid callers derive theirs from cell count (run_pipeline's
+        # `_grid_preflight`), because a fixed ceiling is meaningless when the
+        # sweep size varies by two orders of magnitude between cities.
+        scraper_timeout = timeout_sec or int(os.getenv("SCRAPER_TIMEOUT_SEC", "1800"))
         try:
             result = subprocess.run(
                 cmd,

@@ -365,6 +365,38 @@ python run_pipeline.py \
   --scraper-proxy-limit 6        # -> 6 browser contexts, 6 proxies
 ```
 
+#### Size the sweep with `--radius-km`, not the admin bbox
+
+Cell count decides everything — wall clock, bandwidth, block risk — and
+Nominatim gives you no control over it. An administrative bbox is whatever
+the city boundary happens to be: San Jose's is 40.7 x 38.4 km (~420 cells at
+2 km), while the hand-picked box behind the reference 362-business run was
+27 x 21 km at 3 km cells (72 cells). Same flags, two very different jobs.
+
+`--radius-km` replaces that with a number you choose, so a run is comparable
+across cities. **12 km at `--cell-km 3.0` reproduces the reference geometry
+exactly (72 cells)** and is a good default for a large US metro core:
+
+```bash
+python run_pipeline.py --query "Plumbing" --location "Austin, TX" \
+  --grid --radius-km 12 --cell-km 3.0 \
+  --scraper-concurrency 6 --scraper-pages-per-browser 1 --scraper-proxy-limit 6
+```
+
+Every grid run now logs a preflight before starting, and derives its timeout
+from cell count (~36 s/cell proxied, measured 2026-08-07) instead of the flat
+1800 s:
+
+```
+Grid preflight: 72 cells (24.0 x 24.0 km at 3.0 km), est. 43 min, timeout 2592s (derived).
+```
+
+`--max-cells` (default 200) refuses a sweep bigger than that up front rather
+than discovering it 30 minutes in — the default 2 km grid over San Jose's
+admin bbox is now rejected with the cell count and the estimate. Pass
+`--max-cells 0` to disable, or an explicit number to accept a large sweep.
+`SCRAPER_TIMEOUT_SEC` still overrides the derived timeout when set.
+
 Tightening the bbox with `--bbox` to the dense core also cuts cell count
 directly, which is what the reference experiment did.
 

@@ -26,6 +26,7 @@ Design notes
 import logging
 import os
 import re
+import socket
 import threading
 import time
 import urllib.parse
@@ -106,6 +107,11 @@ _HEADERS = {
 _host_locks: dict = {}
 _host_locks_guard = threading.Lock()
 
+# Resolved/unresolved verdicts per hostname. Bounded by the number of distinct
+# domains in one harvest, so no eviction policy is needed.
+_dns_cache: dict[str, bool] = {}
+_dns_cache_guard = threading.Lock()
+
 
 def _host_lock(host: str) -> threading.Lock:
     """Return a per-host lock so parallel workers on the same domain serialize."""
@@ -182,6 +188,44 @@ def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, st
     return proxies or None
 
 
+def _host_resolves(host: str) -> bool:
+    """DNS-check a host before spending any proxy requests on it.
+
+    Small-business domains lapse constantly, and a dead one used to cost ten
+    proxied requests (one per CONTACT_PATHS entry) plus ten politeness sleeps
+    before we gave up on it. Resolution happens from this machine, not through
+    the proxy, so a miss here is free.
+
+    Cached because the answer can't change within a run and `harvest` may see
+    the same host on several businesses (franchises share domains).
+
+    Only proves the name resolves — a parked domain resolves fine. The
+    homepage short-circuit in `_crawl_business` catches those.
+    """
+    host = (host or "").split(":")[0].lower()
+    if not host:
+        return False
+
+    with _dns_cache_guard:
+        cached = _dns_cache.get(host)
+    if cached is not None:
+        return cached
+
+    try:
+        socket.getaddrinfo(host, None)
+        resolved = True
+    except socket.gaierror:
+        resolved = False
+    except Exception:  # noqa: BLE001
+        # Anything unexpected: assume alive and let the fetch decide, rather
+        # than silently skipping a business over a resolver quirk.
+        resolved = True
+
+    with _dns_cache_guard:
+        _dns_cache[host] = resolved
+    return resolved
+
+
 def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[str]:
     """
     Fetch each path in CONTACT_PATHS in order, aggregating emails.
@@ -192,6 +236,17 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
     worth continuing past. If neither contact path ever hits, all ten paths
     are fetched.
 
+    Two cheap exits before that, both aimed at dead domains — which are the
+    dominant cost here, not slow ones. As of 2026-08-07 they accounted for
+    roughly 2,300 of ~2,500 failed proxy requests, because every dead host was
+    tried ten times:
+
+    1. The host must resolve at all (free, no proxy).
+    2. If the *homepage* fails to connect, the remaining nine paths are
+       skipped — they are on the same host, so they cannot do better. A
+       non-200 is different and does not trigger this: plenty of sites 404
+       their root while serving /contact fine.
+
     Serialized per-host via _host_lock so we don't hit the same server
     with parallel bursts.
     """
@@ -200,10 +255,14 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
     base = f"{parsed.scheme}://{parsed.netloc}"
     host = parsed.netloc.lower()
 
+    if not _host_resolves(host):
+        logger.debug("Skipping %s — host does not resolve.", host)
+        return []
+
     found: Set[str] = set()
     lock = _host_lock(host)
     with lock:
-        for path in CONTACT_PATHS:
+        for path_index, path in enumerate(CONTACT_PATHS):
             target = base + path
             try:
                 resp = requests.get(
@@ -221,6 +280,12 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
                     if path in ("/contact", "/contact-us"):
                         break
             except requests.RequestException:
+                if path_index == 0:
+                    # Homepage wouldn't connect. The other nine paths are the
+                    # same host, so they'd each burn a proxy request, a 7s
+                    # timeout and a politeness sleep to fail identically.
+                    logger.debug("Skipping %s — homepage unreachable.", host)
+                    return []
                 continue
             finally:
                 time.sleep(PER_HOST_DELAY_SEC)
