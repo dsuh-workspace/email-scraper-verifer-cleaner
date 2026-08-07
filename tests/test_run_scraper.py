@@ -472,3 +472,51 @@ class TestExecuteScrapeMultiQuery:
                 lon=-121.9,
                 concurrency=0,
             )
+
+
+class TestInlineEmailExtraction(TestExecuteScrapeGridCli):
+    """`-email` is off for grid and on elsewhere.
+
+    Upstream spawns a separate browser visit to each business's own website
+    for every place with a valid website (gmaps/place.go:132) and withholds
+    the place entry until that visit returns. Across a few hundred grid cells
+    that multiplied a San Jose sweep into a 1800s timeout with zero rows
+    written. The pipeline's own crawl covers the same ground afterwards.
+    """
+
+    def test_grid_mode_omits_email_flag(self, monkeypatch, tmp_path):
+        captured = []
+        self._stub_all(monkeypatch, captured)
+
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            bbox=(37.21, -122.05, 37.47, -121.75),
+            cell_km=2.0,
+        )
+
+        assert "-email" not in captured[0]
+        assert "-grid-bbox" in captured[0]
+
+    def test_single_centroid_keeps_email_flag(self, monkeypatch, tmp_path):
+        captured = []
+        self._stub_all(monkeypatch, captured)
+
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing", location="San Jose, CA", lat=37.3, lon=-121.9,
+        )
+
+        assert "-email" in captured[0]
+
+    def test_explicit_override_beats_the_grid_default(self, monkeypatch, tmp_path):
+        captured = []
+        self._stub_all(monkeypatch, captured)
+
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            bbox=(37.21, -122.05, 37.47, -121.75),
+            extract_email=True,
+        )
+
+        assert "-email" in captured[0]

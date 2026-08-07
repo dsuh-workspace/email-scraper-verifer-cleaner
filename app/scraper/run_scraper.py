@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import platform
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from app.scraper.block_detect import (
     STATUS_BLOCKED,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_TIMEOUT,
     classify_yield,
     detection_enabled,
     recent_yields,
@@ -236,6 +238,28 @@ def _scraper_proxy_args(
     return _format_proxy_cmd_args(proxies)
 
 
+def _preserve_results_file(results_file_path: str, scrape_run_id: int) -> str | None:
+    """Copy a killed run's partial output somewhere durable. Returns the path.
+
+    The `-results` target is a tempfile that the `finally` block removes, and
+    `subprocess.run(timeout=...)` throws away stdout/stderr, so without this
+    a timeout leaves no evidence at all of how far the sweep got. Best-effort
+    by design: failing to save a diagnostic must not mask the timeout itself.
+    """
+    try:
+        if not os.path.exists(results_file_path) or os.path.getsize(results_file_path) == 0:
+            logger.warning("Nothing to preserve — results file is empty or missing.")
+            return None
+        os.makedirs("logs", exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = os.path.join("logs", f"timeout_run{scrape_run_id}_{stamp}.json")
+        shutil.copyfile(results_file_path, dest)
+        return dest
+    except OSError as e:
+        logger.warning("Could not preserve partial results file: %s", e)
+        return None
+
+
 def geocode_location(location: str):
     """
     Geocodes a location string using Nominatim OpenStreetMap API.
@@ -286,6 +310,7 @@ def execute_scrape_and_ingest(
     proxy_limit: int | None = None,
     disable_page_reuse: bool = False,
     proxy_session_key: str | None = None,
+    extract_email: bool | None = None,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -322,6 +347,21 @@ def execute_scrape_and_ingest(
       - None (default) => True for single-centroid, False for grid.
       - True/False => explicit; caller responsible for compatibility
         (scraper rejects fast_mode=True + bbox).
+
+    extract_email override (upstream `-email`):
+      - None (default) => False for grid (bbox set), True otherwise.
+      - True/False => explicit.
+      Grid defaults off because upstream spawns one extra browser visit per
+      place with a website and withholds the place entry until that visit
+      returns, which multiplies across cells. The pipeline's own crawl
+      (`app/pipeline/extract_emails.py`) covers the same ground afterwards
+      with concurrency, per-host politeness, a retry ledger, and the shared
+      junk filter — none of which the scraper's inline pass has. With this
+      off, `raw_leads.email` is empty and emails arrive via that crawl.
+
+    On timeout the partial `-results` file is ingested rather than
+    discarded, and a copy is kept under `logs/`; the run is recorded as
+    `timeout` and the TimeoutExpired still propagates.
     """
     resolved_concurrency = _resolve_positive_int(
         concurrency if concurrency is not None else _env_positive_int("SCRAPER_CONCURRENCY"),
@@ -337,6 +377,9 @@ def execute_scrape_and_ingest(
     ) or 2
 
     session = Session()
+    # Set by the timeout branch so the tail knows to record a salvage rather
+    # than a clean completion, and so the outer handler doesn't relabel it.
+    timed_out: subprocess.TimeoutExpired | None = None
 
     # 1. Create a new ScrapeRun entry
     # Derive category from the query so non-HVAC/non-plumbing runs get
@@ -398,6 +441,19 @@ def execute_scrape_and_ingest(
                 "Scraper rejects the combination."
             )
 
+        # Inline email extraction: upstream spawns a *separate browser visit
+        # to each business's own website* for every place result whose website
+        # passes IsWebsiteValidForEmail (gmaps/place.go:132), and — critically
+        # — returns nil for the place entry, so nothing is emitted until that
+        # visit finishes. 93.8% of observed raw leads have a website, so this
+        # roughly doubles the browser work per result and gates all output
+        # behind it. Fine at one centroid; ruinous across a few hundred grid
+        # cells, where it turned a San Jose sweep into a 1800s timeout with
+        # zero rows written. Default off for grid, on elsewhere.
+        use_extract_email = (
+            extract_email if extract_email is not None else (bbox is None)
+        )
+
         cmd = [
             binary_path,
             "-input", query_file_path,
@@ -406,8 +462,9 @@ def execute_scrape_and_ingest(
             "-depth", str(depth),
             "-pages-per-browser", str(resolved_pages_per_browser),
             "-lang", lang,
-            "-email",
         ]
+        if use_extract_email:
+            cmd.append("-email")
         if resolved_concurrency is not None:
             cmd.extend(["-c", str(resolved_concurrency)])
         if resolved_browser_pool_size is not None:
@@ -455,14 +512,23 @@ def execute_scrape_and_ingest(
                 check=True,
                 timeout=scraper_timeout,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            # Don't throw away what it already wrote. The scraper streams
+            # results as jobs complete, so the file usually holds most of a
+            # long run; the old code deleted it in `finally` and ingested
+            # nothing, turning a 30-minute partial sweep into zero rows.
+            # subprocess.run() discards stdout/stderr on timeout, so the
+            # preserved file is the only forensic record of how far it got.
+            timed_out = exc
+            preserved_path = _preserve_results_file(results_file_path, scrape_run_id)
             logger.error(
-                "Scraper exceeded timeout of %ds and was killed.",
+                "Scraper exceeded timeout of %ds and was killed; salvaging "
+                "partial output%s.",
                 scraper_timeout,
+                f" (copy kept at {preserved_path})" if preserved_path else "",
             )
-            raise
-        
-        logger.info("Scraper finished running successfully.")
+        else:
+            logger.info("Scraper finished running successfully.")
         # 4. Read results and ingest into database
         ingested_count = 0
         if os.path.exists(results_file_path) and os.path.getsize(results_file_path) > 0:
@@ -472,7 +538,17 @@ def execute_scrape_and_ingest(
             # mode emits a JSON array. Handle both.
             leads_data = []
             if raw_text.startswith("["):
-                leads_data = json.loads(raw_text)
+                try:
+                    leads_data = json.loads(raw_text)
+                except json.JSONDecodeError as e:
+                    # A killed run can leave the array unterminated. Per-line
+                    # parsing below already tolerates a truncated tail; this
+                    # branch has to say so explicitly or the salvage path
+                    # raises on exactly the input it exists to handle.
+                    logger.warning(
+                        "Results file is a truncated JSON array (%s); "
+                        "no rows recoverable from it.", e,
+                    )
             else:
                 for line in raw_text.splitlines():
                     line = line.strip()
@@ -523,6 +599,22 @@ def execute_scrape_and_ingest(
         else:
             logger.warning("Scraper output file is empty or missing.")
 
+        if timed_out is not None:
+            # Record the salvage, then let the timeout propagate. Block
+            # detection is deliberately skipped: a truncated run's yield says
+            # nothing about the proxies, and scoring it would strike working
+            # ones for a wall-clock problem.
+            db_run.status = STATUS_TIMEOUT
+            db_run.completed_at = datetime.now(timezone.utc)
+            session.commit()
+            logger.warning(
+                "[%s] Scrape Run #%s marked %s — salvaged %d leads for %r in "
+                "%r before the kill.",
+                datetime.now(), scrape_run_id, STATUS_TIMEOUT,
+                ingested_count, query, location,
+            )
+            raise timed_out
+
         # Does this yield look blocked rather than just thin?
         block_reason = _assess_run_health(
             session,
@@ -545,10 +637,13 @@ def execute_scrape_and_ingest(
             logger.info(f"[{datetime.now()}] Completed Scrape Run #{scrape_run_id}.")
     except Exception as e:
         logger.error(f"Error during scrape/ingest: {e}")
-        # Log failure status to DB
-        db_run.status = STATUS_FAILED
-        db_run.completed_at = datetime.now(timezone.utc)
-        session.commit()
+        # The timeout branch above already recorded STATUS_TIMEOUT and
+        # committed its salvage; re-raising lands here, so don't overwrite
+        # that with 'failed' and lose the distinction.
+        if timed_out is None:
+            db_run.status = STATUS_FAILED
+            db_run.completed_at = datetime.now(timezone.utc)
+            session.commit()
         raise e
 
     finally:

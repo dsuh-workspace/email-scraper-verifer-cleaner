@@ -103,7 +103,10 @@ REACHER_TIMEOUT_SEC=30
 SCRAPER_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://proxy2.example.com:1080
 SCRAPER_PROXIES_FILE=proxies.txt
 # Optional scraper tuning defaults
-# SCRAPER_TIMEOUT_SEC=1800         # hard ceiling per scraper invocation (30 min)
+# SCRAPER_TIMEOUT_SEC=1800         # hard ceiling per scraper invocation (30 min).
+#                                  # On timeout, partial results are still
+#                                  # ingested and copied to logs/; the run is
+#                                  # recorded as status='timeout'.
 # SCRAPER_CONCURRENCY=3
 # SCRAPER_BROWSER_POOL_SIZE=       # leave unset; see "Scraper runtime knobs"
 # SCRAPER_PAGES_PER_BROWSER=1
@@ -364,6 +367,39 @@ python run_pipeline.py \
 
 Tightening the bbox with `--bbox` to the dense core also cuts cell count
 directly, which is what the reference experiment did.
+
+#### Inline email extraction is off for grid
+
+Upstream's `-email` flag spawns a **separate browser visit to each
+business's own website** for every place result that has one
+(`gmaps/place.go:132`), and withholds the place entry until that visit
+returns. 93.8% of observed raw leads have a website, so it roughly doubles
+the browser work per result — fine at one centroid, ruinous across a few
+hundred cells, where it turned a San Jose sweep into an 1800 s timeout with
+zero rows written.
+
+The wrapper now passes `-email` **only when not in grid mode**. For a grid
+run `raw_leads.email` will be empty; emails come from the pipeline's own
+crawl pass instead ([Crawl-attempt notes](#batch-zip-file-mode)), which
+does the same job with concurrency, per-host politeness, a retry ledger,
+and the shared junk filter. Force it either way with
+`execute_scrape_and_ingest(extract_email=True|False)`.
+
+#### If a run times out
+
+`SCRAPER_TIMEOUT_SEC` (default 1800) kills the subprocess. That is no
+longer a total loss — the scraper streams results as jobs complete, so the
+partial output is ingested, a copy is kept at
+`logs/timeout_run<ID>_<UTC>.json`, and the run is recorded as
+`scrape_runs.status = 'timeout'` (distinct from `failed`, and excluded from
+block-detection baselines). The `TimeoutExpired` still propagates, so the
+pipeline fails loudly.
+
+```bash
+sqlite3 database/hvac_leads.db \
+  "SELECT id, query, location, status FROM scrape_runs WHERE status='timeout';"
+ls logs/timeout_run*.json
+```
 
 One-time setup: run `./scripts/setup_scraper_playwright.sh` to install the
 Playwright driver + Chromium + FFmpeg (~265 MB). Also handles the

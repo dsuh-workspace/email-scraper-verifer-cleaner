@@ -48,7 +48,7 @@ outputs (see "Verification and export tail").
   variants and plumbing defaults to 2, based on recent San Jose reruns.
   The published "39% more than grid alone" figure predates both this
   pruning and the per-variant switch — treat it as historical until
-  re-measured (Open work #4).
+  re-measured (Open work #6).
 
 ### CLI validation
 
@@ -112,7 +112,7 @@ Consequences worth holding onto:
 - `--min-score` gates **only** `_verified`. The `_deduped` push — the one
   that reaches Sheets and marks contacts exported — is called with a
   hardcoded `min_score=0` (`export_sheets.py`). **Open question, not a
-  settled decision** (see Open work #5): before the three-file split
+  settled decision** (see Open work #7): before the three-file split
   (13f9b4b, 2026-08-02), `--min-score` gated `export_new_leads()` itself —
   the same function now reused for `_deduped` — so it gated the actual
   Sheets push (393a10c, 2026-07-21). The split hardcoded `min_score=0` at
@@ -170,6 +170,53 @@ Column semantics, env tuning, and the force-re-crawl SQL live in
 - `CRAWL_RETRY_AFTER_HOURS=0` and non-integer values are invalid and fall
   back to the 720-hour default rather than erroring.
 
+## Inline email extraction (`-email`)
+
+`execute_scrape_and_ingest(extract_email=...)`. **None (default) = off for
+grid (bbox set), on everywhere else**; True/False forces it.
+
+Upstream's `-email` is not a metadata flag. For every place result whose
+website passes `IsWebsiteValidForEmail`, `gmaps/place.go:132` spawns a
+separate browser visit to that business's own site — and returns `nil` for
+the place, so **nothing is emitted until that visit finishes**. 93.8% of
+observed raw leads have a website, so it roughly doubles browser work per
+result and gates all output behind it.
+
+Tolerable at one centroid. Across a few hundred grid cells it turned a San
+Jose sweep into an 1800s timeout with zero rows written (2026-08-07). Note
+the failure mode is *time*, not lost entries: `emailjob.go` returns the
+entry even when the website fetch errors, so only a killed process loses
+work.
+
+With it off, `raw_leads.email` is empty for that run and emails arrive via
+`app/pipeline/extract_emails.py` instead — which does the same job with
+concurrency, per-host politeness, the crawl-attempt ledger, and the shared
+junk filter, none of which the scraper's inline pass has.
+
+## Scrape timeouts
+
+`SCRAPER_TIMEOUT_SEC` (default 1800) kills the subprocess. On timeout the
+run now:
+
+- ingests whatever the scraper had already streamed to `-results`,
+- copies that file to `logs/timeout_run<ID>_<UTC>.json`,
+- records `scrape_runs.status = 'timeout'`,
+- re-raises `TimeoutExpired` so callers still fail loudly.
+
+`timeout` is a distinct status from `failed` so a wall-clock truncation
+isn't read as a crash, and like `blocked` it's excluded from
+`recent_yields()` — a truncated sweep must never become the baseline other
+runs are judged against. Block detection is skipped entirely for these: a
+truncated run's yield says nothing about the proxies, and scoring it would
+strike working ones for a wall-clock problem.
+
+Two limits worth knowing. `subprocess.run(timeout=)` discards stdout/stderr
+when it kills the process, so the preserved file is the only record of how
+far the sweep got — and it shows *what* was scraped, not *which cell* it
+reached (Open work #4). And single-centroid mode emits a JSON array rather
+than JSONL, so a killed one is unterminated and nothing is recoverable from
+it; the parser logs and continues rather than raising.
+
 ## Block detection, proxy cooldown, pacing
 
 Env vars and the operator-facing rules are in `README.md` ("Block detection
@@ -222,7 +269,20 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    rows from `MIN(raw_leads.scrape_run_id)`, so cohort queries stop needing the
    inference fallback described under "Settled decisions". Not done — queries
    are in `MAINTENANCE_SQL.md`.
-3. **Grid mode does not reproduce its published numbers — fix this first.**
+3. **Surface `--bbox` on `run_zip_batch.py`.** `run_pipeline.py` has it
+   (line ~688, parsed by `_parse_bbox`, overrides the Nominatim box for grid
+   and full-harvest Pass 1). The batch runner has no equivalent — it geocodes
+   each row and takes whatever bbox Nominatim returns, so there is no way to
+   tighten a batch row to its dense core. Cell count scales with bbox area,
+   so this is the batch-side version of the geometry half of #5.
+4. **Stream scraper progress instead of buffering it.**
+   `subprocess.run(..., timeout=)` discards stdout/stderr when it kills the
+   process, so a timed-out sweep leaves no record of which cell it reached.
+   Partial `-results` are now salvaged and copied to `logs/` (see "Scrape
+   timeouts"), which recovers the *leads* but not the *position*. Getting
+   that needs `Popen` plus a reader thread — deferred as the more invasive
+   half of the same problem.
+5. **Grid mode does not reproduce its published numbers.**
    Two runs on 2026-08-06 with shipped defaults (`--cell-km 2.0`, Nominatim
    bbox, proxies on) returned **10 and 4 businesses** for San Jose plumbing,
    in 7.6 and 6.3 min. The reference `Dt` experiment got 362 — but ran
@@ -240,11 +300,17 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
      core the experiment targeted, so default cell counts are ~6x higher
      with most cells in low-density areas.
 
-   Not yet established which dominates, or whether the 2026-08-06 scraper
-   rebuild (upstream `4676350`) contributes. Neither run was flagged
-   `blocked` — on a fresh DB the low-yield rule has no history to compare
-   against (see #4).
-4. **Re-measure full-harvest lift — blocked on #3.** The "39% more than grid
+   A third multiplier was found on 2026-08-07 and **is now fixed**: `-email`
+   was passed unconditionally, and upstream spawns a separate browser visit
+   to each business's own website per place result, withholding the place
+   entry until it returns (`gmaps/place.go:132`). 93.8% of observed raw
+   leads have a website, so grid was doing ~2 browser visits per result
+   across ~420 cells. `-email` now defaults off for grid — see "Inline email
+   extraction" below. Re-test #5 with that in place before digging further.
+
+   Neither of the two low-yield runs was flagged `blocked` — on a fresh DB
+   the low-yield rule has no history to compare against (see #6).
+6. **Re-measure full-harvest lift — blocked on #5.** The "39% more than grid
    alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) was
    measured with the 8-variant Pass 2 set **and** the combined Pass 2 call,
    both since changed, so it no longer describes what the code runs — and
@@ -252,7 +318,7 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    2026-08-06 attempt was invalid: Pass 1 is the denominator and it returned
    10 businesses, against Pass 2's 47 and Pass 3's 41. Procedure and the
    Pass 1 sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
-5. **Decide whether `_deduped` (the Sheets-bound export) should be gated
+7. **Decide whether `_deduped` (the Sheets-bound export) should be gated
    by `--min-score`.** It currently isn't — see "Verification and export
    tail" above. Before the three-file split (13f9b4b, 2026-08-02),
    `--min-score` gated the same function now backing `_deduped`, so score
