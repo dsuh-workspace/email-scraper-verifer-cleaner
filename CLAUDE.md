@@ -361,6 +361,14 @@ root-level `calculate_overlap.py` / `get_runtimes.py` could not run there):
 | `export_cohort.py` | Cohort-scoped CSV export. Side-effect free — does not touch `export_history`. |
 | `run_wallclock.py` | Active wall-clock time for a cohort, merging overlapping run intervals. |
 
+`scripts/webshare_usage.py` reports proxy bandwidth/requests for a time
+window (`--last-minutes N`, `--since/--until`, `--days N`), for bracketing a
+run to get a real per-city cost. Note Webshare's "requests" counts CONNECT
+tunnels, not HTTP requests, so bandwidth is the number to model on. Measured
+2026-08-07: a 30-min San Jose plumbing grid scrape (72 cells, ~89% complete)
+cost **163 MB**; the crawler is the opposite shape — many small fetches, and
+where nearly all the failures come from.
+
 `market_overlap.py` replaces `calculate_overlap.py`, which matched raw leads to
 businesses on `place_id` — a key the pipeline never uses for dedupe.
 
