@@ -270,6 +270,58 @@ after any real production run completes.
 
 For manual SQL evaluation of incremental yield and market overlap between runs, see `RUNBOOK_SQL_OVERLAP_ANALYSIS.md`.
 
+## Experiment queue
+
+Four open measurements, in dependency order. Each is a real scrape costing
+real proxy bandwidth, so run them deliberately and record results in
+`RUNS.md`. E1 and E2 share one run.
+
+**Before every one of these, check for orphans** (Open work #3):
+
+```bash
+pgrep -fl google-maps-scraper || echo "clean"
+```
+
+A stale scraper from a dead run keeps scraping for hours and silently
+contaminates every bandwidth and failure-rate number. One was found on
+2026-08-07 at 15h38m elapsed, having burned 2.0 GB at a 39% failure rate.
+
+Bracket each run with `scripts/webshare_usage.py` for the cost half.
+
+### E1 + E2 — clean baseline at reference geometry (one run)
+
+Does grid work now, and what does one city actually cost? `--radius-km 12
+--cell-km 3.0` reproduces the 2026-07-20 `Dt` geometry exactly (72 cells),
+so the yield is directly comparable to its **362 businesses**.
+
+Success: ~300+ unique businesses, `status='completed'` (not `timeout`),
+completing inside the derived 2592s. Anything in the tens means the fixes
+did not take and the remaining suspects are proxy quality and the
+`4676350` scraper rebuild. Closes Open work #6.
+
+### E3 — radius sweep for the yield/cost curve
+
+8 / 12 / 16 km at 3 km cells against one city and one vertical, on **three
+separate fresh DBs** so the runs don't dedupe against each other:
+
+| radius | cells | est. | derived timeout |
+|---|---|---|---|
+| 8 km | 36 | ~22 min | 1296s |
+| 12 km | 72 | ~43 min | 2592s |
+| 16 km | 121 | ~73 min | 4356s |
+
+Plot businesses per cell. Where marginal yield per cell collapses is the
+standard radius for every future city — the single most useful number for
+planning, since cell count drives runtime, bandwidth and block risk alike.
+
+### E4 — full-harvest lift (blocked on E1)
+
+The "39% more than grid alone" re-measurement. Procedure and the Pass 1
+sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11; the floor exists
+because the 2026-08-06 attempt reported +880% purely because Pass 1
+collapsed to 10 businesses. Do not start until E1 shows a healthy Pass 1.
+Closes Open work #7.
+
 ## Open work
 
 1. **`mock` SPREADSHEET_ID ordering (cosmetic).** `export_sheets.py:47`
@@ -303,7 +355,8 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    timeouts"), which recovers the *leads* but not the *position*. Getting
    that needs `Popen` plus a reader thread — deferred as the more invasive
    half of the same problem.
-6. **Grid mode does not reproduce its published numbers.**
+6. **Grid mode does not reproduce its published numbers.** Measured by E1
+   in the experiment queue above.
    Two runs on 2026-08-06 with shipped defaults (`--cell-km 2.0`, Nominatim
    bbox, proxies on) returned **10 and 4 businesses** for San Jose plumbing,
    in 7.6 and 6.3 min. The reference `Dt` experiment got 362 — but ran
@@ -331,7 +384,8 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
 
    Neither of the two low-yield runs was flagged `blocked` — on a fresh DB
    the low-yield rule has no history to compare against (see #7).
-7. **Re-measure full-harvest lift — blocked on #6.** The "39% more than grid
+7. **Re-measure full-harvest lift — blocked on #6.** Measured by E4 in the
+   experiment queue above. The "39% more than grid
    alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) was
    measured with the 8-variant Pass 2 set **and** the combined Pass 2 call,
    both since changed, so it no longer describes what the code runs — and
