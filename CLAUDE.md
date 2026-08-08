@@ -294,7 +294,39 @@ contaminates every bandwidth and failure-rate number. One was found on
 
 Bracket each run with `scripts/webshare_usage.py` for the cost half.
 
-### E1 + E2 — clean baseline at reference geometry (one run)
+### E1 + E2 — clean baseline at reference geometry — ✅ DONE 2026-08-08
+
+`--radius-km 12 --cell-km 3.0`, San Jose plumbing, `-c 6` / 6 proxies, no
+orphan running. **Grid is fixed.**
+
+| | Reference `Dt` (2026-07-20) | E1 (2026-08-08) |
+|---|---|---|
+| Businesses | 362 | **292** (81%) |
+| Status | completed | **completed** (not timeout) |
+| Scrape | 606 s, unproxied, `-c 1` | **204 s**, proxied, `-c 6` |
+| Proxy failure rate | n/a | **1.2%** (was ~17%) |
+
+Full pipeline 18.7 min / **209.9 MB** / 2,004 requests. Splits worth
+keeping:
+
+- **The scrape is 18% of wall clock; the crawl is 81%** (204 s vs ~917 s).
+  Optimisation effort belongs in `extract_emails.py`, not the scraper.
+- **2.8 s/cell** scraping — `SECONDS_PER_CELL_PROXIED` was set to 36 from a
+  measurement taken while an orphan was stealing proxy capacity; it is now
+  10, and `DEFAULT_MAX_CELLS` moved 200 → 500 because the old ceiling was
+  derived from that same bad number.
+- **~2.9 MB/cell all-in**, which is the real constraint on a big sweep now
+  that the scrape is cheap. Quoted in the preflight line.
+- Crawl hit rate **109/216 = 50%** of businesses with a website yielded an
+  email; 134 emails over 292 businesses (46% coverage).
+- The 1.2% failure rate is the dead-domain short-circuit landing — same
+  workload previously ran ~17%.
+
+Open gap: 292 vs 362 is 81%. Not explained. Candidates are proxy-side cell
+failures, three weeks of market drift, or a dedupe difference. Worth one
+repeat run before treating 292 as the ceiling.
+
+### E1 + E2 — original plan (superseded by the result above)
 
 Does grid work now, and what does one city actually cost? `--radius-km 12
 --cell-km 3.0` reproduces the 2026-07-20 `Dt` geometry exactly (72 cells),

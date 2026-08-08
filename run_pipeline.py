@@ -157,16 +157,28 @@ def _default_harvest_queries(query: str) -> tuple[str, ...] | None:
 # lottery with a number the operator chooses.
 KM_PER_DEG_LAT = 111.0
 
-# Seconds per cell, measured 2026-08-07: a 72-cell San Jose grid at -c 6
-# through 6 proxies reached ~89% in 1800s => ~28 s/cell. The same geometry
-# unproxied at -c 1 ran 8.4 s/cell, so proxy latency costs ~3.3x. Includes a
-# margin so a derived timeout doesn't sit exactly on the measured mean.
-SECONDS_PER_CELL_PROXIED = 36
+# Seconds per cell for the *scrape*, with ~3.5x margin. Clean measurement
+# 2026-08-08: 72 cells at -c 6 through 6 proxies, -email off, finished in
+# 204s => 2.8 s/cell.
+#
+# An earlier figure of ~28 s/cell was junk — a 15-hour orphaned scraper was
+# competing for the same six proxies the whole time (see Open work #3), which
+# is also what made the runs before it look like they were timing out on cell
+# count. Anything derived from a proxied measurement is worth re-taking after
+# `pgrep -f google-maps-scraper` comes back empty.
+SECONDS_PER_CELL_PROXIED = 10
+
+# Proxy bandwidth per cell, whole pipeline (scrape + crawl), from the same
+# run: 209.9 MB over 72 cells. Bandwidth — not wall clock — is what a large
+# sweep actually costs now that the scrape is fast, so the preflight quotes
+# it. Rough by nature: it moves with market density and website coverage.
+MB_PER_CELL_ESTIMATE = 2.9
 
 # Refuse a sweep bigger than this unless the operator raises it explicitly.
-# 200 cells is ~2h at the rate above; past that you almost certainly wanted a
-# tighter radius or a larger cell, not a longer night.
-DEFAULT_MAX_CELLS = 200
+# Was 200 when a cell was thought to cost 36s; at the real rate that ceiling
+# rejected sweeps that finish comfortably. 500 cells is ~83 min of derived
+# timeout and ~1.5 GB of proxy bandwidth — still worth an explicit "yes".
+DEFAULT_MAX_CELLS = 500
 
 
 def _bbox_from_radius(
@@ -227,13 +239,14 @@ def _grid_preflight(
 
     logger.info(
         "Grid preflight: %d cells (%.1f x %.1f km at %.1f km), "
-        "est. %d min, timeout %ds%s.",
+        "est. %d min / ~%.0f MB proxy, timeout %ds%s.",
         cells,
         (bbox[3] - bbox[1]) * KM_PER_DEG_LAT
         * math.cos(math.radians((bbox[0] + bbox[2]) / 2)),
         (bbox[2] - bbox[0]) * KM_PER_DEG_LAT,
         cell_km,
         round(cells * SECONDS_PER_CELL_PROXIED / 60),
+        cells * MB_PER_CELL_ESTIMATE,
         derived,
         " (SCRAPER_TIMEOUT_SEC)" if timeout_sec else " (derived)",
     )
