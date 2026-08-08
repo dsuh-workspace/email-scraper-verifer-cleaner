@@ -65,13 +65,28 @@ def _stub_timeout(monkeypatch, tmp_path, written: str):
         run_scraper, "geocode_location", lambda location: (37.3, -121.9, None)
     )
 
-    def fake_run(cmd, *args, **kwargs):
-        results_path = cmd[cmd.index("-results") + 1]
-        with open(results_path, "w", encoding="utf-8") as handle:
-            handle.write(written)
-        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1800))
+    class _FakePopen:
+        """Writes `written` to -results, then blocks until killed by the
+        timeout — pid is fake, so the process-group kill in
+        `_kill_scraper_process_group` best-effort no-ops on it, same as it
+        would against an already-reaped real process."""
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        def __init__(self, cmd, *args, **kwargs):
+            self.cmd = cmd
+            self.pid = 999999
+            self.returncode = None
+            results_path = cmd[cmd.index("-results") + 1]
+            with open(results_path, "w", encoding="utf-8") as handle:
+                handle.write(written)
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(self.cmd, timeout or 1800)
+
+        def wait(self, timeout=None):
+            self.returncode = -9
+            return self.returncode
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
 
 
 def _jsonl(leads) -> str:

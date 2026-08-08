@@ -4,6 +4,7 @@ import os
 import json
 import platform
 import shutil
+import signal
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -260,6 +261,71 @@ def _preserve_results_file(results_file_path: str, scrape_run_id: int) -> str | 
         return None
 
 
+def _warn_stale_scraper_processes(binary_path: str) -> None:
+    """Best-effort startup check for scraper processes left running by a
+    parent that died without cleanup (Ctrl-C, SIGKILL, crashed shell — see
+    CLAUDE.md Open work #3). Logs a warning only; never kills automatically,
+    since a hit could just as easily be a concurrent pipeline run and
+    killing on a guess would be worse than a stale bandwidth reading.
+    """
+    if platform.system() == "Windows":
+        return
+    binary_name = os.path.basename(binary_path)
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", binary_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            timeout=5,
+        )
+        pids = [p for p in result.stdout.split() if p]
+    except Exception as e:
+        # Genuinely best-effort: no pgrep, a sandboxed test double for the
+        # scraper's own Popen call intercepting this one too, anything. A
+        # diagnostic must never break the real scrape it's checking before.
+        logger.debug("Stale-process check skipped: %s", e)
+        return
+    if pids:
+        logger.warning(
+            "%d pre-existing %s process(es) found before starting this run "
+            "(PIDs: %s). Could be orphans from a killed pipeline still "
+            "burning proxy bandwidth (CLAUDE.md Open work #3) — verify with "
+            "`ps -p <pid>` before trusting any bandwidth measurement.",
+            len(pids), binary_name, ", ".join(pids),
+        )
+
+
+def _popen_group_kwargs() -> dict:
+    """Process-group kwargs so killing the scraper takes its Playwright /
+    Chromium grandchildren down with it, not just the Go binary's own pid.
+    POSIX: `start_new_session` makes the scraper a session leader, so
+    `os.killpg` reaches every descendant. Windows: `CREATE_NEW_PROCESS_GROUP`
+    is the closest equivalent, paired with CTRL_BREAK_EVENT below.
+    """
+    if platform.system() == "Windows":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _kill_scraper_process_group(proc: "subprocess.Popen") -> None:
+    """Kill the scraper's whole process group/tree, not just its direct pid.
+
+    Playwright spawns Chromium as a grandchild of the Go binary, so killing
+    only `proc.pid` (what `subprocess.run(timeout=)` / a bare `.kill()` do)
+    leaves the browser — and its bandwidth use — running after the parent
+    is gone. This is the fix for CLAUDE.md Open work #3. Best-effort: the
+    group may already be gone by the time we get here.
+    """
+    try:
+        if platform.system() == "Windows":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError) as e:
+        logger.debug("Scraper process group already gone: %s", e)
+
+
 def geocode_location(location: str):
     """
     Geocodes a location string using Nominatim OpenStreetMap API.
@@ -434,6 +500,8 @@ def execute_scrape_and_ingest(
                 f"and place it at that path (chmod +x on unix)."
             )
 
+        _warn_stale_scraper_processes(binary_path)
+
         # Resolve fast_mode: explicit param wins; else default True unless grid.
         use_fast_mode = fast_mode if fast_mode is not None else (bbox is None)
         if use_fast_mode and bbox is not None:
@@ -508,15 +576,19 @@ def execute_scrape_and_ingest(
         # `_grid_preflight`), because a fixed ceiling is meaningless when the
         # sweep size varies by two orders of magnitude between cities.
         scraper_timeout = timeout_sec or int(os.getenv("SCRAPER_TIMEOUT_SEC", "1800"))
+        # Popen (not subprocess.run) so we hold the pid and can kill the
+        # whole process group. subprocess.run's own timeout/exception
+        # handling only kills the direct child pid, leaving Playwright's
+        # Chromium grandchildren running as orphans — CLAUDE.md Open work #3.
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            **_popen_group_kwargs(),
+        )
         try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8",
-                check=True,
-                timeout=scraper_timeout,
-            )
+            stdout, stderr = proc.communicate(timeout=scraper_timeout)
         except subprocess.TimeoutExpired as exc:
             # Don't throw away what it already wrote. The scraper streams
             # results as jobs complete, so the file usually holds most of a
@@ -524,6 +596,8 @@ def execute_scrape_and_ingest(
             # nothing, turning a 30-minute partial sweep into zero rows.
             # subprocess.run() discards stdout/stderr on timeout, so the
             # preserved file is the only forensic record of how far it got.
+            _kill_scraper_process_group(proc)
+            proc.wait()
             timed_out = exc
             preserved_path = _preserve_results_file(results_file_path, scrape_run_id)
             logger.error(
@@ -532,7 +606,21 @@ def execute_scrape_and_ingest(
                 scraper_timeout,
                 f" (copy kept at {preserved_path})" if preserved_path else "",
             )
+        except BaseException:
+            # Ctrl-C, SIGTERM, or any other unwind while the scraper is
+            # running: kill its whole process group so Chromium doesn't
+            # outlive us (CLAUDE.md Open work #3). Can't help if *this*
+            # process itself gets SIGKILLed — nothing in Python runs then —
+            # but covers Ctrl-C and a parent that dies while still able to
+            # unwind.
+            _kill_scraper_process_group(proc)
+            proc.wait()
+            raise
         else:
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    proc.returncode, cmd, output=stdout, stderr=stderr,
+                )
             logger.info("Scraper finished running successfully.")
         # 4. Read results and ingest into database
         ingested_count = 0

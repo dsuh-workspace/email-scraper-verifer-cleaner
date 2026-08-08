@@ -172,14 +172,23 @@ class TestExecuteScrapeGridCli:
             lambda location: (None, None, None),
         )
 
-        # Capture subprocess call and skip the actual scraper.
-        class _Completed:
-            returncode = 0
-            stderr = ""
-        def fake_run(cmd, *args, **kwargs):
-            captured.append(cmd)
-            return _Completed()
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        # Capture the Popen call and skip the actual scraper. The stale-
+        # process check (_warn_stale_scraper_processes) also goes through
+        # subprocess.run -> Popen, so it hits this fake too; only the
+        # scraper invocation itself (identified by -results) is recorded.
+        class _FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                self.pid = 99999
+                self.returncode = 0
+                if "-results" in cmd:
+                    captured.append(cmd)
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def wait(self, timeout=None):
+                return self.returncode
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
 
         # Stub scraper binary path (skip real binary requirement) and short-
         # circuit the results-file exists check so parse block is skipped.
@@ -254,26 +263,35 @@ class TestExecuteScrapeMultiQuery:
             lambda location: (None, None, None),
         )
 
-        class _Completed:
-            returncode = 0
-            stderr = ""
-
-        # Capture cmd AND the query-file contents (subprocess.run picks the
-        # -input arg out of cmd, we snapshot it here before tmpfile is cleaned).
+        # Capture cmd AND the query-file contents (Popen picks the -input
+        # arg out of cmd, we snapshot it here before tmpfile is cleaned).
+        # The stale-process check also routes through subprocess.run ->
+        # Popen and hits this fake, so only the scraper invocation itself
+        # (identified by -results) is recorded.
         real_open = open
-        def fake_run(cmd, *args, **kwargs):
-            captured.append(cmd)
-            # cmd is [binary, "-input", <path>, "-results", ...]
-            try:
-                idx = cmd.index("-input")
-                query_path = cmd[idx + 1]
-                with real_open(query_path, "r", encoding="utf-8") as f:
-                    query_files.append(f.read())
-            except (ValueError, FileNotFoundError):
-                query_files.append(None)
-            return _Completed()
+        class _FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                self.pid = 99999
+                self.returncode = 0
+                if "-results" not in cmd:
+                    return
+                captured.append(cmd)
+                # cmd is [binary, "-input", <path>, "-results", ...]
+                try:
+                    idx = cmd.index("-input")
+                    query_path = cmd[idx + 1]
+                    with real_open(query_path, "r", encoding="utf-8") as f:
+                        query_files.append(f.read())
+                except (ValueError, FileNotFoundError):
+                    query_files.append(None)
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def wait(self, timeout=None):
+                return self.returncode
         import subprocess as _sp
-        monkeypatch.setattr(_sp, "run", fake_run)
+        monkeypatch.setattr(_sp, "Popen", _FakePopen)
 
         monkeypatch.setattr(run_scraper, "_scraper_binary_path", lambda: "/tmp/fake-scraper-bin")
         import os as _os
