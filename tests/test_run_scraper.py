@@ -1,3 +1,4 @@
+import io
 import subprocess
 from pathlib import Path
 
@@ -180,6 +181,8 @@ class TestExecuteScrapeGridCli:
             def __init__(self, cmd, *args, **kwargs):
                 self.pid = 99999
                 self.returncode = 0
+                self.stdout = io.StringIO("")
+                self.stderr = io.StringIO("")
                 if "-results" in cmd:
                     captured.append(cmd)
 
@@ -273,6 +276,8 @@ class TestExecuteScrapeMultiQuery:
             def __init__(self, cmd, *args, **kwargs):
                 self.pid = 99999
                 self.returncode = 0
+                self.stdout = io.StringIO("")
+                self.stderr = io.StringIO("")
                 if "-results" not in cmd:
                     return
                 captured.append(cmd)

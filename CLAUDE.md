@@ -48,7 +48,7 @@ outputs (see "Verification and export tail").
   variants and plumbing defaults to 2, based on recent San Jose reruns.
   The published "39% more than grid alone" figure predates both this
   pruning and the per-variant switch — treat it as historical until
-  re-measured (Open work #6).
+  re-measured (Open work #5).
 
 ### CLI validation
 
@@ -112,7 +112,7 @@ Consequences worth holding onto:
 - `--min-score` gates **only** `_verified`. The `_deduped` push — the one
   that reaches Sheets and marks contacts exported — is called with a
   hardcoded `min_score=0` (`export_sheets.py`). **Open question, not a
-  settled decision** (see Open work #7): before the three-file split
+  settled decision** (see Open work #6): before the three-file split
   (13f9b4b, 2026-08-02), `--min-score` gated `export_new_leads()` itself —
   the same function now reused for `_deduped` — so it gated the actual
   Sheets push (393a10c, 2026-07-21). The split hardcoded `min_score=0` at
@@ -200,6 +200,8 @@ run now:
 
 - ingests whatever the scraper had already streamed to `-results`,
 - copies that file to `logs/timeout_run<ID>_<UTC>.json`,
+- copies the scraper's streamed stdout/stderr log to
+  `logs/timeout_run<ID>_<UTC>.log`,
 - records `scrape_runs.status = 'timeout'`,
 - **continues the pipeline** if anything was salvaged — dedupe, crawl and
   export still run over what the sweep paid for. Re-raising here discarded
@@ -222,12 +224,20 @@ runs are judged against. Block detection is skipped entirely for these: a
 truncated run's yield says nothing about the proxies, and scoring it would
 strike working ones for a wall-clock problem.
 
-Two limits worth knowing. The `communicate(timeout=)` call discards
-stdout/stderr when it kills the process, so the preserved file is the only
-record of how far the sweep got — and it shows *what* was scraped, not
-*which cell* it reached (Open work #4). And single-centroid mode emits a JSON array rather
+One limit worth knowing: single-centroid mode emits a JSON array rather
 than JSONL, so a killed one is unterminated and nothing is recoverable from
 it; the parser logs and continues rather than raising.
+
+The other former gap — the preserved `-results` file shows *what* was
+scraped but said nothing about *which cell* the scraper was on when
+killed — is closed (was Open work #4, see CHANGELOG 2026-08-07):
+`execute_scrape_and_ingest()` no longer buffers stdout/stderr for a final
+`communicate()`. Two background threads (`_PipeStreamer`) drain the pipes
+as the scraper runs, writing every line to `logs/timeout_run<ID>_<UTC>.log`
+as it arrives, so the log's tail is the closest thing to a position marker
+a timeout leaves behind. This also lets the main thread wait with
+`proc.wait(timeout=)` instead of `communicate(timeout=)`, without risking
+the pipe-fills-up deadlock `communicate()` exists to avoid.
 
 ## Block detection, proxy cooldown, pacing
 
@@ -294,7 +304,39 @@ contaminates every bandwidth and failure-rate number. One was found on
 
 Bracket each run with `scripts/webshare_usage.py` for the cost half.
 
-### E1 + E2 — clean baseline at reference geometry (one run)
+### E1 + E2 — clean baseline at reference geometry — ✅ DONE 2026-08-08
+
+`--radius-km 12 --cell-km 3.0`, San Jose plumbing, `-c 6` / 6 proxies, no
+orphan running. **Grid is fixed.**
+
+| | Reference `Dt` (2026-07-20) | E1 (2026-08-08) |
+|---|---|---|
+| Businesses | 362 | **292** (81%) |
+| Status | completed | **completed** (not timeout) |
+| Scrape | 606 s, unproxied, `-c 1` | **204 s**, proxied, `-c 6` |
+| Proxy failure rate | n/a | **1.2%** (was ~17%) |
+
+Full pipeline 18.7 min / **209.9 MB** / 2,004 requests. Splits worth
+keeping:
+
+- **The scrape is 18% of wall clock; the crawl is 81%** (204 s vs ~917 s).
+  Optimisation effort belongs in `extract_emails.py`, not the scraper.
+- **2.8 s/cell** scraping — `SECONDS_PER_CELL_PROXIED` was set to 36 from a
+  measurement taken while an orphan was stealing proxy capacity; it is now
+  10, and `DEFAULT_MAX_CELLS` moved 200 → 500 because the old ceiling was
+  derived from that same bad number.
+- **~2.9 MB/cell all-in**, which is the real constraint on a big sweep now
+  that the scrape is cheap. Quoted in the preflight line.
+- Crawl hit rate **109/216 = 50%** of businesses with a website yielded an
+  email; 134 emails over 292 businesses (46% coverage).
+- The 1.2% failure rate is the dead-domain short-circuit landing — same
+  workload previously ran ~17%.
+
+Open gap: 292 vs 362 is 81%. Not explained. Candidates are proxy-side cell
+failures, three weeks of market drift, or a dedupe difference. Worth one
+repeat run before treating 292 as the ceiling.
+
+### E1 + E2 — original plan (superseded by the result above)
 
 Does grid work now, and what does one city actually cost? `--radius-km 12
 --cell-km 3.0` reproduces the 2026-07-20 `Dt` geometry exactly (72 cells),
@@ -303,9 +345,50 @@ so the yield is directly comparable to its **362 businesses**.
 Success: ~300+ unique businesses, `status='completed'` (not `timeout`),
 completing inside the derived 2592s. Anything in the tens means the fixes
 did not take and the remaining suspects are proxy quality and the
-`4676350` scraper rebuild. Closes Open work #5.
+`4676350` scraper rebuild. Closes Open work #4.
 
-### E3 — radius sweep for the yield/cost curve
+### E3 — radius sweep — ✅ DONE 2026-08-08. **Standard radius = 12 km.**
+
+San Jose plumbing, `--cell-km 3.0`, three fresh DBs:
+
+| radius | cells | businesses | biz/cell | **marginal biz/cell** | scrape |
+|---|---|---|---|---|---|
+| 8 km | 36 | 214 | 5.94 | 5.94 | 107 s |
+| 12 km | 72 | 330 | 4.58 | **3.22** | 204 s |
+| 16 km | 121 | 348 | 2.88 | **0.37** | 255 s |
+
+Marginal yield collapses **8.7x** between 12 and 16 km. Going 12 → 16 costs
++49 cells (+68%) to gain 18 businesses (+5.5%). **12 km is the knee — use it
+as the default radius for a large US metro** unless a specific market argues
+otherwise. Re-run this sweep once for a genuinely different city shape
+(dense/vertical, or very spread out) before assuming it transfers.
+
+Two things this also settled:
+
+- **The 292-vs-362 gap from E1 was mostly radius.** 16 km reached 348, 96%
+  of the reference. Not a defect.
+- **Run-to-run variance is ~13%**, higher than advertised: E1 and the E3
+  12 km run are the identical config and returned 292 vs 330. The 2026-07-20
+  writeup called grid "nearly deterministic (96% overlap)". Treat a single
+  run's count as ±15%, and don't read a small lift as signal.
+
+Scrape time held at ~2.1–3.0 s/cell across all three, so
+`SECONDS_PER_CELL_PROXIED = 10` keeps a comfortable margin.
+
+#### Measuring bandwidth: do not sum adjacent windows
+
+The four runs summed to 1,537 MB when each was measured in its own
+back-to-back window, but **930.6 MB** when measured as one window covering
+all of them. Webshare's aggregate endpoint buckets, so short adjacent
+windows double-count and mis-attribute — the 16 km run appeared to use less
+bandwidth than the 8 km one while crawling 89 more sites, which is
+impossible.
+
+Use one window over the whole session, or leave a gap between runs. From
+the trustworthy figure: **~0.79 MB per business, ~1.06 MB per site crawled,
+~3.1 MB per cell all-in** → a 12 km city-vertical costs roughly **260 MB**.
+
+### E3 — original plan (superseded by the result above)
 
 8 / 12 / 16 km at 3 km cells against one city and one vertical, on **three
 separate fresh DBs** so the runs don't dedupe against each other:
@@ -326,7 +409,7 @@ The "39% more than grid alone" re-measurement. Procedure and the Pass 1
 sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11; the floor exists
 because the 2026-08-06 attempt reported +880% purely because Pass 1
 collapsed to 10 businesses. Do not start until E1 shows a healthy Pass 1.
-Closes Open work #6.
+Closes Open work #5.
 
 ## Open work
 
@@ -345,14 +428,7 @@ Closes Open work #6.
    each row and takes whatever bbox Nominatim returns, so there is no way to
    tighten a batch row to its dense core. Cell count scales with bbox area,
    so this is the batch-side version of the geometry half of #4.
-4. **Stream scraper progress instead of buffering it.**
-   The `communicate(timeout=)` call discards stdout/stderr when it kills the
-   process, so a timed-out sweep leaves no record of which cell it reached.
-   Partial `-results` are now salvaged and copied to `logs/` (see "Scrape
-   timeouts"), which recovers the *leads* but not the *position*. Getting
-   that needs a reader thread on the (now already-`Popen`) subprocess —
-   deferred as the more invasive half of the same problem.
-5. **Grid mode does not reproduce its published numbers.** Measured by E1
+4. **Grid mode does not reproduce its published numbers.** Measured by E1
    in the experiment queue above.
    Two runs on 2026-08-06 with shipped defaults (`--cell-km 2.0`, Nominatim
    bbox, proxies on) returned **10 and 4 businesses** for San Jose plumbing,
@@ -377,11 +453,11 @@ Closes Open work #6.
    entry until it returns (`gmaps/place.go:132`). 93.8% of observed raw
    leads have a website, so grid was doing ~2 browser visits per result
    across ~420 cells. `-email` now defaults off for grid — see "Inline email
-   extraction" below. Re-test #5 with that in place before digging further.
+   extraction" below. Re-test #4 with that in place before digging further.
 
    Neither of the two low-yield runs was flagged `blocked` — on a fresh DB
-   the low-yield rule has no history to compare against (see #6).
-6. **Re-measure full-harvest lift — blocked on #5.** Measured by E4 in the
+   the low-yield rule has no history to compare against (see #5).
+5. **Re-measure full-harvest lift — blocked on #4.** Measured by E4 in the
    experiment queue above. The "39% more than grid
    alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) was
    measured with the 8-variant Pass 2 set **and** the combined Pass 2 call,
@@ -390,7 +466,7 @@ Closes Open work #6.
    2026-08-06 attempt was invalid: Pass 1 is the denominator and it returned
    10 businesses, against Pass 2's 47 and Pass 3's 41. Procedure and the
    Pass 1 sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
-7. **Decide whether `_deduped` (the Sheets-bound export) should be gated
+6. **Decide whether `_deduped` (the Sheets-bound export) should be gated
    by `--min-score`.** It currently isn't — see "Verification and export
    tail" above. Before the three-file split (13f9b4b, 2026-08-02),
    `--min-score` gated the same function now backing `_deduped`, so score

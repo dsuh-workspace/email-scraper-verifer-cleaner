@@ -17,6 +17,7 @@ sweep on 2026-08-07. With nothing recovered it propagates, so an empty run
 never passes for a thin market.
 """
 
+import io
 import json
 import subprocess
 
@@ -69,20 +70,32 @@ def _stub_timeout(monkeypatch, tmp_path, written: str):
         """Writes `written` to -results, then blocks until killed by the
         timeout — pid is fake, so the process-group kill in
         `_kill_scraper_process_group` best-effort no-ops on it, same as it
-        would against an already-reaped real process."""
+        would against an already-reaped real process.
+
+        `wait()` is what the scraper invocation itself now uses (was
+        `communicate()` pre-Popen-streaming); `communicate()` stays as a
+        harmless no-op since the stale-process pgrep check still routes
+        through `subprocess.run()`, which calls it internally.
+        """
 
         def __init__(self, cmd, *args, **kwargs):
             self.cmd = cmd
             self.pid = 999999
             self.returncode = None
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+            self._waited_once = False
             results_path = cmd[cmd.index("-results") + 1]
             with open(results_path, "w", encoding="utf-8") as handle:
                 handle.write(written)
 
         def communicate(self, timeout=None):
-            raise subprocess.TimeoutExpired(self.cmd, timeout or 1800)
+            return ("", "")
 
         def wait(self, timeout=None):
+            if not self._waited_once:
+                self._waited_once = True
+                raise subprocess.TimeoutExpired(self.cmd, timeout or 1800)
             self.returncode = -9
             return self.returncode
 

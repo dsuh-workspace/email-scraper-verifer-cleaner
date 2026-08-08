@@ -8,6 +8,8 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+from collections import deque
 from datetime import datetime, timezone
 
 from geopy.geocoders import Nominatim
@@ -262,6 +264,89 @@ def _preserve_results_file(results_file_path: str, scrape_run_id: int) -> str | 
         return None
 
 
+def _preserve_scraper_log(log_path: str, scrape_run_id: int) -> str | None:
+    """Copy a killed run's streamed stdout/stderr log somewhere durable.
+
+    `_preserve_results_file` recovers *what* got scraped from `-results`,
+    but that file only ever holds finished leads — it says nothing about
+    where in a grid sweep the scraper was when it got killed. This log is
+    written line-by-line as the scraper runs (see `_PipeStreamer`), so its
+    tail is the closest thing to a position marker we have. CLAUDE.md Open
+    work #4. Best-effort by design, same as its results-file sibling.
+    """
+    try:
+        if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+            logger.warning("Nothing to preserve — scraper log is empty or missing.")
+            return None
+        os.makedirs("logs", exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = os.path.join("logs", f"timeout_run{scrape_run_id}_{stamp}.log")
+        shutil.copyfile(log_path, dest)
+        return dest
+    except OSError as e:
+        logger.warning("Could not preserve scraper log: %s", e)
+        return None
+
+
+class _PipeStreamer:
+    """Drains a subprocess pipe in a background thread instead of buffering
+    it all in memory for a final `communicate()`.
+
+    Two things this earns us:
+
+    - `proc.wait(timeout=)` can be used instead of `proc.communicate(timeout=)`
+      without risking the classic deadlock (child blocks writing once its
+      stdout/stderr pipe fills, parent blocks waiting for exit) — the
+      threads keep the pipes drained the whole time.
+    - Every line the scraper prints lands on disk as it's produced, so a
+      killed run's log always has its most recent lines. `-results` only
+      ever holds *finished* leads and says nothing about which grid cell
+      the scraper was on when it died; the stdout/stderr tail is what
+      actually shows position. CLAUDE.md Open work #4.
+
+    Only the last `tail_lines` are kept in memory (for `CalledProcessError`
+    messages); the full stream goes to `log_handle`.
+    """
+
+    def __init__(self, pipe, log_handle, label: str, tail_lines: int = 200):
+        self._pipe = pipe
+        self._log_handle = log_handle
+        self._label = label
+        self._tail: deque[str] = deque(maxlen=tail_lines)
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> "_PipeStreamer":
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        try:
+            for line in iter(self._pipe.readline, ""):
+                if not line:
+                    break
+                with self._lock:
+                    self._tail.append(line)
+                try:
+                    self._log_handle.write(f"[{self._label}] {line}")
+                    self._log_handle.flush()
+                except (OSError, ValueError):
+                    # Handle closed out from under us — nothing to do.
+                    pass
+        finally:
+            try:
+                self._pipe.close()
+            except OSError:
+                pass
+
+    def join(self, timeout: float = 5) -> None:
+        self._thread.join(timeout)
+
+    def tail_text(self) -> str:
+        with self._lock:
+            return "".join(self._tail)
+
+
 def _warn_stale_scraper_processes(binary_path: str) -> None:
     """Best-effort startup check for scraper processes left running by a
     parent that died without cleanup (Ctrl-C, SIGKILL, crashed shell — see
@@ -471,11 +556,14 @@ def execute_scrape_and_ingest(
         if geocoded_lat is not None and geocoded_lon is not None:
             lat, lon = geocoded_lat, geocoded_lon
 
-    # 2. Set up temporary files for query and results
-    # Use temporary files so we don't pollute the workspace
+    # 2. Set up temporary files for query, results, and the streamed
+    # stdout/stderr log (see _PipeStreamer). Use temporary files so we
+    # don't pollute the workspace.
     fd_query, query_file_path = tempfile.mkstemp(suffix=".txt", prefix="query_")
     fd_results, results_file_path = tempfile.mkstemp(suffix=".json", prefix="results_")
-    
+    fd_scraper_log, scraper_log_path = tempfile.mkstemp(suffix=".log", prefix="scraperlog_")
+    os.close(fd_scraper_log)
+
     try:
         # Resolve query list. Multi-query mode passes several queries in one
         # input file so the scraper reuses its browser context across them.
@@ -588,41 +676,57 @@ def execute_scrape_and_ingest(
             encoding="utf-8",
             **_popen_group_kwargs(),
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=scraper_timeout)
-        except subprocess.TimeoutExpired as exc:
-            # Don't throw away what it already wrote. The scraper streams
-            # results as jobs complete, so the file usually holds most of a
-            # long run; the old code deleted it in `finally` and ingested
-            # nothing, turning a 30-minute partial sweep into zero rows.
-            # subprocess.run() discards stdout/stderr on timeout, so the
-            # preserved file is the only forensic record of how far it got.
-            _kill_scraper_process_group(proc)
-            proc.wait()
-            timed_out = exc
-            preserved_path = _preserve_results_file(results_file_path, scrape_run_id)
-            logger.error(
-                "Scraper exceeded timeout of %ds and was killed; salvaging "
-                "partial output%s.",
-                scraper_timeout,
-                f" (copy kept at {preserved_path})" if preserved_path else "",
-            )
-        except BaseException:
-            # Ctrl-C, SIGTERM, or any other unwind while the scraper is
-            # running: kill its whole process group so Chromium doesn't
-            # outlive us (CLAUDE.md Open work #3). Can't help if *this*
-            # process itself gets SIGKILLed — nothing in Python runs then —
-            # but covers Ctrl-C and a parent that dies while still able to
-            # unwind.
-            _kill_scraper_process_group(proc)
-            proc.wait()
-            raise
-        else:
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    proc.returncode, cmd, output=stdout, stderr=stderr,
+        # Drain stdout/stderr in background threads rather than buffering
+        # them for a final communicate() — lets us use proc.wait(timeout=)
+        # without deadlocking on a full pipe, and means the log on disk
+        # always has the scraper's most recent lines even if it's killed
+        # mid-run. CLAUDE.md Open work #4.
+        with open(scraper_log_path, "a", encoding="utf-8") as scraper_log_handle:
+            stdout_streamer = _PipeStreamer(proc.stdout, scraper_log_handle, "OUT").start()
+            stderr_streamer = _PipeStreamer(proc.stderr, scraper_log_handle, "ERR").start()
+            try:
+                proc.wait(timeout=scraper_timeout)
+            except subprocess.TimeoutExpired as exc:
+                # Don't throw away what it already wrote. The scraper streams
+                # results as jobs complete, so the file usually holds most of a
+                # long run; the old code deleted it in `finally` and ingested
+                # nothing, turning a 30-minute partial sweep into zero rows.
+                _kill_scraper_process_group(proc)
+                proc.wait()
+                stdout_streamer.join()
+                stderr_streamer.join()
+                timed_out = exc
+                preserved_results_path = _preserve_results_file(results_file_path, scrape_run_id)
+                preserved_log_path = _preserve_scraper_log(scraper_log_path, scrape_run_id)
+                logger.error(
+                    "Scraper exceeded timeout of %ds and was killed; salvaging "
+                    "partial output%s%s.",
+                    scraper_timeout,
+                    f" (results copy at {preserved_results_path})" if preserved_results_path else "",
+                    f" (log copy at {preserved_log_path})" if preserved_log_path else "",
                 )
-            logger.info("Scraper finished running successfully.")
+            except BaseException:
+                # Ctrl-C, SIGTERM, or any other unwind while the scraper is
+                # running: kill its whole process group so Chromium doesn't
+                # outlive us (CLAUDE.md Open work #3). Can't help if *this*
+                # process itself gets SIGKILLed — nothing in Python runs then —
+                # but covers Ctrl-C and a parent that dies while still able to
+                # unwind.
+                _kill_scraper_process_group(proc)
+                proc.wait()
+                stdout_streamer.join()
+                stderr_streamer.join()
+                raise
+            else:
+                stdout_streamer.join()
+                stderr_streamer.join()
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        proc.returncode, cmd,
+                        output=stdout_streamer.tail_text(),
+                        stderr=stderr_streamer.tail_text(),
+                    )
+                logger.info("Scraper finished running successfully.")
         # 4. Read results and ingest into database
         ingested_count = 0
         if os.path.exists(results_file_path) and os.path.getsize(results_file_path) > 0:
@@ -760,7 +864,7 @@ def execute_scrape_and_ingest(
 
     finally:
         # Clean up temp files
-        for path in (query_file_path, results_file_path):
+        for path in (query_file_path, results_file_path, scraper_log_path):
             try:
                 if os.path.exists(path):
                     os.remove(path)
