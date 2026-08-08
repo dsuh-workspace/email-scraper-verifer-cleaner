@@ -6,6 +6,7 @@ through `execute_scrape_and_ingest`: scraper output -> ingest -> yield verdict
 and the history query are exercised for real.
 """
 
+import io
 import json
 
 import pytest
@@ -67,6 +68,8 @@ def _stub_scraper(monkeypatch, tmp_path, leads: list[dict]):
         def __init__(self, cmd, *args, **kwargs):
             self.pid = 99999
             self.returncode = 0
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
             if "-results" not in cmd:
                 # The stale-process check also routes through
                 # subprocess.run -> Popen and hits this fake.

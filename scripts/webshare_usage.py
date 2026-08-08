@@ -16,6 +16,11 @@ to bracket a real run. Two ways to use it:
 
 Reads WEBSHARE_API_KEY from .env. The key is never printed, and this only
 calls the read-only stats endpoint.
+
+CAVEAT: the endpoint buckets, so short back-to-back windows double-count and
+mis-attribute. Four runs on 2026-08-08 summed to 1,537 MB measured
+individually but 931 MB measured as one window. Bracket a whole session, or
+leave a gap between runs.
 """
 
 import argparse

@@ -25,6 +25,34 @@ file is the dated record.
   `test_block_detection_integration.py` updated to fake `subprocess.Popen`
   instead of `subprocess.run`. Suite: 287 passed. Remaining Open work items
   renumbered: old #4→3, #5→4, #6→5, #7→6, #8→7.
+- ✨ **Scraper progress now streams to disk instead of being buffered** (was
+  `CLAUDE.md` open work #4). `execute_scrape_and_ingest()` no longer calls
+  `proc.communicate(timeout=)`, which held the scraper's entire
+  stdout/stderr in memory and threw it all away on a timeout kill. Two
+  background threads (`_PipeStreamer`, one per pipe) drain stdout/stderr as
+  the scraper runs, writing each line to a tempfile immediately (flushed
+  per line) and keeping only the last 200 lines per stream in memory for
+  `CalledProcessError` messages. On timeout the file is copied to
+  `logs/timeout_run<ID>_<UTC>.log` (`_preserve_scraper_log()`, mirroring
+  the existing `-results` preservation) — its tail is the closest thing to
+  a position marker a killed grid sweep leaves behind, closing the gap the
+  `-results` salvage alone couldn't: that file only ever holds *finished*
+  leads, never which cell the scraper was on when killed. Draining the
+  pipes continuously also lets the main thread wait via
+  `proc.wait(timeout=)` instead of `communicate(timeout=)`, without
+  reintroducing the classic full-pipe deadlock `communicate()` exists to
+  avoid. Verified against a real (non-mocked) subprocess: a 2s-timeout run
+  against a script that sleeps mid-sweep preserved both the partial
+  `-results` lead and a two-line progress log, killed the whole process
+  group (no orphaned child survived), and returned in ~2.05s. Tests in
+  `test_run_scraper.py`, `test_timeout_salvage.py`,
+  `test_block_detection_integration.py` updated: fake `Popen`s now expose
+  `.stdout`/`.stderr` (empty `io.StringIO`) and use `.wait()` for the
+  scraper-call path, keeping `.communicate()` as a no-op since the Open
+  work #3 stale-process `pgrep` check still routes through
+  `subprocess.run()`, which calls it internally. Suite: 287 passed (no new
+  tests — existing coverage adapted). Remaining Open work items renumbered:
+  old #5→4, #6→5, #7→6.
 
 ## 2026-08-06
 
