@@ -192,8 +192,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Only include contacts with verifier score >= N in the verified CSV. "
-            "Deduped export behavior is unchanged."
+            "Only include contacts with verifier score >= N in the _verified "
+            "CSV. The _deduped export and export_history are not gated. NOTE: "
+            "this runner has no --verify flag, so unless a previous run "
+            "verified these contacts they all score 0 and any N > 0 yields an "
+            "empty _verified file. Verify separately with "
+            "'python -m app.pipeline.verify_emails', then re-run the export."
         ),
     )
     parser.add_argument(
@@ -201,9 +205,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Path for the local CSV export fallback (used only if Sheets "
-            "export fails or SPREADSHEET_ID is unset/mock). Defaults to a "
-            "descriptive 'data/leads_<query>_<date>.csv' covering the whole "
+            "Base path for the three CSVs the batch writes at the end "
+            "(<base>_all / _deduped / _verified — see export_run_outputs). "
+            "Defaults to 'data/leads_<query>_<date>.csv' covering the whole "
             "batch (no single location, since a batch spans many rows)."
         ),
     )

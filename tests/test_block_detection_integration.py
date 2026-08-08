@@ -63,18 +63,26 @@ def _stub_scraper(monkeypatch, tmp_path, leads: list[dict]):
         run_scraper, "geocode_location", lambda location: (37.3, -121.9, None)
     )
 
-    class _Completed:
-        returncode = 0
-        stderr = ""
+    class _FakePopen:
+        def __init__(self, cmd, *args, **kwargs):
+            self.pid = 99999
+            self.returncode = 0
+            if "-results" not in cmd:
+                # The stale-process check also routes through
+                # subprocess.run -> Popen and hits this fake.
+                return
+            results_path = cmd[cmd.index("-results") + 1]
+            with open(results_path, "w", encoding="utf-8") as handle:
+                json.dump(leads, handle)
 
-    def fake_run(cmd, *args, **kwargs):
-        results_path = cmd[cmd.index("-results") + 1]
-        with open(results_path, "w", encoding="utf-8") as handle:
-            json.dump(leads, handle)
-        return _Completed()
+        def communicate(self, timeout=None):
+            return ("", "")
+
+        def wait(self, timeout=None):
+            return self.returncode
 
     import subprocess as _sp
-    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr(_sp, "Popen", _FakePopen)
 
 
 def _run(query="Plumbing", location="San Jose, CA"):

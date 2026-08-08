@@ -4,6 +4,56 @@ Shipped changes, closed review items, and archived history that no longer
 belongs in `CLAUDE.md`. `CLAUDE.md` is the current operator guide; this
 file is the dated record.
 
+## 2026-08-07
+
+- 🐛 **Orphaned scraper processes no longer outlive a killed parent** (was
+  `CLAUDE.md` open work #3). `execute_scrape_and_ingest()` switched from
+  `subprocess.run()` to `subprocess.Popen()` started in its own process
+  group (`start_new_session=True` on POSIX, `CREATE_NEW_PROCESS_GROUP` on
+  Windows). On timeout, Ctrl-C, or any other exception while the scraper is
+  running, `_kill_scraper_process_group()` kills the whole group
+  (`os.killpg`), not just the Go binary's own pid — the previous code only
+  ever killed the direct child, leaving Playwright's Chromium grandchildren
+  running and burning proxy bandwidth after the pipeline had died (2.0 GB
+  at a 39% failure rate, found 2026-08-07). This can't help if the parent
+  Python process itself gets `SIGKILL`ed — nothing in it runs then — only
+  Ctrl-C and exceptions the process can still unwind through. `execute_
+  scrape_and_ingest()` also now logs (not kills) any pre-existing
+  `google-maps-scraper` process via `pgrep -f` before starting, so a stale
+  orphan surfaces immediately instead of only being found by chance later.
+  Tests in `test_run_scraper.py`, `test_timeout_salvage.py`,
+  `test_block_detection_integration.py` updated to fake `subprocess.Popen`
+  instead of `subprocess.run`. Suite: 287 passed. Remaining Open work items
+  renumbered: old #4→3, #5→4, #6→5, #7→6, #8→7.
+
+## 2026-08-06
+
+- ✅ **`export_new_leads()` / `export_run_outputs()` gain an optional
+  `run_cohort_start` param** (was `CLAUDE.md` open work #4). Filters on
+  `businesses.first_scrape_run_id >= run_cohort_start`, reaching all three
+  output files — including `_all`, previously unscoped by design.
+  `scripts/analysis/export_cohort.py` (its docstring names the incident
+  this closes: 76/166 of a supposedly-Sunnyvale/Santa-Clara cohort export
+  turned out to be San Jose) remains the tool for historical cohorts, since
+  it also falls back to `MIN(raw_leads.scrape_run_id)` for NULL-provenance
+  businesses; the new parameter does not. Neither CLI wires it to a flag
+  yet — call the functions directly. Tests in `TestRunCohortFilter`.
+- ♻️ **`_scraper_proxy_args()` collapsed into the production cmd-building
+  path** (was `CLAUDE.md` open work #6). It and `execute_scrape_and_ingest`
+  each formatted a selected proxy list into the upstream `-proxies` flag
+  separately; the formatting step is now one function,
+  `_format_proxy_cmd_args()`, called from both. `_scraper_proxy_args()`
+  keeps its existing signature (selection + formatting) for its test/smoke-
+  script callers. New test asserts the two paths produce identical flags
+  for the same session key.
+- 📄 **Provenance-fields guidance moved from Open work to Settled decisions**
+  (was `CLAUDE.md` open work #2). `scripts/analysis/market_overlap.py`
+  already implemented both halves of it — provenance-first with a
+  `MIN(raw_leads.scrape_run_id)` fallback for NULL businesses — so it was
+  describing current behavior, not a pending task. The still-open half (the
+  backfill that would let cohort queries drop the fallback) stays in Open
+  work, renumbered to #2.
+
 ## 2026-08-05
 
 - ✨ **Block detection, proxy cooldown, sticky proxies, and pacing.** Neither

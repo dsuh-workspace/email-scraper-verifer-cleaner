@@ -5,8 +5,17 @@ Stages:
     1. Scrape Google Maps → raw_leads
     2. Clean/dedupe → businesses + contacts
     3. Crawl business websites → email contacts
-    4. Loop 1-3 at increasing scraper depth until min_contacts hit
-    5. Export new leads to Sheets (or CSV fallback)
+    4. Optionally verify emails via Reacher (--verify)
+    5. Export via export_run_outputs() → three CSVs (all/deduped/verified)
+
+How stages 1-3 are driven depends on --strategy:
+
+    single-centroid  loop 1-3 at increasing depth until min_contacts hit
+    grid             one bbox-cell scrape, then a single 2-3 pass
+    full-harvest     grid pass + per-variant centroid pass + optional ZIP
+                     top-up, then a single 2-3 pass
+
+Only single-centroid loops, and only it reads min_contacts/max_depth.
 """
 
 from __future__ import annotations
@@ -45,9 +54,16 @@ DEFAULT_MAX_DEPTH = 20
 # against this constant — which only works while it stays the argparse default.
 DEFAULT_CELL_KM = 2.0
 
-# Default query variants for full-harvest multi-query pass. Chosen from the
-# 2026-07-20 SJ experiment — "Leak repair" alone added 50 unique businesses
-# no other query surfaced, so the list favors breadth over redundancy.
+# Default query variants for the full-harvest multi-query pass (plumbing).
+# Pruned from the original 8-variant breadth-over-redundancy set — which came
+# from the 2026-07-20 SJ experiment, where "Leak repair" alone added 50 unique
+# businesses — down to these 2 after the same per-variant lift table that
+# pruned the HVAC set below. Everything else contributed ~0 net-new businesses
+# over Pass 1's grid.
+#
+# NOTE: the "39% more than grid alone" figure quoted elsewhere was measured on
+# the old 8-variant set *and* the old combined Pass 2 call. It has not been
+# re-measured against these defaults — see CLAUDE.md "Open work".
 DEFAULT_HARVEST_QUERIES = (
     "Plumbing",
     "Plumber",
@@ -59,8 +75,9 @@ DEFAULT_HARVEST_QUERIES = (
 # "Furnace repair", "AC installation", "Heat pump service", and "Ductwork"
 # each contributed ~0 net-new businesses over Pass 1 grid + the other
 # variants — only "Heating and cooling" and "HVAC contractor" surfaced real
-# incremental lift. "HVAC" is kept as the anchor/base query. See CLAUDE.md
-# ("Pass 2 combined-query underperformance") for the full root-cause writeup.
+# incremental lift. "HVAC" is kept as the anchor/base query. The root-cause
+# writeup for why the diagnostic had to run per-variant is in
+# run_location_full_harvest's docstring below.
 DEFAULT_HVAC_HARVEST_QUERIES = (
     "HVAC",
     "Heating and cooling",
@@ -130,6 +147,107 @@ def _default_harvest_queries(query: str) -> tuple[str, ...] | None:
     if hvac:
         return DEFAULT_HVAC_HARVEST_QUERIES
     return None
+
+
+# --- grid geometry -------------------------------------------------------
+# Cell count is the master variable for a grid sweep: wall clock, bandwidth
+# and block risk all scale with it, and it is the one thing Nominatim gives
+# you no control over. An admin bbox is whatever the city's boundary happens
+# to be — San Jose's is 40.7 x 38.4 km of mostly exurban sprawl, while the
+# hand-picked box that produced the reference 362-business run was 27 x 21 km
+# of dense core. Same flag, wildly different jobs. `--radius-km` replaces that
+# lottery with a number the operator chooses.
+KM_PER_DEG_LAT = 111.0
+
+# Seconds per cell, measured 2026-08-07: a 72-cell San Jose grid at -c 6
+# through 6 proxies reached ~89% in 1800s => ~28 s/cell. The same geometry
+# unproxied at -c 1 ran 8.4 s/cell, so proxy latency costs ~3.3x. Includes a
+# margin so a derived timeout doesn't sit exactly on the measured mean.
+SECONDS_PER_CELL_PROXIED = 36
+
+# Refuse a sweep bigger than this unless the operator raises it explicitly.
+# 200 cells is ~2h at the rate above; past that you almost certainly wanted a
+# tighter radius or a larger cell, not a longer night.
+DEFAULT_MAX_CELLS = 200
+
+
+def _bbox_from_radius(
+    lat: float, lon: float, radius_km: float
+) -> tuple[float, float, float, float]:
+    """Square bbox of `radius_km` around a centroid, as (min_lat, min_lon,
+    max_lat, max_lon).
+
+    Longitude degrees shrink with latitude, so the lon half-width is divided
+    by cos(lat) — without that the box is noticeably narrow in the north.
+    """
+    import math
+
+    if radius_km <= 0:
+        raise ValueError(f"radius_km must be > 0, got {radius_km}")
+
+    d_lat = radius_km / KM_PER_DEG_LAT
+    # cos() guarded so a pole-adjacent centroid can't divide by ~0.
+    d_lon = radius_km / (KM_PER_DEG_LAT * max(math.cos(math.radians(lat)), 0.01))
+    return (lat - d_lat, lon - d_lon, lat + d_lat, lon + d_lon)
+
+
+def estimate_grid_cells(
+    bbox: tuple[float, float, float, float], cell_km: float
+) -> int:
+    """How many cells the scraper will iterate for this bbox at this size.
+
+    Mirrors the vendored scraper's own layout closely enough to plan with —
+    it is a bound to reason about, not a contract with the binary.
+    """
+    import math
+
+    min_lat, min_lon, max_lat, max_lon = bbox
+    mid_lat = (min_lat + max_lat) / 2
+    height_km = (max_lat - min_lat) * KM_PER_DEG_LAT
+    width_km = (max_lon - min_lon) * KM_PER_DEG_LAT * math.cos(math.radians(mid_lat))
+    return max(1, math.ceil(width_km / cell_km) * math.ceil(height_km / cell_km))
+
+
+def _grid_preflight(
+    bbox: tuple[float, float, float, float],
+    cell_km: float,
+    max_cells: int | None,
+    timeout_sec: int | None,
+) -> int:
+    """Log the size of a grid sweep before starting it, and derive a timeout.
+
+    Every grid failure so far has been the same shape: a sweep far too large
+    for its window, discovered 30 minutes in. The numbers to catch that are
+    all knowable up front.
+
+    Returns the timeout to use. Raises if the sweep exceeds `max_cells`.
+    """
+    import math
+
+    cells = estimate_grid_cells(bbox, cell_km)
+    derived = timeout_sec or cells * SECONDS_PER_CELL_PROXIED
+
+    logger.info(
+        "Grid preflight: %d cells (%.1f x %.1f km at %.1f km), "
+        "est. %d min, timeout %ds%s.",
+        cells,
+        (bbox[3] - bbox[1]) * KM_PER_DEG_LAT
+        * math.cos(math.radians((bbox[0] + bbox[2]) / 2)),
+        (bbox[2] - bbox[0]) * KM_PER_DEG_LAT,
+        cell_km,
+        round(cells * SECONDS_PER_CELL_PROXIED / 60),
+        derived,
+        " (SCRAPER_TIMEOUT_SEC)" if timeout_sec else " (derived)",
+    )
+
+    if max_cells is not None and cells > max_cells:
+        raise ValueError(
+            f"Grid would iterate {cells} cells, over the {max_cells}-cell "
+            f"limit (~{round(cells * SECONDS_PER_CELL_PROXIED / 60)} min). "
+            f"Raise --cell-km, shrink --radius-km/--bbox, or pass "
+            f"--max-cells {cells} to accept it."
+        )
+    return derived
 
 
 @dataclass(frozen=True)
@@ -340,6 +458,8 @@ def run_location_grid(
     scraper_pages_per_browser: int | None = None,
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
+    max_cells: int | None = DEFAULT_MAX_CELLS,
+    timeout_sec: int | None = None,
 ) -> LocationRunMetrics:
     """Grid-scrape one location's bounding box. One scrape, no depth loop.
 
@@ -354,6 +474,7 @@ def run_location_grid(
             f"for {location!r} and no --bbox override was supplied."
         )
 
+    grid_timeout = _grid_preflight(bbox, cell_km, max_cells, timeout_sec)
     baseline_exportable = get_exportable_contact_count(export_destination)
 
     logger.info("--- Grid scrape (bbox=%s cell_km=%.2f) ---", bbox, cell_km)
@@ -363,6 +484,7 @@ def run_location_grid(
         bbox=bbox,
         cell_km=cell_km,
         depth=3,
+        timeout_sec=grid_timeout,
         disable_proxy=disable_scraper_proxy,
         concurrency=scraper_concurrency,
         browser_pool_size=scraper_browser_pool_size,
@@ -401,6 +523,8 @@ def run_location_full_harvest(
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
     pass2_per_variant: bool = True,
+    max_cells: int | None = DEFAULT_MAX_CELLS,
+    timeout_sec: int | None = None,
 ) -> LocationRunMetrics:
     """Grid + multi-query slow at centroid + optional fast ZIP top-up.
 
@@ -425,8 +549,9 @@ def run_location_full_harvest(
     feed-parse has already claimed them — regardless of whether that sibling
     "should" get credit. Empirically (SJ HVAC, 2026-08-01/02): one combined
     8-variant call yielded 4 raw leads total; the same 8 variants run
-    separately yielded 81. See CLAUDE.md ("Pass 2 combined-query
-    underperformance") for the full source-level writeup and why this isn't
+    separately yielded 81. `app/scraper/run_scraper.py`'s
+    `execute_scrape_and_ingest` docstring carries the same finding from the
+    scraper side, including why grid mode is unaffected and why this isn't
     being patched upstream. Costs roughly len(variants)x Pass 2 wall time
     since separate invocations can't reuse one browser context — pass
     `pass2_per_variant=False` (CLI: `--pass2-combined`) to opt back into the
@@ -446,6 +571,8 @@ def run_location_full_harvest(
             "non-empty sequence of query variants"
         )
 
+    # Pass 1 is a grid, so it gets the same size check and derived timeout.
+    grid_timeout = _grid_preflight(bbox, cell_km, max_cells, timeout_sec)
     baseline_exportable = get_exportable_contact_count(export_destination)
     depths_run: list[int] = []
     # Pass 2's variant list is resolved inside the Pass 2 guard below, so an
@@ -461,6 +588,7 @@ def run_location_full_harvest(
         bbox=bbox,
         cell_km=cell_km,
         depth=3,
+        timeout_sec=grid_timeout,
         disable_proxy=disable_scraper_proxy,
         concurrency=scraper_concurrency,
         browser_pool_size=scraper_browser_pool_size,
@@ -649,8 +777,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Use native grid-mode scraping (JS-mode, requires Playwright). "
-            "One scrape iterates cells over the location's bounding box. "
-            "Empirically 4-25x higher coverage than single-centroid mode."
+            "One scrape iterates cells over the location's bounding box. The "
+            "published '4-25x higher coverage than single-centroid' figure "
+            "was measured unproxied over a hand-picked tight bbox at 3km "
+            "cells; with proxies on and a Nominatim bbox it does not "
+            "reproduce. See README 'Grid mode and proxy binding' — the "
+            "default browser pool is one context, so every cell shares one "
+            "proxy."
         ),
     )
     parser.add_argument(
@@ -659,7 +792,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CELL_KM,
         help=(
             f"Grid cell size in km (default {DEFAULT_CELL_KM}). Must be > 0. "
-            f"Ignored without --grid."
+            f"grid and full-harvest only; ignored under single-centroid, "
+            f"which has no grid."
+        ),
+    )
+    parser.add_argument(
+        "--radius-km",
+        type=float,
+        default=None,
+        help=(
+            "Build the grid box as a square of this radius around the "
+            "location's centroid, instead of using Nominatim's administrative "
+            "bounding box. Preferred for anything multi-city: an admin box is "
+            "whatever the city boundary happens to be (San Jose's is 40.7 x "
+            "38.4 km, mostly exurban), so cell count — and therefore runtime "
+            "and cost — varies wildly between cities for no useful reason. "
+            "12 km approximates the dense core of a large US metro. "
+            "grid/full-harvest only; --bbox overrides it."
+        ),
+    )
+    parser.add_argument(
+        "--max-cells",
+        type=int,
+        default=DEFAULT_MAX_CELLS,
+        help=(
+            f"Refuse a grid sweep larger than this many cells (default "
+            f"{DEFAULT_MAX_CELLS}, ~{DEFAULT_MAX_CELLS * SECONDS_PER_CELL_PROXIED // 60} "
+            f"min). Cell count is what actually decides runtime; a default "
+            f"2km grid over a metro admin bbox is ~420 cells and will not "
+            f"finish. 0 disables the check."
         ),
     )
     parser.add_argument(
@@ -667,8 +828,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Explicit bounding box 'min_lat,min_lon,max_lat,max_lon' for "
-            "grid mode. Overrides Nominatim-derived bbox. Ignored without --grid."
+            "Explicit bounding box 'min_lat,min_lon,max_lat,max_lon'. "
+            "Overrides the Nominatim-derived bbox. Used by grid and "
+            "full-harvest (Pass 1); ignored under single-centroid."
         ),
     )
     parser.add_argument(
@@ -693,7 +855,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Scrape strategy. 'single-centroid' (legacy depth loop), "
             "'grid' (== --grid), 'full-harvest' (grid + multi-query slow + "
-            "fast ZIP top-up; empirically 39%% more coverage than grid alone). "
+            "fast ZIP top-up; measured at 39%% more coverage than grid alone "
+            "in 2026-07, but on the since-pruned 8-variant set — not "
+            "re-measured against current defaults). "
             "Defaults to 'grid' if --grid set, else 'single-centroid'."
         ),
     )
@@ -702,10 +866,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Comma-separated query variants for the multi-query pass "
-            "(full-harvest strategy only). Defaults to the 8-variant set matching "
-"--query's vertical (plumbing or HVAC). Required when --query names "
-"neither vertical, or names both — one vertical per run."
+            f"Comma-separated query variants for the multi-query pass "
+            f"(full-harvest strategy only). Defaults to the built-in set "
+            f"matching --query's vertical: "
+            f"{len(DEFAULT_HARVEST_QUERIES)} variants for plumbing "
+            f"({', '.join(DEFAULT_HARVEST_QUERIES)}), "
+            f"{len(DEFAULT_HVAC_HARVEST_QUERIES)} for HVAC "
+            f"({', '.join(DEFAULT_HVAC_HARVEST_QUERIES)}). Required when "
+            f"--query names neither vertical, or names both — one vertical "
+            f"per run."
         ),
     )
     parser.add_argument(
@@ -791,11 +960,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Only export contacts whose latest EmailVerification.score is >= N. "
-            "0 (default) exports everything. Reacher scoring (see "
-            "_SCORE_BY_STATUS in app/pipeline/verify_emails.py): safe=95, "
-            "risky=50, unknown=25, invalid=10. Contacts with no verification "
-            "row are treated as score=0 and skipped when min-score > 0."
+            "Gates the _verified CSV ONLY: it keeps one best contact per "
+            "business whose latest EmailVerification.score is >= N. The "
+            "_deduped CSV and the export_history/Sheets push are NOT gated "
+            "and still carry every unexported contact regardless of score. "
+            "0 (default) means the _verified file is unfiltered. Reacher "
+            "scoring (_SCORE_BY_STATUS in app/pipeline/verify_emails.py): "
+            "safe=95, risky=50, unknown=25, invalid=10. Contacts with no "
+            "verification row are treated as score=0 and dropped from "
+            "_verified when min-score > 0."
         ),
     )
     parser.add_argument(
@@ -803,9 +976,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Path for the local CSV export fallback (used only if Sheets "
-            "export fails or SPREADSHEET_ID is unset/mock). Defaults to a "
-            "descriptive 'data/leads_<location>_<query>_<date>.csv'."
+            "Base path for the three CSVs this run writes: <base>_all.csv "
+            "(every contact in the DB, appended each run), <base>_deduped.csv "
+            "(contacts not yet in export_history — the Sheets fallback, and "
+            "the only one that stamps export_history), and "
+            "<base>_verified.csv (best contact per business clearing "
+            "--min-score). _all and _verified are always written locally and "
+            "never go to Sheets. Defaults to "
+            "'data/leads_<location>_<query>_<date>.csv'."
         ),
     )
     return parser
@@ -873,6 +1051,62 @@ def _default_csv_path(query: str, location: str | None = None) -> str:
     return f"data/{'_'.join(parts)}.csv"
 
 
+def _latest_scrape_run_id() -> int:
+    """Highest `scrape_runs.id` right now, or 0 if that can't be read.
+
+    Deferred imports, and never raises: this only feeds the closing summary,
+    so it must not be able to fail a pipeline that otherwise worked. Same
+    stance as `run_scraper._assess_run_health`.
+    """
+    try:
+        from sqlalchemy import func
+
+        from app.db.create_tables import ScrapeRun
+
+        session = Session()
+        try:
+            return session.query(func.max(ScrapeRun.id)).scalar() or 0
+        finally:
+            session.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not read the scrape-run marker (%s).", e)
+        return 0
+
+
+def _timed_out_runs_since(marker_id: int) -> list[tuple[int, str, str]]:
+    """(id, query, location) for runs after `marker_id` that were truncated.
+
+    A timed-out scrape now salvages its partial output and lets the pipeline
+    continue (see `execute_scrape_and_ingest`), which is what makes a
+    30-minute sweep worth something — but it also means a partial run would
+    otherwise end in the same "PIPELINE EXECUTED SUCCESSFULLY" banner as a
+    complete one. This is how the closing summary tells them apart.
+
+    Best-effort for the same reason as `_latest_scrape_run_id`.
+    """
+    try:
+        from app.db.create_tables import ScrapeRun
+        from app.scraper.block_detect import STATUS_TIMEOUT
+
+        session = Session()
+        try:
+            return [
+                (row.id, row.query, row.location)
+                for row in session.query(ScrapeRun)
+                .filter(
+                    ScrapeRun.id > marker_id,
+                    ScrapeRun.status == STATUS_TIMEOUT,
+                )
+                .order_by(ScrapeRun.id)
+                .all()
+            ]
+        finally:
+            session.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not check for truncated runs (%s).", e)
+        return []
+
+
 def run_end_to_end_pipeline(
     query: str,
     location: str,
@@ -896,6 +1130,8 @@ def run_end_to_end_pipeline(
     scraper_proxy_limit: int | None = None,
     scraper_disable_page_reuse: bool = False,
     pass2_per_variant: bool = True,
+    radius_km: float | None = None,
+    max_cells: int | None = DEFAULT_MAX_CELLS,
 ) -> None:
     """
     Orchestrate pipeline. Three strategies:
@@ -903,11 +1139,18 @@ def run_end_to_end_pipeline(
     - single-centroid (legacy): loop at increasing depths until
       min_contacts hit or max_depth reached.
     - grid: one scrape iterates cells over the location's bounding box
-      (Nominatim-derived, or explicit `bbox` arg). No depth loop. Grid+d3
-      is empirically 4-25x richer than a curated ZIP sweep.
+      (Nominatim-derived, or explicit `bbox` arg). No depth loop. The
+      "4-25x richer than a curated ZIP sweep" figure was measured
+      unproxied over a hand-picked tight bbox at 3km cells (72 cells); a
+      default proxied run over a Nominatim bbox at 2km (~420 cells for
+      San Jose) did not reproduce it — 10 and 4 businesses on 2026-08-06.
+      See README, "Grid mode and proxy binding".
     - full-harvest: grid + multi-query slow at centroid + optional fast
-      ZIP top-up. Empirically 39% more coverage than grid alone
-      (SJ 2026-07-20: grid=362, +multi-query=473, +fast-ZIP=504).
+      ZIP top-up. Measured at 39% more coverage than grid alone
+      (SJ 2026-07-20: grid=362, +multi-query=473, +fast-ZIP=504) — but that
+      run used the 8-variant Pass 2 set and the combined call, both since
+      changed, and the 2026-08-06 re-measurement was invalidated by the
+      grid baseline above. Treat the figure as historical.
 
     `min_contacts` / `max_depth` gate the single-centroid depth loop only;
     grid and full-harvest ignore them, so non-single-centroid callers should
@@ -920,6 +1163,11 @@ def run_end_to_end_pipeline(
     variant as its own scrape, tagged separately in scrape_runs, instead of
     one combined multi-query call. See run_location_full_harvest docstring
     for why this is the default rather than a diagnostic opt-in.
+
+    Whatever the strategy, the tail is the same: optional `verify`, then
+    `export_run_outputs()`, which writes three CSVs (all / deduped /
+    verified). `min_score` gates only the verified one — see that function
+    and the `--min-score` help for what that does and does not filter.
     """
     setup_logging()
 
@@ -936,6 +1184,7 @@ def run_end_to_end_pipeline(
     logger.info("=" * 60)
 
     init_db()
+    run_marker_id = _latest_scrape_run_id()
 
     try:
         lat, lon, geo_bbox = geocode_location(location)
@@ -945,7 +1194,24 @@ def run_end_to_end_pipeline(
         # Grid and full-harvest need a box; an explicit --bbox beats
         # Nominatim's. Both raise on None rather than degrading to a centroid
         # scrape — see run_location_grid.
-        effective_bbox = bbox if bbox is not None else geo_bbox
+        # Precedence: explicit --bbox, then --radius-km around the centroid,
+        # then Nominatim's admin box. The middle one is what makes a run
+        # reproducible across cities; see the grid-geometry notes above.
+        if bbox is not None:
+            effective_bbox = bbox
+        elif radius_km is not None and lat is not None and lon is not None:
+            effective_bbox = _bbox_from_radius(lat, lon, radius_km)
+            logger.info(
+                "Using a %.1f km radius box around (%.4f, %.4f) instead of "
+                "Nominatim's admin bbox.", radius_km, lat, lon,
+            )
+        else:
+            effective_bbox = geo_bbox
+            if radius_km is not None:
+                logger.warning(
+                    "--radius-km given but %r has no centroid; falling back "
+                    "to the Nominatim bbox.", location,
+                )
 
         if strategy == "grid":
             run_location_grid(
@@ -960,6 +1226,7 @@ def run_end_to_end_pipeline(
                 scraper_pages_per_browser=scraper_pages_per_browser,
                 scraper_proxy_limit=scraper_proxy_limit,
                 scraper_disable_page_reuse=scraper_disable_page_reuse,
+                max_cells=max_cells,
             )
         elif strategy == "full-harvest":
             run_location_full_harvest(
@@ -980,6 +1247,7 @@ def run_end_to_end_pipeline(
                 scraper_proxy_limit=scraper_proxy_limit,
                 scraper_disable_page_reuse=scraper_disable_page_reuse,
                 pass2_per_variant=pass2_per_variant,
+                max_cells=max_cells,
             )
         else:
             # single-centroid legacy — the only strategy that reads
@@ -1036,7 +1304,26 @@ def run_end_to_end_pipeline(
             csv_path=csv_path or _default_csv_path(query, location),
         )
         logger.info("=" * 60)
-        logger.info("PIPELINE EXECUTED SUCCESSFULLY")
+        truncated = _timed_out_runs_since(run_marker_id)
+        if truncated:
+            # A salvaged timeout no longer aborts the pipeline, so without
+            # this the banner would read identically to a complete sweep.
+            logger.warning("PIPELINE EXECUTED WITH PARTIAL COVERAGE")
+            logger.warning(
+                "%d scrape run(s) were killed at SCRAPER_TIMEOUT_SEC and "
+                "salvaged; the area below was NOT fully swept:",
+                len(truncated),
+            )
+            for run_id, run_query, run_location in truncated:
+                logger.warning(
+                    "  run #%s  %r in %r", run_id, run_query, run_location
+                )
+            logger.warning(
+                "Raise SCRAPER_TIMEOUT_SEC, shrink --bbox, or raise "
+                "--cell-km, then re-run to complete coverage."
+            )
+        else:
+            logger.info("PIPELINE EXECUTED SUCCESSFULLY")
         logger.info("=" * 60)
 
     except Exception as e:
@@ -1199,6 +1486,9 @@ def main() -> None:
         # legacy combined call. Irrelevant (Pass 2 doesn't run) for other
         # strategies, so it always resolves to the default there.
         pass2_per_variant=not (strategy == "full-harvest" and args.pass2_combined),
+        radius_km=args.radius_km,
+        # 0 means "no ceiling"; argparse can't express that as None.
+        max_cells=args.max_cells if args.max_cells else None,
     )
 
 

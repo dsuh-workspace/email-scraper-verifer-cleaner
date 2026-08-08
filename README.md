@@ -14,16 +14,18 @@ Raw Leads (SQLite / Postgres)
         ↓
 Clean + Normalize + Dedupe (domain, name+phone)
         ↓
-Email Harvest (crawl /contact, /about, /team; regex extract)
+Email Harvest (crawl contact/about/team/legal pages; regex extract)
         ↓
-Email Verify (Reacher on Kamatera)   [opt-in: --verify]
+Email Verify (self-hosted Reacher)   [opt-in: --verify]
         ↓
-Google Sheets / local CSV export (with export-history dedupe)
+export_run_outputs() → three CSVs: _all / _deduped / _verified
+        (_deduped is the Sheets push + export-history dedupe)
 ```
 
 The verify step is wired into `run_pipeline.py` and runs after the email
-crawl, before export — opt in with `--verify`, and gate export on score
-with `--min-score N`. See [Verification](#verification) below.
+crawl, before export — opt in with `--verify`. `--min-score N` filters the
+`_verified` CSV only; it does **not** gate the Sheets/export-history push.
+See [Verification](#verification) and [Export outputs](#export-outputs).
 
 ---
 
@@ -101,6 +103,10 @@ REACHER_TIMEOUT_SEC=30
 SCRAPER_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://proxy2.example.com:1080
 SCRAPER_PROXIES_FILE=proxies.txt
 # Optional scraper tuning defaults
+# SCRAPER_TIMEOUT_SEC=1800         # hard ceiling per scraper invocation (30 min).
+#                                  # On timeout, partial results are still
+#                                  # ingested and copied to logs/; the run is
+#                                  # recorded as status='timeout'.
 # SCRAPER_CONCURRENCY=3
 # SCRAPER_BROWSER_POOL_SIZE=       # leave unset; see "Scraper runtime knobs"
 # SCRAPER_PAGES_PER_BROWSER=1
@@ -115,6 +121,7 @@ SCRAPER_PROXIES_FILE=proxies.txt
 # BLOCK_DETECT_ZERO_YIELD=1        # treat a 0-lead proxied run as a block
 # BLOCK_DETECT_MIN_HISTORY=3       # runs needed before the median rule applies
 # BLOCK_DETECT_LOW_YIELD_RATIO=0.25
+# BLOCK_DETECT_HISTORY_LIMIT=10    # how many prior runs feed the median
 # PROXY_HEALTH_FILE=data/proxy_health.json
 # PROXY_COOLDOWN_SEC=600           # first strike
 # PROXY_RETIRE_AFTER_STRIKES=2
@@ -320,8 +327,111 @@ python run_pipeline.py \
 
 Uses the scraper's native `-grid-bbox` mode (JS mode via Playwright).
 Iterates cells over the location's Nominatim-derived bounding box in one
-scraper invocation. Empirically **4-25× more unique businesses** than
-single-centroid mode (see `plans/generalized-city-coverage-method-2026-07-20.md`).
+scraper invocation.
+
+> **The published grid numbers do not describe this command.** The
+> "4-25× more unique businesses than single-centroid" and "362 businesses
+> for San Jose plumbing" figures come from the 2026-07-20 `Dt` experiment,
+> which ran **unproxied**, over a **hand-picked tight bbox**
+> (`37.20,-121.99,37.44,-121.75`, ~27 × 21 km) at **3 km** cells — 72 cells
+> in 10.1 min. The defaults above give a materially different run: San
+> Jose's Nominatim bbox is 40.7 × 38.4 km, which at `--cell-km 2.0` is
+> **~420 cells**, and proxies are on.
+>
+> Measured 2026-08-06 with those defaults: **10 and 4 businesses** across
+> two runs (6.3 and 7.6 min). See "Grid mode and proxy binding" below
+> before running a grid pass you intend to trust.
+
+#### Grid mode and proxy binding
+
+In JS mode the scraper binds **one proxy per browser context**, and the
+default browser pool is **one context** — upstream `-c` defaults to 1 and
+the pool derives as `ceil(concurrency / pages-per-browser)`. So a default
+grid run puts every cell behind a **single** proxy, no matter how large
+your pool is or what `--scraper-proxy-limit` says. Several hundred cells
+through one IP in a few minutes is the shape of a run that gets soft-blocked
+partway through and returns a fraction of its yield.
+
+The existing warning below ("Do not pin `--scraper-browser-pool-size 1`")
+understates this: you do not have to pin it — **the defaults already give
+you a pool of one.** To spread a grid pass across proxies, raise
+concurrency so the derived pool is larger:
+
+```bash
+python run_pipeline.py \
+  --query "Plumbing" --location "San Jose, CA" --grid --cell-km 2.0 \
+  --scraper-concurrency 6 \
+  --scraper-pages-per-browser 1 \
+  --scraper-proxy-limit 6        # -> 6 browser contexts, 6 proxies
+```
+
+#### Size the sweep with `--radius-km`, not the admin bbox
+
+Cell count decides everything — wall clock, bandwidth, block risk — and
+Nominatim gives you no control over it. An administrative bbox is whatever
+the city boundary happens to be: San Jose's is 40.7 x 38.4 km (~420 cells at
+2 km), while the hand-picked box behind the reference 362-business run was
+27 x 21 km at 3 km cells (72 cells). Same flags, two very different jobs.
+
+`--radius-km` replaces that with a number you choose, so a run is comparable
+across cities. **12 km at `--cell-km 3.0` reproduces the reference geometry
+exactly (72 cells)** and is a good default for a large US metro core:
+
+```bash
+python run_pipeline.py --query "Plumbing" --location "Austin, TX" \
+  --grid --radius-km 12 --cell-km 3.0 \
+  --scraper-concurrency 6 --scraper-pages-per-browser 1 --scraper-proxy-limit 6
+```
+
+Every grid run now logs a preflight before starting, and derives its timeout
+from cell count (~36 s/cell proxied, measured 2026-08-07) instead of the flat
+1800 s:
+
+```
+Grid preflight: 72 cells (24.0 x 24.0 km at 3.0 km), est. 43 min, timeout 2592s (derived).
+```
+
+`--max-cells` (default 200) refuses a sweep bigger than that up front rather
+than discovering it 30 minutes in — the default 2 km grid over San Jose's
+admin bbox is now rejected with the cell count and the estimate. Pass
+`--max-cells 0` to disable, or an explicit number to accept a large sweep.
+`SCRAPER_TIMEOUT_SEC` still overrides the derived timeout when set.
+
+Tightening the bbox with `--bbox` to the dense core also cuts cell count
+directly, which is what the reference experiment did.
+
+#### Inline email extraction is off for grid
+
+Upstream's `-email` flag spawns a **separate browser visit to each
+business's own website** for every place result that has one
+(`gmaps/place.go:132`), and withholds the place entry until that visit
+returns. 93.8% of observed raw leads have a website, so it roughly doubles
+the browser work per result — fine at one centroid, ruinous across a few
+hundred cells, where it turned a San Jose sweep into an 1800 s timeout with
+zero rows written.
+
+The wrapper now passes `-email` **only when not in grid mode**. For a grid
+run `raw_leads.email` will be empty; emails come from the pipeline's own
+crawl pass instead ([Crawl-attempt notes](#batch-zip-file-mode)), which
+does the same job with concurrency, per-host politeness, a retry ledger,
+and the shared junk filter. Force it either way with
+`execute_scrape_and_ingest(extract_email=True|False)`.
+
+#### If a run times out
+
+`SCRAPER_TIMEOUT_SEC` (default 1800) kills the subprocess. That is no
+longer a total loss — the scraper streams results as jobs complete, so the
+partial output is ingested, a copy is kept at
+`logs/timeout_run<ID>_<UTC>.json`, and the run is recorded as
+`scrape_runs.status = 'timeout'` (distinct from `failed`, and excluded from
+block-detection baselines). The `TimeoutExpired` still propagates, so the
+pipeline fails loudly.
+
+```bash
+sqlite3 database/hvac_leads.db \
+  "SELECT id, query, location, status FROM scrape_runs WHERE status='timeout';"
+ls logs/timeout_run*.json
+```
 
 One-time setup: run `./scripts/setup_scraper_playwright.sh` to install the
 Playwright driver + Chromium + FFmpeg (~265 MB). Also handles the
@@ -347,17 +457,36 @@ python run_pipeline.py \
 Three passes over the market, each ingesting into `raw_leads`:
 
 1. **Grid** — cells over Nominatim bbox (or `--bbox`), JS mode, depth 3.
-2. **Multi-query slow at centroid** — 8 semantic variants of the query
-   (Plumbing, Plumber, Emergency plumber, Drain cleaning, Water heater
-   repair, Leak repair, Sewer service, etc.), depth 10, one input file so
-   the scraper's browser context is reused. Override with
-   `--queries "a,b,c"`.
+2. **Multi-query slow at centroid** — semantic variants of the query at
+   depth 10, each run as its **own** scraper invocation (one `scrape_runs`
+   row per variant). Defaults are deliberately small — plumbing:
+   `Plumbing, Plumber`; HVAC: `HVAC, Heating and cooling, HVAC contractor`
+   — because a per-variant lift table showed the other variants of the
+   original 8-variant set contributing ~0 net-new businesses over Pass 1.
+   Override with `--queries "a,b,c"`.
 3. **Fast ZIP top-up** *(optional)* — one fast-mode scrape per ZIP in
    `--zip-csv` (`zip,city,state` columns). ~2 s each.
 
-Empirically 39% more unique businesses than grid alone (SJ 2026-07-20:
-grid=362 → +multi-query=473 → +ZIP=504). See
-`plans/scrape-strategy-experiments-2026-07-20.md`.
+Pass 2 runs one subprocess per variant rather than one combined
+multi-query call, because the vendored Go scraper shares a deduper/exiter
+across every line of a non-grid `-input` file and silently drops most
+variants' results (SJ HVAC 2026-08-01/02: 4 raw leads combined vs 81 run
+separately). `--pass2-combined` opts back in, for diagnostics only. The
+cost is roughly Nx Pass 2 wall time.
+
+> **Coverage claim is stale, and cannot currently be re-measured.**
+> Full-harvest was measured at 39% more unique businesses than grid alone
+> (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504, see
+> `plans/scrape-strategy-experiments-2026-07-20.md`). That run used the
+> 8-variant set *and* the combined call, both since changed.
+>
+> A 2026-08-06 re-measurement attempt failed because Pass 1 — the grid
+> baseline, i.e. the denominator — returned 10 businesses under default
+> settings (see the grid warning above). Passes 2 and 3 worked normally
+> (47 and 41 net-new). Until a grid pass yields something comparable to
+> the reference, there is no valid baseline to measure lift against.
+> `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11 has the procedure and the Pass 1
+> floor to check first.
 
 ### Batch zip-file mode
 
@@ -397,7 +526,13 @@ Batch semantics:
 - stops each zip on target reached, `--max-depth`, or stale iterations
 - a row that fails (unmappable location, scraper error) is logged and
   skipped; the batch keeps going
-- exports once at batch end
+- exports once at batch end, via the same `export_run_outputs()` as
+  `run_pipeline.py` (see [Export outputs](#export-outputs))
+- **no `--verify` flag.** `run_zip_batch.py` accepts `--min-score`, but
+  nothing in a batch run verifies, so any `N > 0` produces an empty
+  `_verified` CSV unless a previous run verified those contacts. To verify
+  a batch, run `python -m app.pipeline.verify_emails` afterwards and then
+  re-run the export.
 
 `run_pipeline.py --strategy single-centroid` shares this same depth loop
 (`run_location_pipeline`), so its `--min-contacts` means the same thing as
@@ -473,13 +608,15 @@ Crawl-attempt notes:
 
 Email verification is done against a self-hosted [Reacher
 `check-if-email-exists`](https://github.com/reacherhq/check-if-email-exists)
-backend deployed to a Kamatera server (Hetzner blocks outbound SMTP port
-25 for new accounts; Kamatera does not). Live instance:
+backend. The supported instance is **local**:
 
 - URL: `http://127.0.0.1:8080/v0/check_email`
-- You can start the verifier locally using the helper script: `./scripts/start_local_verifier.sh`. This uses Docker (via `reacherhq/backend:latest`) or compiles the backend from source via Cargo from the `../email-verifier` directory.
-- Deploy scripts for the legacy remote Kamatera instance live in the sibling repo
-  `autopilotlocal/email-verifier`.
+- Start it with `./scripts/start_local_verifier.sh`. This uses Docker (via `reacherhq/backend:latest`) or compiles the backend from source via Cargo from the `../email-verifier` directory.
+- A remote Kamatera deployment was the original host (Hetzner blocks
+  outbound SMTP port 25 for new accounts; Kamatera does not). It is legacy
+  — its deploy scripts live in the sibling repo
+  `autopilotlocal/email-verifier`. Point `REACHER_API_URL` at it only if
+  you have re-provisioned it.
 
 To run verification against your current contacts:
 
@@ -497,15 +634,13 @@ This POSTs each unverified contact email to Reacher, persists an
 | `invalid`      | Invalid       | 10            |
 | `unknown`      | Unknown       | 25            |
 
-The old BillionVerify-based implementation is archived at
-`app/pipeline/verify_emails_ARCHIVE.py` — retained for reference, not
-imported anywhere.
+A BillionVerify-based implementation preceded this one. It has been
+removed; see `CHANGELOG.md` for the switch.
 
-Verification is already wired into the main pipeline — `run_pipeline.py
---verify` calls `verify_contacts_emails()` between
-`harvest_emails_from_websites()` and `export_new_leads()`, for all three
-strategies. Add `--min-score N` to drop contacts below a score from the
-export:
+Verification is wired into the main pipeline — `run_pipeline.py --verify`
+calls `verify_contacts_emails()` between `harvest_emails_from_websites()`
+and `export_run_outputs()`, for all three strategies. `--min-score N`
+filters the `_verified` CSV:
 
 ```bash
 python run_pipeline.py --query "Plumbing" --location "San Jose, CA" \
@@ -514,8 +649,56 @@ python run_pipeline.py --query "Plumbing" --location "San Jose, CA" \
 
 Verifier failures are logged as warnings and the pipeline continues. An
 unreachable Reacher instance scores every contact `unknown` (25), so
-`--min-score 50` against a dead verifier exports nothing — check the log
-for verifier warnings before concluding the harvest was empty.
+`--min-score 50` against a dead verifier yields an empty `_verified` file
+— check the log for verifier warnings before concluding the harvest was
+empty.
+
+`run_zip_batch.py` has no `--verify` flag; see
+[Batch zip-file mode](#batch-zip-file-mode).
+
+---
+
+## Export outputs
+
+Both entrypoints finish by calling `export_run_outputs()`, which writes
+**three** CSVs derived from the `--csv-path` base (default
+`data/leads_<location>_<query>_<date>.csv`):
+
+| File | Contents | `--min-score` applies? | Writes `export_history`? | Can reach Sheets? |
+| ---- | -------- | ---------------------- | ------------------------ | ----------------- |
+| `<base>_all.csv` | every contact in the DB, joined to its business | no | no | no |
+| `<base>_deduped.csv` | contacts with an email and no `export_history` row for the destination | **no** | **yes** | yes |
+| `<base>_verified.csv` | best contact per business clearing the score | **yes** | no | no |
+
+Read that table before trusting a run:
+
+- **`--min-score` gates only `_verified`.** The `_deduped` push — the one
+  that goes to Sheets and marks contacts as exported — always runs
+  unfiltered. This is intentional: if score decided what counted as
+  "already sent", a contact withheld today would re-export later once it
+  was verified. `_verified` is the file to hand to outreach.
+- **`_all` is opened in append mode** and ignores `export_history`, so
+  reusing a `--csv-path` across runs re-appends the entire DB. The dated
+  default filename is what keeps that from happening.
+- **`_all` and `_verified` are always written locally** and never pushed to
+  Sheets. Only `_deduped` attempts Sheets, with CSV as its fallback — so
+  with Sheets configured, `<base>_deduped.csv` may not exist on disk.
+- `_verified` is side-effect free, so it is safe to regenerate.
+
+Note that `export_new_leads()` (the `_deduped` path) has no run-cohort
+filter: on a DB carrying a baseline it emits every unexported contact, not
+just this run's. Use `scripts/analysis/export_cohort.py` for a
+cohort-scoped, side-effect-free CSV.
+
+### Junk-email filtering
+
+`app/pipeline/email_filters.py` holds one blocklist, applied at all three
+points an address can enter or leave the system: ingest
+(`process_leads.py`), website crawl (`extract_emails.py`), and export
+(`export_sheets.py`). Add new junk domains there and every path picks it
+up. The export path layers its own prefix rules (`careers@`, `jobs@`,
+`webmaster@`) on top — those are real inboxes that simply aren't sales
+leads, so they are dropped only at export.
 
 ---
 
@@ -546,13 +729,13 @@ noise doesn't drown out pipeline output. Add a `FileHandler` to
 
 The suite covers pure helpers plus orchestration/proxy edge cases —
 `extract_domain`, `normalize_phone`, `_parse_and_validate_emails`,
-`extract_emails_from_html`, Reacher response handling in
-`verify_email_via_reacher` (mocked, no live server needed), scraper proxy
-parsing, and `run_pipeline` / `run_zip_batch` control-flow behavior such
-as batch init and continue-on-error handling. DB-heavy
-`process_and_deduplicate_leads` and live network crawling in
-`harvest_emails_from_websites` are still integration-test territory and
-are intentionally not covered here.
+`extract_emails_from_html`, junk-filter parity across the ingest/crawl/
+export paths, Reacher response handling in `verify_email_via_reacher`
+(mocked, no live server needed), scraper proxy parsing, and
+`run_pipeline` / `run_zip_batch` control-flow behavior such as batch init
+and continue-on-error handling. DB-heavy `process_and_deduplicate_leads`
+and live network crawling in `harvest_emails_from_websites` are still
+integration-test territory and are intentionally not covered here.
 
 `tests/conftest.py` sets `DATABASE_URL=sqlite:///:memory:` before any
 `app.db.database` import so tests never touch a real DB.
@@ -564,25 +747,39 @@ are intentionally not covered here.
 ```
 ├── app/
 │   ├── logging_config.py       # Central logging setup
+│   ├── proxy_utils.py          # Proxy line parsing + URL validation
 │   ├── db/
 │   │   ├── create_tables.py    # SQLAlchemy models + init_db()
 │   │   └── database.py         # Engine + DATABASE_URL guard
 │   ├── pipeline/
-│   │   ├── export_sheets.py    # Google Sheets + CSV export
+│   │   ├── email_filters.py    # Shared junk-email blocklist (all 3 paths)
+│   │   ├── export_sheets.py    # Sheets + the three-CSV export
 │   │   ├── extract_emails.py   # Concurrent multi-path website crawler
 │   │   ├── process_leads.py    # Clean + dedupe (batch preloaded)
-│   │   ├── verify_emails.py    # Reacher API client (active)
-│   │   └── verify_emails_ARCHIVE.py  # BillionVerify version, archived
+│   │   └── verify_emails.py    # Reacher API client
 │   └── scraper/
 │       ├── google-maps-scraper[.exe]  # Compiled Go binary (gitignored)
+│       ├── block_detect.py     # Yield-based soft-block detection
+│       ├── pacing.py           # Jittered sleep between invocations
+│       ├── proxy_health.py     # Strike/cooldown ledger
 │       └── run_scraper.py      # Subprocess wrapper + geocoder
-├── tests/                      # Pytest suite for pure helpers
-├── data/leads_export.csv       # Fallback CSV export (gitignored)
+├── scripts/
+│   ├── analysis/               # Cohort overlap, lift, wall-clock
+│   ├── setup_scraper_playwright.sh
+│   ├── start_local_verifier.sh / stop_local_verifier.sh
+│   └── update_scraper.sh       # Weekly launchd job
+├── tests/                      # Pytest suite
+├── data/                       # CSV exports + proxy_health.json (gitignored)
 ├── database/hvac_leads.db      # SQLite (gitignored)
 ├── .env                        # Local config (gitignored)
 ├── requirements.txt
-├── run_pipeline.py             # Orchestrator entrypoint
-├── CLAUDE.md                   # Review notes + backlog
+├── run_pipeline.py             # Single-location entrypoint
+├── run_zip_batch.py            # Batch entrypoint (CSV of zips/locations)
+├── CLAUDE.md                   # Operator notes + backlog
+├── CHANGELOG.md                # Shipped history
+├── RUNS.md                     # Run tracker (city x vertical)
+├── RUNBOOK_SQL_OVERLAP_ANALYSIS.md
+├── MAINTENANCE_SQL.md          # Backfills + legacy schema catch-up
 └── README.md
 ```
 

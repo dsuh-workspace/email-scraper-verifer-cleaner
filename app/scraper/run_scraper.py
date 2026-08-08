@@ -4,6 +4,8 @@ import logging
 import os
 import json
 import platform
+import shutil
+import signal
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ from app.scraper.block_detect import (
     STATUS_BLOCKED,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_TIMEOUT,
     classify_yield,
     detection_enabled,
     recent_yields,
@@ -213,6 +216,16 @@ def _assess_run_health(
         return None
 
 
+def _format_proxy_cmd_args(proxies: list[str]) -> list[str]:
+    """Turn an already-selected proxy list into the upstream gosom `-proxies`
+    flag. The one place that formats proxies for the scraper CLI, shared by
+    `_scraper_proxy_args` (tests, `smoke_test_scraper_proxies.py`) and
+    `execute_scrape_and_ingest` (production) so they can't drift apart."""
+    if not proxies:
+        return []
+    return ["-proxies", ",".join(proxies)]
+
+
 def _scraper_proxy_args(
     disable_proxy: bool = False,
     proxy_limit: int | None = None,
@@ -224,9 +237,94 @@ def _scraper_proxy_args(
         proxy_limit=proxy_limit,
         session_key=session_key,
     )
-    if not proxies:
-        return []
-    return ["-proxies", ",".join(proxies)]
+    return _format_proxy_cmd_args(proxies)
+
+
+def _preserve_results_file(results_file_path: str, scrape_run_id: int) -> str | None:
+    """Copy a killed run's partial output somewhere durable. Returns the path.
+
+    The `-results` target is a tempfile that the `finally` block removes, and
+    `subprocess.run(timeout=...)` throws away stdout/stderr, so without this
+    a timeout leaves no evidence at all of how far the sweep got. Best-effort
+    by design: failing to save a diagnostic must not mask the timeout itself.
+    """
+    try:
+        if not os.path.exists(results_file_path) or os.path.getsize(results_file_path) == 0:
+            logger.warning("Nothing to preserve — results file is empty or missing.")
+            return None
+        os.makedirs("logs", exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = os.path.join("logs", f"timeout_run{scrape_run_id}_{stamp}.json")
+        shutil.copyfile(results_file_path, dest)
+        return dest
+    except OSError as e:
+        logger.warning("Could not preserve partial results file: %s", e)
+        return None
+
+
+def _warn_stale_scraper_processes(binary_path: str) -> None:
+    """Best-effort startup check for scraper processes left running by a
+    parent that died without cleanup (Ctrl-C, SIGKILL, crashed shell — see
+    CLAUDE.md Open work #3). Logs a warning only; never kills automatically,
+    since a hit could just as easily be a concurrent pipeline run and
+    killing on a guess would be worse than a stale bandwidth reading.
+    """
+    if platform.system() == "Windows":
+        return
+    binary_name = os.path.basename(binary_path)
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", binary_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            timeout=5,
+        )
+        pids = [p for p in result.stdout.split() if p]
+    except Exception as e:
+        # Genuinely best-effort: no pgrep, a sandboxed test double for the
+        # scraper's own Popen call intercepting this one too, anything. A
+        # diagnostic must never break the real scrape it's checking before.
+        logger.debug("Stale-process check skipped: %s", e)
+        return
+    if pids:
+        logger.warning(
+            "%d pre-existing %s process(es) found before starting this run "
+            "(PIDs: %s). Could be orphans from a killed pipeline still "
+            "burning proxy bandwidth (CLAUDE.md Open work #3) — verify with "
+            "`ps -p <pid>` before trusting any bandwidth measurement.",
+            len(pids), binary_name, ", ".join(pids),
+        )
+
+
+def _popen_group_kwargs() -> dict:
+    """Process-group kwargs so killing the scraper takes its Playwright /
+    Chromium grandchildren down with it, not just the Go binary's own pid.
+    POSIX: `start_new_session` makes the scraper a session leader, so
+    `os.killpg` reaches every descendant. Windows: `CREATE_NEW_PROCESS_GROUP`
+    is the closest equivalent, paired with CTRL_BREAK_EVENT below.
+    """
+    if platform.system() == "Windows":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _kill_scraper_process_group(proc: "subprocess.Popen") -> None:
+    """Kill the scraper's whole process group/tree, not just its direct pid.
+
+    Playwright spawns Chromium as a grandchild of the Go binary, so killing
+    only `proc.pid` (what `subprocess.run(timeout=)` / a bare `.kill()` do)
+    leaves the browser — and its bandwidth use — running after the parent
+    is gone. This is the fix for CLAUDE.md Open work #3. Best-effort: the
+    group may already be gone by the time we get here.
+    """
+    try:
+        if platform.system() == "Windows":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError) as e:
+        logger.debug("Scraper process group already gone: %s", e)
 
 
 def geocode_location(location: str):
@@ -279,6 +377,8 @@ def execute_scrape_and_ingest(
     proxy_limit: int | None = None,
     disable_page_reuse: bool = False,
     proxy_session_key: str | None = None,
+    extract_email: bool | None = None,
+    timeout_sec: int | None = None,
 ):
     """
     Runs the google-maps-scraper executable for a query, then parses the
@@ -288,9 +388,13 @@ def execute_scrape_and_ingest(
     - Single-centroid (default): pass lat/lon (or let it geocode from
       location), scraper uses -geo and -fast-mode. ~10-20 businesses per run.
     - Grid mode: pass bbox=(min_lat, min_lon, max_lat, max_lon) and cell_km.
-      Scraper iterates cells internally in JS mode (much richer, 4-5x more
-      businesses than a curated ZIP sweep, per 2026-07-20 experiment).
-      -fast-mode is dropped; scraper rejects it with -grid-bbox.
+      Scraper iterates cells internally in JS mode. -fast-mode is dropped;
+      scraper rejects it with -grid-bbox. The "4-5x more businesses than a
+      curated ZIP sweep" figure is from the 2026-07-20 experiment, which
+      ran unproxied over a tight hand-picked bbox at 3km cells. Note that
+      JS mode binds one proxy per browser context and the pool defaults to
+      one, so a proxied grid pass sends every cell through a single IP —
+      see README, "Grid mode and proxy binding".
     - Multi-query mode: pass `queries=[q1, q2, ...]`. All are written to
       the scraper's -input file (one per line as "{q} in {location}"), so
       the scraper reuses its browser context across queries — faster than
@@ -311,6 +415,21 @@ def execute_scrape_and_ingest(
       - None (default) => True for single-centroid, False for grid.
       - True/False => explicit; caller responsible for compatibility
         (scraper rejects fast_mode=True + bbox).
+
+    extract_email override (upstream `-email`):
+      - None (default) => False for grid (bbox set), True otherwise.
+      - True/False => explicit.
+      Grid defaults off because upstream spawns one extra browser visit per
+      place with a website and withholds the place entry until that visit
+      returns, which multiplies across cells. The pipeline's own crawl
+      (`app/pipeline/extract_emails.py`) covers the same ground afterwards
+      with concurrency, per-host politeness, a retry ledger, and the shared
+      junk filter — none of which the scraper's inline pass has. With this
+      off, `raw_leads.email` is empty and emails arrive via that crawl.
+
+    On timeout the partial `-results` file is ingested rather than
+    discarded, and a copy is kept under `logs/`; the run is recorded as
+    `timeout` and the TimeoutExpired still propagates.
     """
     resolved_concurrency = _resolve_positive_int(
         concurrency if concurrency is not None else _env_positive_int("SCRAPER_CONCURRENCY"),
@@ -326,6 +445,9 @@ def execute_scrape_and_ingest(
     ) or 2
 
     session = Session()
+    # Set by the timeout branch so the tail knows to record a salvage rather
+    # than a clean completion, and so the outer handler doesn't relabel it.
+    timed_out: subprocess.TimeoutExpired | None = None
 
     # 1. Create a new ScrapeRun entry
     # Derive category from the query so non-HVAC/non-plumbing runs get
@@ -379,6 +501,8 @@ def execute_scrape_and_ingest(
                 f"and place it at that path (chmod +x on unix)."
             )
 
+        _warn_stale_scraper_processes(binary_path)
+
         # Resolve fast_mode: explicit param wins; else default True unless grid.
         use_fast_mode = fast_mode if fast_mode is not None else (bbox is None)
         if use_fast_mode and bbox is not None:
@@ -386,6 +510,19 @@ def execute_scrape_and_ingest(
                 "fast_mode=True is incompatible with grid mode (bbox). "
                 "Scraper rejects the combination."
             )
+
+        # Inline email extraction: upstream spawns a *separate browser visit
+        # to each business's own website* for every place result whose website
+        # passes IsWebsiteValidForEmail (gmaps/place.go:132), and — critically
+        # — returns nil for the place entry, so nothing is emitted until that
+        # visit finishes. 93.8% of observed raw leads have a website, so this
+        # roughly doubles the browser work per result and gates all output
+        # behind it. Fine at one centroid; ruinous across a few hundred grid
+        # cells, where it turned a San Jose sweep into a 1800s timeout with
+        # zero rows written. Default off for grid, on elsewhere.
+        use_extract_email = (
+            extract_email if extract_email is not None else (bbox is None)
+        )
 
         cmd = [
             binary_path,
@@ -395,8 +532,9 @@ def execute_scrape_and_ingest(
             "-depth", str(depth),
             "-pages-per-browser", str(resolved_pages_per_browser),
             "-lang", lang,
-            "-email",
         ]
+        if use_extract_email:
+            cmd.append("-email")
         if resolved_concurrency is not None:
             cmd.extend(["-c", str(resolved_concurrency)])
         if resolved_browser_pool_size is not None:
@@ -425,8 +563,7 @@ def execute_scrape_and_ingest(
             proxy_limit=proxy_limit,
             session_key=proxy_session_key or query,
         )
-        if session_proxies:
-            cmd.extend(["-proxies", ",".join(session_proxies)])
+        cmd.extend(_format_proxy_cmd_args(session_proxies))
 
         logger.info("Executing: %s", " ".join(cmd))
         # Run the scraper.
@@ -435,24 +572,57 @@ def execute_scrape_and_ingest(
         # legitimately take a while, but we never want a hung Playwright
         # instance to freeze the pipeline forever. Override via
         # SCRAPER_TIMEOUT_SEC env var if needed.
-        scraper_timeout = int(os.getenv("SCRAPER_TIMEOUT_SEC", "1800"))
+        # Explicit caller value wins, then the env override, then 30 min.
+        # Grid callers derive theirs from cell count (run_pipeline's
+        # `_grid_preflight`), because a fixed ceiling is meaningless when the
+        # sweep size varies by two orders of magnitude between cities.
+        scraper_timeout = timeout_sec or int(os.getenv("SCRAPER_TIMEOUT_SEC", "1800"))
+        # Popen (not subprocess.run) so we hold the pid and can kill the
+        # whole process group. subprocess.run's own timeout/exception
+        # handling only kills the direct child pid, leaving Playwright's
+        # Chromium grandchildren running as orphans — CLAUDE.md Open work #3.
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            **_popen_group_kwargs(),
+        )
         try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8",
-                check=True,
-                timeout=scraper_timeout,
-            )
-        except subprocess.TimeoutExpired:
+            stdout, stderr = proc.communicate(timeout=scraper_timeout)
+        except subprocess.TimeoutExpired as exc:
+            # Don't throw away what it already wrote. The scraper streams
+            # results as jobs complete, so the file usually holds most of a
+            # long run; the old code deleted it in `finally` and ingested
+            # nothing, turning a 30-minute partial sweep into zero rows.
+            # subprocess.run() discards stdout/stderr on timeout, so the
+            # preserved file is the only forensic record of how far it got.
+            _kill_scraper_process_group(proc)
+            proc.wait()
+            timed_out = exc
+            preserved_path = _preserve_results_file(results_file_path, scrape_run_id)
             logger.error(
-                "Scraper exceeded timeout of %ds and was killed.",
+                "Scraper exceeded timeout of %ds and was killed; salvaging "
+                "partial output%s.",
                 scraper_timeout,
+                f" (copy kept at {preserved_path})" if preserved_path else "",
             )
+        except BaseException:
+            # Ctrl-C, SIGTERM, or any other unwind while the scraper is
+            # running: kill its whole process group so Chromium doesn't
+            # outlive us (CLAUDE.md Open work #3). Can't help if *this*
+            # process itself gets SIGKILLed — nothing in Python runs then —
+            # but covers Ctrl-C and a parent that dies while still able to
+            # unwind.
+            _kill_scraper_process_group(proc)
+            proc.wait()
             raise
-        
-        logger.info("Scraper finished running successfully.")
+        else:
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    proc.returncode, cmd, output=stdout, stderr=stderr,
+                )
+            logger.info("Scraper finished running successfully.")
         # 4. Read results and ingest into database
         ingested_count = 0
         if os.path.exists(results_file_path) and os.path.getsize(results_file_path) > 0:
@@ -462,7 +632,17 @@ def execute_scrape_and_ingest(
             # mode emits a JSON array. Handle both.
             leads_data = []
             if raw_text.startswith("["):
-                leads_data = json.loads(raw_text)
+                try:
+                    leads_data = json.loads(raw_text)
+                except json.JSONDecodeError as e:
+                    # A killed run can leave the array unterminated. Per-line
+                    # parsing below already tolerates a truncated tail; this
+                    # branch has to say so explicitly or the salvage path
+                    # raises on exactly the input it exists to handle.
+                    logger.warning(
+                        "Results file is a truncated JSON array (%s); "
+                        "no rows recoverable from it.", e,
+                    )
             else:
                 for line in raw_text.splitlines():
                     line = line.strip()
@@ -513,6 +693,40 @@ def execute_scrape_and_ingest(
         else:
             logger.warning("Scraper output file is empty or missing.")
 
+        if timed_out is not None:
+            # Block detection is deliberately skipped: a truncated run's yield
+            # says nothing about the proxies, and scoring it would strike
+            # working ones for a wall-clock problem.
+            db_run.status = STATUS_TIMEOUT
+            db_run.completed_at = datetime.now(timezone.utc)
+            session.commit()
+
+            if ingested_count == 0:
+                # Nothing recovered, so there is nothing downstream to do.
+                # Fail loudly rather than let an empty run look like a thin
+                # market.
+                logger.error(
+                    "[%s] Scrape Run #%s marked %s with nothing salvageable.",
+                    datetime.now(), scrape_run_id, STATUS_TIMEOUT,
+                )
+                raise timed_out
+
+            # Salvage succeeded: swallow the timeout so the caller's
+            # dedupe/crawl/export still run over what we paid for. Re-raising
+            # here used to discard 342 usable leads after a 30-minute sweep
+            # (2026-08-07) and forced a manual recovery every time. The
+            # partial-ness is not lost — `status='timeout'` is durable, is
+            # excluded from `recent_yields()`, and `run_end_to_end_pipeline`
+            # reports it in the closing summary.
+            logger.warning(
+                "[%s] Scrape Run #%s marked %s — salvaged %d leads for %r in "
+                "%r before the kill. Continuing with partial coverage; this "
+                "run does NOT represent the full area.",
+                datetime.now(), scrape_run_id, STATUS_TIMEOUT,
+                ingested_count, query, location,
+            )
+            return
+
         # Does this yield look blocked rather than just thin?
         block_reason = _assess_run_health(
             session,
@@ -535,10 +749,13 @@ def execute_scrape_and_ingest(
             logger.info(f"[{datetime.now()}] Completed Scrape Run #{scrape_run_id}.")
     except Exception as e:
         logger.error(f"Error during scrape/ingest: {e}")
-        # Log failure status to DB
-        db_run.status = STATUS_FAILED
-        db_run.completed_at = datetime.now(timezone.utc)
-        session.commit()
+        # The timeout branch above already recorded STATUS_TIMEOUT and
+        # committed its salvage; re-raising lands here, so don't overwrite
+        # that with 'failed' and lose the distinction.
+        if timed_out is None:
+            db_run.status = STATUS_FAILED
+            db_run.completed_at = datetime.now(timezone.utc)
+            session.commit()
         raise e
 
     finally:

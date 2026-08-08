@@ -31,9 +31,10 @@ in `run_pipeline.py` and both CLIs call the same three:
 | `run_location_full_harvest()` | full-harvest | Grid Pass 1 → per-variant slow-centroid Pass 2 (depth=10, `fast_mode=False`) → optional fast ZIP top-up Pass 3 (depth=3, `fast_mode=True`) → one shared dedupe/crawl |
 
 All three return `LocationRunMetrics` and share the same tail: `--verify`
-runs `verify_contacts_emails()`, then
-`export_new_leads(min_score=min_score)`. `run_end_to_end_pipeline` is
-geocode + dispatch + that tail.
+runs `verify_contacts_emails()`, then `export_run_outputs(min_score=...)`
+— **not** `export_new_leads()`, which it calls internally for one of three
+outputs (see "Verification and export tail").
+`run_end_to_end_pipeline` is geocode + dispatch + that tail.
 
 ### Behavior notes
 
@@ -45,6 +46,9 @@ geocode + dispatch + that tail.
   combined behavior is opt-in via `--pass2-combined`, for diagnostics only.
 - Default harvest query sets are intentionally pruned: HVAC defaults to 3
   variants and plumbing defaults to 2, based on recent San Jose reruns.
+  The published "39% more than grid alone" figure predates both this
+  pruning and the per-variant switch — treat it as historical until
+  re-measured (Open work #6).
 
 ### CLI validation
 
@@ -86,8 +90,74 @@ geocode + dispatch + that tail.
 
 Verification (`app/pipeline/verify_emails.py`) is wired into
 `run_pipeline.py` and is the supported path. Opt in with `--verify`.
-Export can be gated by `--min-score N` — score map is in `README.md`
-("Verification"). Verifier failures warn but are not fatal.
+Score map is in `README.md` ("Verification"). Verifier failures warn but
+are not fatal.
+
+**`run_zip_batch.py` has no `--verify` flag.** It accepts `--min-score`,
+but nothing in a batch run verifies, so any `N > 0` yields an empty
+`_verified` file unless a prior run verified those contacts. Verify out of
+band (`python -m app.pipeline.verify_emails`) and re-export.
+
+Both CLIs end in `export_run_outputs()`, which writes **three** CSVs off
+the `--csv-path` base — this is the part most easily misread:
+
+| File | Contents | Gated by `--min-score`? | Stamps `export_history`? | Can go to Sheets? |
+|---|---|---|---|---|
+| `_all` | every contact in the DB | no | no | no |
+| `_deduped` | contacts with no `export_history` row for the destination | **no** | **yes** | yes |
+| `_verified` | best contact per business clearing the score | **yes** | no | no |
+
+Consequences worth holding onto:
+
+- `--min-score` gates **only** `_verified`. The `_deduped` push — the one
+  that reaches Sheets and marks contacts exported — is called with a
+  hardcoded `min_score=0` (`export_sheets.py`). **Open question, not a
+  settled decision** (see Open work #7): before the three-file split
+  (13f9b4b, 2026-08-02), `--min-score` gated `export_new_leads()` itself —
+  the same function now reused for `_deduped` — so it gated the actual
+  Sheets push (393a10c, 2026-07-21). The split hardcoded `min_score=0` at
+  that call site, silently dropping the gate on Sheets and moving it to
+  the local-only `_verified` file instead; neither commit message states
+  this as intentional, and the test added alongside it only covers a
+  contact scoring *above* the threshold. The "held-back contacts would
+  re-export later" rationale for keeping it this way is plausible but
+  unconfirmed — don't cite it as prior intent, and don't "fix" it without
+  deciding, with the operator, whether unverified leads should reach
+  Sheets at all.
+- `_all` is opened in **append** mode and ignores `export_history`, so
+  re-running with the same `--csv-path` re-appends the whole DB. The
+  dated default filename is what keeps runs from stacking.
+  `data/archive/MISLABELED_wholedb_export_2026-08-04_all.csv` is this
+  having already bitten us once.
+- `_all` and `_verified` are always local files; only `_deduped` attempts
+  Sheets. With Sheets configured, `_deduped` may not exist on disk at all.
+- `_verified` is side-effect free and safe to regenerate.
+- `export_new_leads()` and `export_run_outputs()` both take an optional
+  `run_cohort_start` (a `scrape_runs.id` cutoff) that scopes every file —
+  including `_all` — to `businesses.first_scrape_run_id >= run_cohort_start`.
+  Neither CLI wires it to a flag yet; pass it when calling the functions
+  directly (e.g. from an analysis script). Unset, behavior is unchanged:
+  `_all` is the whole DB. `scripts/analysis/export_cohort.py` remains the
+  tool for historical cohorts that need the `MIN(raw_leads.scrape_run_id)`
+  fallback for NULL-provenance businesses — this parameter does not do that
+  fallback, it filters straight on `first_scrape_run_id`.
+
+### Email junk filters
+
+One list, `app/pipeline/email_filters.py`, applied at all three points an
+address can enter or leave: ingest (`process_leads.py`), crawl
+(`extract_emails.py`), export (`export_sheets.py`). Add new junk there.
+
+Before 2026-08-06 each path kept its own list and they had drifted (37 /
+18 / 14 entries), so 19 domains the crawler rejected still reached
+`contacts` whenever the *scraper's* email field supplied the address
+rather than the crawl. `tests/test_email_filters.py` asserts the three
+paths agree.
+
+`export_sheets._BAD_EMAIL_PREFIXES` (careers@, jobs@, webmaster@) stays
+export-local on purpose — those are real inboxes we decline to pitch, not
+junk. Filtering them earlier would lose the business outright when it is
+the only address on the site.
 
 ## Crawl-attempt ledger
 
@@ -99,6 +169,65 @@ Column semantics, env tuning, and the force-re-crawl SQL live in
   the cooldown → skip; else crawl.
 - `CRAWL_RETRY_AFTER_HOURS=0` and non-integer values are invalid and fall
   back to the 720-hour default rather than erroring.
+
+## Inline email extraction (`-email`)
+
+`execute_scrape_and_ingest(extract_email=...)`. **None (default) = off for
+grid (bbox set), on everywhere else**; True/False forces it.
+
+Upstream's `-email` is not a metadata flag. For every place result whose
+website passes `IsWebsiteValidForEmail`, `gmaps/place.go:132` spawns a
+separate browser visit to that business's own site — and returns `nil` for
+the place, so **nothing is emitted until that visit finishes**. 93.8% of
+observed raw leads have a website, so it roughly doubles browser work per
+result and gates all output behind it.
+
+Tolerable at one centroid. Across a few hundred grid cells it turned a San
+Jose sweep into an 1800s timeout with zero rows written (2026-08-07). Note
+the failure mode is *time*, not lost entries: `emailjob.go` returns the
+entry even when the website fetch errors, so only a killed process loses
+work.
+
+With it off, `raw_leads.email` is empty for that run and emails arrive via
+`app/pipeline/extract_emails.py` instead — which does the same job with
+concurrency, per-host politeness, the crawl-attempt ledger, and the shared
+junk filter, none of which the scraper's inline pass has.
+
+## Scrape timeouts
+
+`SCRAPER_TIMEOUT_SEC` (default 1800) kills the subprocess. On timeout the
+run now:
+
+- ingests whatever the scraper had already streamed to `-results`,
+- copies that file to `logs/timeout_run<ID>_<UTC>.json`,
+- records `scrape_runs.status = 'timeout'`,
+- **continues the pipeline** if anything was salvaged — dedupe, crawl and
+  export still run over what the sweep paid for. Re-raising here discarded
+  342 usable leads after a 30-minute grid sweep (2026-08-07) and forced a
+  manual recovery every time.
+- re-raises `TimeoutExpired` only when **nothing** was salvaged, so an empty
+  run never passes for a thin market.
+
+Partial-ness is not lost by continuing: `run_end_to_end_pipeline` snapshots
+`MAX(scrape_runs.id)` at start and checks for `timeout` runs above it at the
+end, replacing the "PIPELINE EXECUTED SUCCESSFULLY" banner with an explicit
+partial-coverage warning naming each truncated run. Both summary helpers
+swallow their own errors — a diagnostic must never fail a pipeline that
+otherwise worked.
+
+`timeout` is a distinct status from `failed` so a wall-clock truncation
+isn't read as a crash, and like `blocked` it's excluded from
+`recent_yields()` — a truncated sweep must never become the baseline other
+runs are judged against. Block detection is skipped entirely for these: a
+truncated run's yield says nothing about the proxies, and scoring it would
+strike working ones for a wall-clock problem.
+
+Two limits worth knowing. The `communicate(timeout=)` call discards
+stdout/stderr when it kills the process, so the preserved file is the only
+record of how far the sweep got — and it shows *what* was scraped, not
+*which cell* it reached (Open work #4). And single-centroid mode emits a JSON array rather
+than JSONL, so a killed one is unterminated and nothing is recoverable from
+it; the parser logs and continues rather than raising.
 
 ## Block detection, proxy cooldown, pacing
 
@@ -141,6 +270,64 @@ after any real production run completes.
 
 For manual SQL evaluation of incremental yield and market overlap between runs, see `RUNBOOK_SQL_OVERLAP_ANALYSIS.md`.
 
+## Experiment queue
+
+Four open measurements, in dependency order. Each is a real scrape costing
+real proxy bandwidth, so run them deliberately and record results in
+`RUNS.md`. E1 and E2 share one run.
+
+**Before every one of these, double-check for orphans.** As of 2026-08-07
+`execute_scrape_and_ingest()` logs a warning on a pre-existing
+`google-maps-scraper` process at startup and kills its own scraper's
+process group on timeout/Ctrl-C (see CHANGELOG, closed Open work #3) — but
+that only covers processes *this* wrapper's runs leave behind, not one
+already orphaned from a prior killed parent. Still worth eyeballing by hand
+before a run that costs real proxy bandwidth:
+
+```bash
+pgrep -fl google-maps-scraper || echo "clean"
+```
+
+A stale scraper from a dead run keeps scraping for hours and silently
+contaminates every bandwidth and failure-rate number. One was found on
+2026-08-07 at 15h38m elapsed, having burned 2.0 GB at a 39% failure rate.
+
+Bracket each run with `scripts/webshare_usage.py` for the cost half.
+
+### E1 + E2 — clean baseline at reference geometry (one run)
+
+Does grid work now, and what does one city actually cost? `--radius-km 12
+--cell-km 3.0` reproduces the 2026-07-20 `Dt` geometry exactly (72 cells),
+so the yield is directly comparable to its **362 businesses**.
+
+Success: ~300+ unique businesses, `status='completed'` (not `timeout`),
+completing inside the derived 2592s. Anything in the tens means the fixes
+did not take and the remaining suspects are proxy quality and the
+`4676350` scraper rebuild. Closes Open work #5.
+
+### E3 — radius sweep for the yield/cost curve
+
+8 / 12 / 16 km at 3 km cells against one city and one vertical, on **three
+separate fresh DBs** so the runs don't dedupe against each other:
+
+| radius | cells | est. | derived timeout |
+|---|---|---|---|
+| 8 km | 36 | ~22 min | 1296s |
+| 12 km | 72 | ~43 min | 2592s |
+| 16 km | 121 | ~73 min | 4356s |
+
+Plot businesses per cell. Where marginal yield per cell collapses is the
+standard radius for every future city — the single most useful number for
+planning, since cell count drives runtime, bandwidth and block risk alike.
+
+### E4 — full-harvest lift (blocked on E1)
+
+The "39% more than grid alone" re-measurement. Procedure and the Pass 1
+sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11; the floor exists
+because the 2026-08-06 attempt reported +880% purely because Pass 1
+collapsed to 10 businesses. Do not start until E1 shows a healthy Pass 1.
+Closes Open work #6.
+
 ## Open work
 
 1. **`mock` SPREADSHEET_ID ordering (cosmetic).** `export_sheets.py:47`
@@ -148,22 +335,73 @@ For manual SQL evaluation of incremental yield and market overlap between runs, 
    attempted — but it sits *after* the `CREDENTIALS_FILE` existence check,
    so a mock run without a creds file logs the misleading "Credentials file
    not found" warning. Swap the two checks.
-2. **Use provenance fields for future lift tables**: rely on
-   `businesses.first_scrape_run_id` / `contacts.first_scrape_run_id`
-   instead of raw-lead first-seen inference. **Two caveats apply to data
-   written before 2026-08-04:** legacy rows have NULL provenance and were
-   never backfilled, and crawl-created contacts were never stamped at all.
-   For historical cohorts, scope contacts by their *business's* provenance
-   and fall back to `MIN(raw_leads.scrape_run_id)` for NULL businesses.
-   `scripts/analysis/market_overlap.py` does both.
-3. **Backfill NULL `first_scrape_run_id`** on legacy `businesses` / `contacts`
+2. **Backfill NULL `first_scrape_run_id`** on legacy `businesses` / `contacts`
    rows from `MIN(raw_leads.scrape_run_id)`, so cohort queries stop needing the
-   inference fallback. Not done — queries are in `MAINTENANCE_SQL.md`.
-4. **Give `export_new_leads()` an optional run-cohort filter.** It currently
-   emits every contact absent from `export_history`, which on a DB carrying a
-   baseline is the whole DB. `scripts/analysis/export_cohort.py` works around
-   this but the export path itself is still unscoped.
-Suite state: **249 passed, deterministic** across repeated runs. The
+   inference fallback described under "Settled decisions". Not done — queries
+   are in `MAINTENANCE_SQL.md`.
+3. **Surface `--bbox` on `run_zip_batch.py`.** `run_pipeline.py` has it
+   (line ~688, parsed by `_parse_bbox`, overrides the Nominatim box for grid
+   and full-harvest Pass 1). The batch runner has no equivalent — it geocodes
+   each row and takes whatever bbox Nominatim returns, so there is no way to
+   tighten a batch row to its dense core. Cell count scales with bbox area,
+   so this is the batch-side version of the geometry half of #4.
+4. **Stream scraper progress instead of buffering it.**
+   The `communicate(timeout=)` call discards stdout/stderr when it kills the
+   process, so a timed-out sweep leaves no record of which cell it reached.
+   Partial `-results` are now salvaged and copied to `logs/` (see "Scrape
+   timeouts"), which recovers the *leads* but not the *position*. Getting
+   that needs a reader thread on the (now already-`Popen`) subprocess —
+   deferred as the more invasive half of the same problem.
+5. **Grid mode does not reproduce its published numbers.** Measured by E1
+   in the experiment queue above.
+   Two runs on 2026-08-06 with shipped defaults (`--cell-km 2.0`, Nominatim
+   bbox, proxies on) returned **10 and 4 businesses** for San Jose plumbing,
+   in 7.6 and 6.3 min. The reference `Dt` experiment got 362 — but ran
+   **unproxied**, over a **hand-picked tight bbox** (~27 x 21 km) at **3 km**
+   cells, i.e. 72 cells vs ~420 today. Two independent gaps:
+
+   - **Proxy binding.** JS mode binds one proxy per browser context; the
+     pool derives as `ceil(concurrency / pages-per-browser)` and upstream
+     `-c` defaults to 1, so the default pool is **one context** and every
+     cell shares **one** proxy regardless of `--scraper-proxy-limit` or the
+     20k-line proxy file. README warns against *pinning* pool size to 1;
+     the defaults already do it. Workaround is `--scraper-concurrency 6
+     --scraper-pages-per-browser 1 --scraper-proxy-limit 6`.
+   - **Geometry.** Nominatim's metro bbox is much larger than the dense
+     core the experiment targeted, so default cell counts are ~6x higher
+     with most cells in low-density areas.
+
+   A third multiplier was found on 2026-08-07 and **is now fixed**: `-email`
+   was passed unconditionally, and upstream spawns a separate browser visit
+   to each business's own website per place result, withholding the place
+   entry until it returns (`gmaps/place.go:132`). 93.8% of observed raw
+   leads have a website, so grid was doing ~2 browser visits per result
+   across ~420 cells. `-email` now defaults off for grid — see "Inline email
+   extraction" below. Re-test #5 with that in place before digging further.
+
+   Neither of the two low-yield runs was flagged `blocked` — on a fresh DB
+   the low-yield rule has no history to compare against (see #6).
+6. **Re-measure full-harvest lift — blocked on #5.** Measured by E4 in the
+   experiment queue above. The "39% more than grid
+   alone" figure (SJ 2026-07-20: grid=362 → +multi-query=473 → +ZIP=504) was
+   measured with the 8-variant Pass 2 set **and** the combined Pass 2 call,
+   both since changed, so it no longer describes what the code runs — and
+   full-harvest now costs ~Nx Pass 2 wall time on the strength of it. The
+   2026-08-06 attempt was invalid: Pass 1 is the denominator and it returned
+   10 businesses, against Pass 2's 47 and Pass 3's 41. Procedure and the
+   Pass 1 sanity floor are in `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` §11.
+7. **Decide whether `_deduped` (the Sheets-bound export) should be gated
+   by `--min-score`.** It currently isn't — see "Verification and export
+   tail" above. Before the three-file split (13f9b4b, 2026-08-02),
+   `--min-score` gated the same function now backing `_deduped`, so score
+   *did* gate Sheets (393a10c, 2026-07-21); the split hardcoded
+   `min_score=0` there without either commit stating that as intentional,
+   and without test coverage of a below-threshold contact. Net effect:
+   unverified/low-score leads currently reach Sheets and get marked
+   exported same as anything else. Resolve one way or the other, then
+   update this doc to say which.
+
+Suite state: **287 passed, deterministic** across repeated runs. The
 long-standing proxy-order flakiness is fixed on both sides — scraper-side
 selection no longer shuffles (sticky assignment replaced it), and the
 crawler-side tests assert set membership instead of a fixed order. The
@@ -182,6 +420,14 @@ root-level `calculate_overlap.py` / `get_runtimes.py` could not run there):
 | `market_overlap.py` | Business/contact overlap and lift for a run cohort. Reuses the pipeline's own dedupe keys; handles NULL provenance and cross-vertical contamination. |
 | `export_cohort.py` | Cohort-scoped CSV export. Side-effect free — does not touch `export_history`. |
 | `run_wallclock.py` | Active wall-clock time for a cohort, merging overlapping run intervals. |
+
+`scripts/webshare_usage.py` reports proxy bandwidth/requests for a time
+window (`--last-minutes N`, `--since/--until`, `--days N`), for bracketing a
+run to get a real per-city cost. Note Webshare's "requests" counts CONNECT
+tunnels, not HTTP requests, so bandwidth is the number to model on. Measured
+2026-08-07: a 30-min San Jose plumbing grid scrape (72 cells, ~89% complete)
+cost **163 MB**; the crawler is the opposite shape — many small fetches, and
+where nearly all the failures come from.
 
 `market_overlap.py` replaces `calculate_overlap.py`, which matched raw leads to
 businesses on `place_id` — a key the pipeline never uses for dedupe.
@@ -264,8 +510,9 @@ Provenance stamping, as currently implemented:
   invocation produced them.
 
 Rows written before 2026-08-04 predate the crawl-path stamping and carry
-NULL provenance — see Open work #2/#3 for how to work around it and
-`MAINTENANCE_SQL.md` for the backfill.
+NULL provenance — see "Settled decisions" below for how analysis scripts
+work around it, and Open work #2 for the backfill that would retire the
+workaround.
 
 ## Settled decisions
 
@@ -276,6 +523,14 @@ NULL provenance — see Open work #2/#3 for how to work around it and
 - `min_contacts` means new exportable contacts produced by this run, not
   cumulative DB contacts.
 - One vertical per run: HVAC and plumbing are not combined implicitly.
+- Lift/overlap analysis relies on `businesses.first_scrape_run_id` /
+  `contacts.first_scrape_run_id`, not raw-lead first-seen inference.
+  **Two caveats apply to data written before 2026-08-04:** legacy rows
+  have NULL provenance and were never backfilled (Open work #2), and
+  crawl-created contacts were never stamped at all. For historical
+  cohorts, scope contacts by their *business's* provenance and fall back
+  to `MIN(raw_leads.scrape_run_id)` for NULL businesses.
+  `scripts/analysis/market_overlap.py` does both.
 
 ## Notes
 

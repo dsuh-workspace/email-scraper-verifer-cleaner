@@ -211,7 +211,7 @@ def _apply_additive_columns() -> None:
 
     Deliberately narrow: additive, nullable-or-defaulted columns only. This
     is not a migration framework — anything that drops, renames, or
-    backfills still belongs in the documented SQL in CLAUDE.md.
+    backfills still belongs in the documented SQL in MAINTENANCE_SQL.md.
     """
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())

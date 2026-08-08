@@ -23,6 +23,9 @@ class RecordingLogger:
         msg, params = args[0], args[1:]
         self.messages.setdefault(level, []).append(msg % params if params else msg)
 
+    def debug(self, *args, **kwargs):
+        self._log("debug", args)
+
     def info(self, *args, **kwargs):
         self._log("info", args)
 
@@ -330,6 +333,8 @@ class TestMain:
             scraper_proxy_limit=None,
             scraper_disable_page_reuse=False,
             pass2_per_variant=True,
+            radius_km=None,
+            max_cells=None,
         ):
             called["query"] = query
             called["location"] = location
@@ -662,6 +667,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: exported.append(True))
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="95112, CA",
             min_contacts=50,
@@ -701,6 +707,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="95112, CA",
             min_contacts=1,
@@ -738,6 +745,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             min_contacts=999,
@@ -779,6 +787,7 @@ class TestMain:
         monkeypatch.setattr(run_pipeline, "export_run_outputs", lambda **_kw: None)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="anywhere",
             min_contacts=1,
@@ -811,6 +820,7 @@ class TestMain:
         with pytest.raises(SystemExit):
             # RuntimeError is caught + logged inside run_end_to_end_pipeline, then sys.exit(1)
             run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
                 query="Plumbing",
                 location="unmappable",
                 strategy="grid",
@@ -852,7 +862,7 @@ class TestFullHarvestStrategy:
                         queries=None, fast_mode=None, lang="en",
                         concurrency=None, browser_pool_size=None,
                         pages_per_browser=None, proxy_limit=None,
-                        disable_page_reuse=False):
+                        disable_page_reuse=False, **_kw):
             calls.append({
                 "query": query, "location": location,
                 "lat": lat, "lon": lon, "depth": depth,
@@ -889,6 +899,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -922,6 +933,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -952,6 +964,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -982,6 +995,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1004,6 +1018,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1023,6 +1038,7 @@ class TestFullHarvestStrategy:
 
         custom = ("Plumbing", "Plumber", "Leak repair")
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1046,6 +1062,7 @@ class TestFullHarvestStrategy:
         )
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1079,6 +1096,7 @@ class TestFullHarvestStrategy:
         import pytest
         with pytest.raises(SystemExit):
             run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
                 query="Plumbing",
                 location="unmappable",
                 strategy="full-harvest",
@@ -1166,6 +1184,7 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "logger", recorder)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Roofing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1187,6 +1206,7 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "logger", recorder)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Plumbing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1209,6 +1229,7 @@ class TestFullHarvestStrategy:
         monkeypatch.setattr(run_pipeline, "logger", recorder)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="Roofing",
             location="San Jose, CA",
             strategy="full-harvest",
@@ -1228,6 +1249,7 @@ class TestFullHarvestStrategy:
         # run_end_to_end_pipeline wraps failures in sys.exit(1).
         with pytest.raises(SystemExit):
             run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
                 query="Plumbing",
                 location="San Jose, CA",
                 strategy="full-harvest",
@@ -1243,6 +1265,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="HVAC",
             location="Plano, TX",
             strategy="full-harvest",
@@ -1259,6 +1282,7 @@ class TestFullHarvestStrategy:
         self._wire(monkeypatch, run_pipeline, calls)
 
         run_pipeline.run_end_to_end_pipeline(
+            max_cells=None,  # these assert pass structure, not sweep sizing
             query="HVAC",
             location="Plano, TX",
             strategy="full-harvest",
@@ -1732,3 +1756,65 @@ class TestZipBatchStrategies:
         assert call["target_new_exportable"] == run_zip_batch.DEFAULT_TARGET_NEW_EXPORTABLE
         assert call["max_depth"] == run_zip_batch.DEFAULT_MAX_DEPTH
         assert call["stale_iterations_limit"] == run_zip_batch.DEFAULT_STALE_ITERATIONS
+
+
+class TestGridGeometry:
+    """`--radius-km` / `--max-cells`: cell count is what decides a sweep.
+
+    Nominatim's admin bbox is whatever a city boundary happens to be, so the
+    same flags produce a 72-cell run in one city and a 420-cell one in the
+    next. Three San Jose grid attempts died before this existed.
+    """
+
+    def test_radius_reproduces_the_reference_geometry(self, modules):
+        run_pipeline, _ = modules
+        # The 2026-07-20 Dt experiment: ~27x21km hand-picked box at 3km cells,
+        # 72 cells, 362 businesses. A 12km radius lands on the same count.
+        bbox = run_pipeline._bbox_from_radius(37.3361663, -121.890591, 12.0)
+
+        assert run_pipeline.estimate_grid_cells(bbox, 3.0) == 72
+
+    def test_longitude_is_corrected_for_latitude(self, modules):
+        """Without the cos(lat) term the box is too narrow away from equator."""
+        run_pipeline, _ = modules
+        min_lat, min_lon, max_lat, max_lon = run_pipeline._bbox_from_radius(
+            60.0, 10.0, 10.0
+        )
+
+        # At 60N a degree of longitude is ~half a degree of latitude in km,
+        # so the lon span must be about twice the lat span.
+        assert (max_lon - min_lon) / (max_lat - min_lat) == pytest.approx(2.0, rel=0.05)
+
+    def test_rejects_a_sweep_over_the_cell_ceiling(self, modules):
+        run_pipeline, _ = modules
+        # San Jose's real Nominatim bbox at the default 2km: 420 cells.
+        nominatim = (37.1231596, -122.046227, 37.4691477, -121.5858438)
+
+        with pytest.raises(ValueError, match="420 cells"):
+            run_pipeline._grid_preflight(nominatim, 2.0, 200, None)
+
+    def test_ceiling_can_be_disabled(self, modules):
+        run_pipeline, _ = modules
+        nominatim = (37.1231596, -122.046227, 37.4691477, -121.5858438)
+
+        assert run_pipeline._grid_preflight(nominatim, 2.0, None, None) > 0
+
+    def test_timeout_is_derived_from_cell_count(self, modules):
+        run_pipeline, _ = modules
+        bbox = run_pipeline._bbox_from_radius(37.3361663, -121.890591, 12.0)
+
+        derived = run_pipeline._grid_preflight(bbox, 3.0, 200, None)
+
+        assert derived == 72 * run_pipeline.SECONDS_PER_CELL_PROXIED
+
+    def test_explicit_timeout_wins_over_the_derived_one(self, modules):
+        run_pipeline, _ = modules
+        bbox = run_pipeline._bbox_from_radius(37.3361663, -121.890591, 12.0)
+
+        assert run_pipeline._grid_preflight(bbox, 3.0, 200, 999) == 999
+
+    def test_radius_must_be_positive(self, modules):
+        run_pipeline, _ = modules
+
+        with pytest.raises(ValueError, match="radius_km must be > 0"):
+            run_pipeline._bbox_from_radius(37.3, -121.9, 0)

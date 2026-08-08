@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 STATUS_COMPLETED = "completed"
 STATUS_BLOCKED = "blocked"
 STATUS_FAILED = "failed"
+# Killed at SCRAPER_TIMEOUT_SEC with partial output salvaged. Distinct from
+# `failed` so a wall-clock truncation isn't read as a crash, and — like
+# `blocked` — excluded from `recent_yields` below, so a truncated sweep never
+# becomes the baseline later runs are judged against.
+STATUS_TIMEOUT = "timeout"
 
 # Need at least this many prior runs before a median means anything.
 DEFAULT_MIN_HISTORY = 3

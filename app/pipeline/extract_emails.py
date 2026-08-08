@@ -2,14 +2,18 @@
 Website email harvester.
 
 For each Business that has a website but no email contacts yet, fetch a
-small shortlist of paths (homepage, /contact, /about, /team, ...), regex
-out email addresses, and persist them as Contact rows.
+shortlist of paths (see CONTACT_PATHS), regex out email addresses, and
+persist them as Contact rows.
 
 Design notes
 ------------
 - **Multi-page**: contact info almost never lives on the homepage alone —
   /contact, /contact-us, /about, and /team account for the majority of
-  hits in the HVAC/plumbing space.
+  hits in the HVAC/plumbing space. The list also covers /privacy,
+  /privacy-policy, /terms and /terms-of-service, which is where a site
+  that publishes no address elsewhere usually leaks one. Those legal pages
+  are also the main source of web-agency and webmaster addresses, which is
+  why email_filters.py exists.
 - **Concurrent**: crawling is I/O bound. We fan out per-business with a
   ThreadPoolExecutor, ~10 workers, so a run over 500 sites finishes in
   minutes instead of an hour.
@@ -22,6 +26,7 @@ Design notes
 import logging
 import os
 import re
+import socket
 import threading
 import time
 import urllib.parse
@@ -32,6 +37,12 @@ from typing import List, Optional, Set
 import requests
 from email_validator import EmailNotValidError, validate_email
 
+from app.pipeline.email_filters import (
+    ASSET_EXTENSIONS,
+    EXCLUDE_LOCALPARTS,
+    JUNK_EMAIL_SUBSTRINGS,
+    is_junk_email,
+)
 from app.proxy_utils import load_proxy_file, validate_proxy_url
 
 logger = logging.getLogger(__name__)
@@ -41,77 +52,13 @@ logger = logging.getLogger(__name__)
 # HVAC/plumbing sites.
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
 
-# Exclude asset paths that occasionally regex-match but are never emails.
-# Retina asset names ("logo@2x.avif") are the usual source: the "@2x" reads
-# as an address separator, so the filename survives the regex.
-EXCLUDE_EXTENSIONS = (
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf",
-    ".webp", ".avif", ".ico", ".bmp", ".tiff", ".css", ".js",
-)
-
-# Substring match against the full email. Blocks CDN/tracking noise plus
-# well-known template-site placeholders that regex-match but never
-# resolve to real inboxes. Verifier catches most of these too, but
-# pre-filtering saves API calls + keeps junk out of the DB.
-EXCLUDE_DOMAINS = (
-    # tracking / CDN / build-tool noise
-    "sentry.io",
-    "sentry-next.wixpress.com",
-    "wixpress.com",
-    "wix.com",
-    "cloudflare.com",
-    "cloudfront.net",
-    "googleusercontent.com",
-    "gstatic.com",
-    # recurring non-business/support-site emails found on crawled pages
-    "latofonts.com",
-    "pixelspread.com",
-    "rioradio.org",
-    "imtresidential.com",
-    "newapthome.com",
-    "engrain.com",
-    "santaclarita.gov",
-    "2pointagency.com",
-    "astigmatic.com",
-    # web-agency contact-form relay, not the business's own inbox. Found on
-    # two unrelated Sunnyvale/Santa Clara plumbing sites (2026-08-04) — the
-    # same address on multiple businesses is the tell.
-    "eliteonlinemedia.com",
-    "cdn.",
-    # documentation / spec placeholders
-    "example.com",
-    "example.org",
-    "example.net",
-    "domain.com",
-    "yourdomain.com",
-    "your-domain.com",
-    "mysite.com",
-    "your-email.com",
-    "youremail.com",
-    "yoursite.com",
-    "email.com",
-    # "email@address.com" — theme boilerplate. Not caught by "email.com"
-    # above, which is matched as a substring and stops at the "@".
-    "address.com",
-    # frequent template-site junk seen in scraped SJ/SC data
-    "gami.com",
-    "test.com",
-    "sample.com",
-    # registrar / host placeholder shown by parked pages
-    "godaddy.com",
-    "sentry-cdn.com",
-    # all-x placeholder ("xxx@xxx.xxx") left in theme boilerplate
-    "xxx.xxx",
-)
-
-# Localparts to drop regardless of domain. Font designers ship a contact
-# address inside webfont license headers and CSS comments, so the crawler
-# harvests it from any site embedding that font — on a freemail domain, which
-# EXCLUDE_DOMAINS cannot filter without blocking real contractors. The
-# foundry-domain equivalents (astigmatic.com, latofonts.com) are above.
-EXCLUDE_LOCALPARTS = (
-    "impallari",  # Pablo Impallari / Impallari Type
-)
+# Junk filters live in email_filters.py so the crawler, the ingest path, and
+# the export gate all apply the same list (they used to keep three that
+# drifted). Re-exported under the historical names because
+# `scripts/analysis/export_cohort.py` and `scripts/consolidate_exports.py`
+# import them from this module.
+EXCLUDE_EXTENSIONS = ASSET_EXTENSIONS
+EXCLUDE_DOMAINS = JUNK_EMAIL_SUBSTRINGS
 
 # Paths to try in order. First hit that returns emails short-circuits.
 # Homepage first because many small biz sites do drop a mailto on it.
@@ -160,6 +107,11 @@ _HEADERS = {
 _host_locks: dict = {}
 _host_locks_guard = threading.Lock()
 
+# Resolved/unresolved verdicts per hostname. Bounded by the number of distinct
+# domains in one harvest, so no eviction policy is needed.
+_dns_cache: dict[str, bool] = {}
+_dns_cache_guard = threading.Lock()
+
 
 def _host_lock(host: str) -> threading.Lock:
     """Return a per-host lock so parallel workers on the same domain serialize."""
@@ -175,11 +127,7 @@ def extract_emails_from_html(html_text: str) -> List[str]:
     emails: Set[str] = set()
     for match in EMAIL_REGEX.findall(html_text):
         candidate = match.lower()
-        if any(candidate.endswith(ext) for ext in EXCLUDE_EXTENSIONS):
-            continue
-        if any(bad in candidate for bad in EXCLUDE_DOMAINS):
-            continue
-        if candidate.partition("@")[0] in EXCLUDE_LOCALPARTS:
+        if is_junk_email(candidate):
             continue
         try:
             email = validate_email(candidate, check_deliverability=False).normalized.lower()
@@ -240,10 +188,64 @@ def _build_crawler_proxies(disable_proxy: bool = False) -> Optional[dict[str, st
     return proxies or None
 
 
+def _host_resolves(host: str) -> bool:
+    """DNS-check a host before spending any proxy requests on it.
+
+    Small-business domains lapse constantly, and a dead one used to cost ten
+    proxied requests (one per CONTACT_PATHS entry) plus ten politeness sleeps
+    before we gave up on it. Resolution happens from this machine, not through
+    the proxy, so a miss here is free.
+
+    Cached because the answer can't change within a run and `harvest` may see
+    the same host on several businesses (franchises share domains).
+
+    Only proves the name resolves — a parked domain resolves fine. The
+    homepage short-circuit in `_crawl_business` catches those.
+    """
+    host = (host or "").split(":")[0].lower()
+    if not host:
+        return False
+
+    with _dns_cache_guard:
+        cached = _dns_cache.get(host)
+    if cached is not None:
+        return cached
+
+    try:
+        socket.getaddrinfo(host, None)
+        resolved = True
+    except socket.gaierror:
+        resolved = False
+    except Exception:  # noqa: BLE001
+        # Anything unexpected: assume alive and let the fetch decide, rather
+        # than silently skipping a business over a resolver quirk.
+        resolved = True
+
+    with _dns_cache_guard:
+        _dns_cache[host] = resolved
+    return resolved
+
+
 def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[str]:
     """
     Fetch each path in CONTACT_PATHS in order, aggregating emails.
-    Short-circuits at the first page that yields at least one email.
+
+    Stops early only after /contact or /contact-us yields something — not at
+    the first hit of any kind. A homepage address is usually one of several,
+    while a contact page tends to carry the full set, so a homepage hit is
+    worth continuing past. If neither contact path ever hits, all ten paths
+    are fetched.
+
+    Two cheap exits before that, both aimed at dead domains — which are the
+    dominant cost here, not slow ones. As of 2026-08-07 they accounted for
+    roughly 2,300 of ~2,500 failed proxy requests, because every dead host was
+    tried ten times:
+
+    1. The host must resolve at all (free, no proxy).
+    2. If the *homepage* fails to connect, the remaining nine paths are
+       skipped — they are on the same host, so they cannot do better. A
+       non-200 is different and does not trigger this: plenty of sites 404
+       their root while serving /contact fine.
 
     Serialized per-host via _host_lock so we don't hit the same server
     with parallel bursts.
@@ -253,10 +255,14 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
     base = f"{parsed.scheme}://{parsed.netloc}"
     host = parsed.netloc.lower()
 
+    if not _host_resolves(host):
+        logger.debug("Skipping %s — host does not resolve.", host)
+        return []
+
     found: Set[str] = set()
     lock = _host_lock(host)
     with lock:
-        for path in CONTACT_PATHS:
+        for path_index, path in enumerate(CONTACT_PATHS):
             target = base + path
             try:
                 resp = requests.get(
@@ -274,6 +280,12 @@ def _crawl_business(url: str, proxies: Optional[dict[str, str]] = None) -> List[
                     if path in ("/contact", "/contact-us"):
                         break
             except requests.RequestException:
+                if path_index == 0:
+                    # Homepage wouldn't connect. The other nine paths are the
+                    # same host, so they'd each burn a proxy request, a 7s
+                    # timeout and a politeness sleep to fail identically.
+                    logger.debug("Skipping %s — homepage unreachable.", host)
+                    return []
                 continue
             finally:
                 time.sleep(PER_HOST_DELAY_SEC)

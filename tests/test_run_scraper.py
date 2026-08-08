@@ -172,14 +172,23 @@ class TestExecuteScrapeGridCli:
             lambda location: (None, None, None),
         )
 
-        # Capture subprocess call and skip the actual scraper.
-        class _Completed:
-            returncode = 0
-            stderr = ""
-        def fake_run(cmd, *args, **kwargs):
-            captured.append(cmd)
-            return _Completed()
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        # Capture the Popen call and skip the actual scraper. The stale-
+        # process check (_warn_stale_scraper_processes) also goes through
+        # subprocess.run -> Popen, so it hits this fake too; only the
+        # scraper invocation itself (identified by -results) is recorded.
+        class _FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                self.pid = 99999
+                self.returncode = 0
+                if "-results" in cmd:
+                    captured.append(cmd)
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def wait(self, timeout=None):
+                return self.returncode
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
 
         # Stub scraper binary path (skip real binary requirement) and short-
         # circuit the results-file exists check so parse block is skipped.
@@ -254,26 +263,35 @@ class TestExecuteScrapeMultiQuery:
             lambda location: (None, None, None),
         )
 
-        class _Completed:
-            returncode = 0
-            stderr = ""
-
-        # Capture cmd AND the query-file contents (subprocess.run picks the
-        # -input arg out of cmd, we snapshot it here before tmpfile is cleaned).
+        # Capture cmd AND the query-file contents (Popen picks the -input
+        # arg out of cmd, we snapshot it here before tmpfile is cleaned).
+        # The stale-process check also routes through subprocess.run ->
+        # Popen and hits this fake, so only the scraper invocation itself
+        # (identified by -results) is recorded.
         real_open = open
-        def fake_run(cmd, *args, **kwargs):
-            captured.append(cmd)
-            # cmd is [binary, "-input", <path>, "-results", ...]
-            try:
-                idx = cmd.index("-input")
-                query_path = cmd[idx + 1]
-                with real_open(query_path, "r", encoding="utf-8") as f:
-                    query_files.append(f.read())
-            except (ValueError, FileNotFoundError):
-                query_files.append(None)
-            return _Completed()
+        class _FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                self.pid = 99999
+                self.returncode = 0
+                if "-results" not in cmd:
+                    return
+                captured.append(cmd)
+                # cmd is [binary, "-input", <path>, "-results", ...]
+                try:
+                    idx = cmd.index("-input")
+                    query_path = cmd[idx + 1]
+                    with real_open(query_path, "r", encoding="utf-8") as f:
+                        query_files.append(f.read())
+                except (ValueError, FileNotFoundError):
+                    query_files.append(None)
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+            def wait(self, timeout=None):
+                return self.returncode
         import subprocess as _sp
-        monkeypatch.setattr(_sp, "run", fake_run)
+        monkeypatch.setattr(_sp, "Popen", _FakePopen)
 
         monkeypatch.setattr(run_scraper, "_scraper_binary_path", lambda: "/tmp/fake-scraper-bin")
         import os as _os
@@ -370,6 +388,39 @@ class TestExecuteScrapeMultiQuery:
         assert cmd[cmd.index("-browser-pool-size") + 1] == "2"
         assert cmd[cmd.index("-pages-per-browser") + 1] == "1"
 
+    def test_proxy_cmd_args_match_scraper_proxy_args(self, monkeypatch):
+        """Production's cmd-building must go through the same formatter as
+        `_scraper_proxy_args`, not a re-typed copy of it — regression guard
+        for the two paths drifting apart, which they had until 132dd93."""
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        monkeypatch.setenv(
+            "SCRAPER_PROXIES",
+            "http://proxy1.example.com:8080,http://proxy2.example.com:8080",
+        )
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+        )
+        cmd = captured[0]
+        i = cmd.index("-proxies")
+        assert cmd[i : i + 2] == run_scraper._scraper_proxy_args(
+            session_key="Plumbing"
+        )
+
+    def test_no_proxies_omits_flag(self, monkeypatch):
+        captured, files = [], []
+        self._stub_all(monkeypatch, captured, files)
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            lat=37.3,
+            lon=-121.9,
+        )
+        assert "-proxies" not in captured[0]
+
     def test_scraper_tuning_env_defaults_forwarded(self, monkeypatch):
         captured, files = [], []
         self._stub_all(monkeypatch, captured, files)
@@ -439,3 +490,51 @@ class TestExecuteScrapeMultiQuery:
                 lon=-121.9,
                 concurrency=0,
             )
+
+
+class TestInlineEmailExtraction(TestExecuteScrapeGridCli):
+    """`-email` is off for grid and on elsewhere.
+
+    Upstream spawns a separate browser visit to each business's own website
+    for every place with a valid website (gmaps/place.go:132) and withholds
+    the place entry until that visit returns. Across a few hundred grid cells
+    that multiplied a San Jose sweep into a 1800s timeout with zero rows
+    written. The pipeline's own crawl covers the same ground afterwards.
+    """
+
+    def test_grid_mode_omits_email_flag(self, monkeypatch, tmp_path):
+        captured = []
+        self._stub_all(monkeypatch, captured)
+
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            bbox=(37.21, -122.05, 37.47, -121.75),
+            cell_km=2.0,
+        )
+
+        assert "-email" not in captured[0]
+        assert "-grid-bbox" in captured[0]
+
+    def test_single_centroid_keeps_email_flag(self, monkeypatch, tmp_path):
+        captured = []
+        self._stub_all(monkeypatch, captured)
+
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing", location="San Jose, CA", lat=37.3, lon=-121.9,
+        )
+
+        assert "-email" in captured[0]
+
+    def test_explicit_override_beats_the_grid_default(self, monkeypatch, tmp_path):
+        captured = []
+        self._stub_all(monkeypatch, captured)
+
+        run_scraper.execute_scrape_and_ingest(
+            query="Plumbing",
+            location="San Jose, CA",
+            bbox=(37.21, -122.05, 37.47, -121.75),
+            extract_email=True,
+        )
+
+        assert "-email" in captured[0]
