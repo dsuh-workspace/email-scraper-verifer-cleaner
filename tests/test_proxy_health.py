@@ -1,6 +1,7 @@
 """Tests for block detection, the proxy health ledger, and pacing."""
 
 import json
+import os
 
 import pytest
 
@@ -279,6 +280,7 @@ class TestWaitForCapacity:
 
 class TestLedgerWriteFailures:
     def test_unwritable_ledger_does_not_raise(self, monkeypatch):
-        monkeypatch.setenv("PROXY_HEALTH_FILE", "/nonexistent-root/nope/ph.json")
+        invalid_path = "Z:\\nonexistent-drive-xyz\\nope\\ph.json" if os.name == "nt" else "/proc/fake/ph.json"
+        monkeypatch.setenv("PROXY_HEALTH_FILE", invalid_path)
         record_block([P1], "zero-yield")  # warns, does not raise
         assert proxy_health.load_state() == {}

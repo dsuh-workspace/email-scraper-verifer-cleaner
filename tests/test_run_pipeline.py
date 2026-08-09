@@ -326,7 +326,7 @@ class TestMain:
             disable_scraper_proxy=False, disable_crawler_proxy=False,
             strategy="single-centroid", queries=None, zip_csv=None,
             use_tomba=False, tomba_fallback=False,
-            verify=False, min_score=0, csv_path=None,
+            verify=False, call=False, saleshandy=False, min_score=0, csv_path=None,
             scraper_concurrency=None,
             scraper_browser_pool_size=None,
             scraper_pages_per_browser=None,
@@ -350,6 +350,8 @@ class TestMain:
             called["use_tomba"] = use_tomba
             called["tomba_fallback"] = tomba_fallback
             called["verify"] = verify
+            called["call"] = call
+            called["saleshandy"] = saleshandy
             called["min_score"] = min_score
             called["csv_path"] = csv_path
             called["scraper_concurrency"] = scraper_concurrency
@@ -378,6 +380,8 @@ class TestMain:
             "use_tomba": False,
             "tomba_fallback": False,
             "verify": False,
+            "call": False,
+            "saleshandy": False,
             "min_score": 0,
             "csv_path": None,
             "scraper_concurrency": 3,

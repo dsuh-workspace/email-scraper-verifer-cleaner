@@ -211,6 +211,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "batch (no single location, since a batch spans many rows)."
         ),
     )
+    parser.add_argument(
+        "--saleshandy",
+        action="store_true",
+        help="Sort database and export/push 12 Saleshandy campaign permutations at the end of the batch.",
+    )
     return parser
 
 
@@ -367,6 +372,15 @@ def main() -> None:
         min_score=args.min_score,
         csv_path=args.csv_path or _default_csv_path(args.query),
     )
+
+    if args.saleshandy:
+        logger.info("--- Sorting and Exporting 12 Saleshandy Campaign Permutations ---")
+        try:
+            from app.pipeline.export_saleshandy import export_12_saleshandy_permutations, push_to_saleshandy_api
+            export_12_saleshandy_permutations(min_score=args.min_score)
+            push_to_saleshandy_api(min_score=args.min_score)
+        except Exception as se:
+            logger.warning("Saleshandy campaign export/push failed: %s", se)
 
 
 if __name__ == "__main__":

@@ -9,21 +9,23 @@ from app.db.database import engine
 
 class TestDeriveCsvPaths:
     def test_derives_sibling_paths_from_default(self):
+        from pathlib import Path
         paths = export_sheets._derive_csv_paths("data/leads_plumbing_2026-08-02.csv")
 
-        assert paths == {
-            "all": "data/leads_plumbing_2026-08-02_all.csv",
-            "deduped": "data/leads_plumbing_2026-08-02_deduped.csv",
-            "verified": "data/leads_plumbing_2026-08-02_verified.csv",
+        assert {k: str(Path(v)) for k, v in paths.items()} == {
+            "all": str(Path("data/leads_plumbing_2026-08-02_all.csv")),
+            "deduped": str(Path("data/leads_plumbing_2026-08-02_deduped.csv")),
+            "verified": str(Path("data/leads_plumbing_2026-08-02_verified.csv")),
         }
 
     def test_derives_sibling_paths_from_explicit_csv_path(self):
+        from pathlib import Path
         paths = export_sheets._derive_csv_paths("/tmp/custom.csv")
 
-        assert paths == {
-            "all": "/tmp/custom_all.csv",
-            "deduped": "/tmp/custom_deduped.csv",
-            "verified": "/tmp/custom_verified.csv",
+        assert {k: str(Path(v)) for k, v in paths.items()} == {
+            "all": str(Path("/tmp/custom_all.csv")),
+            "deduped": str(Path("/tmp/custom_deduped.csv")),
+            "verified": str(Path("/tmp/custom_verified.csv")),
         }
 
 

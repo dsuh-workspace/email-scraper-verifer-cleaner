@@ -31,6 +31,8 @@ from sqlalchemy.orm import sessionmaker
 from app.db.create_tables import Contact, ExportHistory, init_db
 from app.db.database import engine
 from app.logging_config import setup_logging
+from app.pipeline.call_leads import trigger_twilio_outbound_calls
+from app.pipeline.export_saleshandy import export_12_saleshandy_permutations, push_to_saleshandy_api
 from app.pipeline.export_sheets import export_run_outputs
 from app.pipeline.extract_emails import harvest_emails_from_websites
 from app.pipeline.process_leads import process_and_deduplicate_leads
@@ -969,6 +971,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--call",
+        action="store_true",
+        help=(
+            "After verification and export, trigger outbound Twilio calls for "
+            "verified contacts with phone numbers. Uses TWILIO_ACCOUNT_SID, "
+            "TWILIO_AUTH_TOKEN, and TWILIO_FROM_NUMBER from .env."
+        ),
+    )
+    parser.add_argument(
+        "--saleshandy",
+        action="store_true",
+        help=(
+            "Export contacts into 12 pre-sorted Saleshandy campaign CSV files "
+            "in data/saleshandy_campaigns/ (Trade x Persona x Phone Classification), "
+            "and push to Saleshandy API if SALESHANDY_API_KEY is configured."
+        ),
+    )
+    parser.add_argument(
         "--min-score",
         type=int,
         default=0,
@@ -1135,6 +1155,8 @@ def run_end_to_end_pipeline(
     use_tomba: bool = False,
     tomba_fallback: bool = False,
     verify: bool = False,
+    call: bool = False,
+    saleshandy: bool = False,
     min_score: int = 0,
     csv_path: str | None = None,
     scraper_concurrency: int | None = None,
@@ -1316,6 +1338,21 @@ def run_end_to_end_pipeline(
             min_score=min_score,
             csv_path=csv_path or _default_csv_path(query, location),
         )
+
+        if call:
+            logger.info("--- Triggering Twilio Outbound Calling Stage ---")
+            try:
+                trigger_twilio_outbound_calls(min_score=min_score)
+            except Exception as ce:  # noqa: BLE001
+                logger.warning("Twilio outbound calling stage failed: %s", ce)
+
+        if saleshandy:
+            logger.info("--- Sorting and Exporting 12 Saleshandy Campaign Permutations ---")
+            try:
+                export_12_saleshandy_permutations(min_score=min_score)
+                push_to_saleshandy_api(min_score=min_score)
+            except Exception as se:  # noqa: BLE001
+                logger.warning("Saleshandy campaign export/push failed: %s", se)
         logger.info("=" * 60)
         truncated = _timed_out_runs_since(run_marker_id)
         if truncated:
@@ -1488,6 +1525,8 @@ def main() -> None:
         use_tomba=args.use_tomba,
         tomba_fallback=args.tomba_fallback,
         verify=args.verify,
+        call=args.call,
+        saleshandy=args.saleshandy,
         min_score=args.min_score,
         csv_path=args.csv_path,
         scraper_concurrency=args.scraper_concurrency,

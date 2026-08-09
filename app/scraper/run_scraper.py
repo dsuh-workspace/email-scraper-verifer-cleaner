@@ -405,7 +405,10 @@ def _kill_scraper_process_group(proc: "subprocess.Popen") -> None:
     """
     try:
         if platform.system() == "Windows":
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            if hasattr(proc, "send_signal"):
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            elif hasattr(proc, "kill"):
+                proc.kill()
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, OSError) as e:

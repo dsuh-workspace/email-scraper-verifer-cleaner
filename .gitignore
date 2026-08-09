@@ -29,7 +29,8 @@ app/scraper/google-maps-scraper
 app/scraper/.google-maps-scraper.new.*
 
 # Output data exports
-data/leads_export.csv
+data/*.csv
+data/saleshandy_campaigns/
 data/temp-*/
 temp-*/
 

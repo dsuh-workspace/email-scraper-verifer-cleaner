@@ -18,5 +18,21 @@ if not DATABASE_URL:
         "  DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db"
     )
 
-# 3. Create the SQLAlchemy engine used across the pipeline.
-engine = create_engine(DATABASE_URL)
+if DATABASE_URL.startswith("sqlite:///"):
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+# 3. Create the SQLAlchemy engine used across the pipeline with SQLite lock protection
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"timeout": 30})
+    from sqlalchemy import event
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+else:
+    engine = create_engine(DATABASE_URL)
