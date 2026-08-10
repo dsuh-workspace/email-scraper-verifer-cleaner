@@ -11,7 +11,8 @@ status, description, place ID).
 
 | Doc | Holds |
 |---|---|
-| `README.md` | Setup, env vars, CLI usage, proxies, verification, schema |
+| `README.md` | Setup overview, env skeleton, high-level usage |
+| `OPERATIONS.md` | Durable operator details: runtime setup, strategy behavior, verification/export, proxies, crawl ledger |
 | `CHANGELOG.md` | Dated shipped history and closed review items |
 | `RUNS.md` | Run tracker (city × vertical) and in-flight run continuations |
 | `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` | Cohort/lift/overlap analysis queries |

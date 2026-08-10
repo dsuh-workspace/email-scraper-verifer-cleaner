@@ -91,14 +91,7 @@ Finds, cleans, normalizes, verifies, phone-classifies, and automatically deploys
 * Python 3.10+ (Recommended `3.12.9`)
 * `gosom/google-maps-scraper` binary in `app/scraper/` (`google-maps-scraper.exe` on Windows)
 
-### Infisical
-If `infisical` is installed and this repo is linked via `.infisical.json`, the CLI defaults `--env` to `dev`, so the shortest repo-local form is:
-
-```bash
-infisical run --path="/$(basename "$PWD")" -- .venv/bin/python run_pipeline.py ...
-```
-
-This repo's Infisical folder is expected to match the directory name (`email-scraper-verifer-cleaner`). If you are outside the repo root, pass the explicit path or `--project-config-dir`.
+See `OPERATIONS.md` for durable runtime setup details, including Infisical usage, scraper binary setup, strategy behavior, verification/export behavior, and proxy operations.
 
 ### 2. Environment Configuration (`.env`)
 ```env
