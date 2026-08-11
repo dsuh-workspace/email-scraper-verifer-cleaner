@@ -203,6 +203,9 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
                 "MachineWordsThreshold": "12",
                 "SpeechThreshold": "4500",
                 "SilenceThreshold": "800",
+                # Enable call recording
+                "Record": "true",
+                "RecordingChannels": "single",
             }
 
             try:

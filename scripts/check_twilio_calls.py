@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
-from app.db.create_tables import Contact
+from app.db.create_tables import Contact, Business
+from app.pipeline.call_recordings import download_call_recording
 
 load_dotenv()
 
@@ -73,9 +74,11 @@ def check_twilio_calls():
                 else:
                     classified_status = "Classified_Voicemail"
 
-                # Update database
-                contacts = session.query(Contact).filter(Contact.phone == to_num).all()
-                for c in contacts:
+                # Update database & download MP3 call recording
+                contact_pairs = session.query(Contact, Business).join(Business, Contact.business_id == Business.id).filter(Contact.phone == to_num).all()
+                biz_name = contact_pairs[0][1].business_name if contact_pairs else "unknown_business"
+
+                for c, b in contact_pairs:
                     if c.lead_status in ("Pending_Classification", "Not Contacted", "Classified_Disconnected", "Unanswered_Retry"):
                         if classified_status == "Unanswered_Retry":
                             if (getattr(c, "call_attempts", 0) or 0) >= 3:
@@ -84,6 +87,12 @@ def check_twilio_calls():
                                 c.lead_status = "Unanswered_Retry"
                         else:
                             c.lead_status = classified_status
+
+                # Download MP3 audio recording named with business name and classification
+                call_sid = call.get("sid")
+                if call_sid:
+                    final_status = contact_pairs[0][0].lead_status if contact_pairs else classified_status
+                    download_call_recording(call_sid, biz_name, to_num, final_status)
             else:
                 in_progress_count += 1
 
