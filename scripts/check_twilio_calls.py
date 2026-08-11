@@ -4,11 +4,16 @@ Updates database/hvac_leads.db as calls complete.
 """
 
 import os
+import sys
 import time
+from pathlib import Path
 import requests
 from dotenv import load_dotenv
-from sqlalchemy.orm import sessionmaker
 
+# Add project root to sys.path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from sqlalchemy.orm import sessionmaker
 from app.db.database import engine
 from app.db.create_tables import Contact
 
@@ -25,15 +30,24 @@ def check_twilio_calls():
         print("Twilio credentials missing.")
         return
 
+    calls = []
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json?PageSize=100"
-    resp = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=15)
     
-    if resp.status_code != 200:
-        print(f"Twilio API check failed: HTTP {resp.status_code}")
-        return
+    while url and len(calls) < 1000:
+        resp = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=15)
+        if resp.status_code != 200:
+            print(f"Twilio API check failed: HTTP {resp.status_code}")
+            break
 
-    calls = resp.json().get("calls", [])
-    print(f"Fetched {len(calls)} recent Twilio call records.")
+        data = resp.json()
+        calls.extend(data.get("calls", []))
+        next_page = data.get("next_page_uri")
+        if next_page:
+            url = f"https://api.twilio.com{next_page}"
+        else:
+            break
+
+    print(f"Fetched {len(calls)} total recent Twilio call records across pages.")
 
     completed_count = 0
     in_progress_count = 0
@@ -49,20 +63,27 @@ def check_twilio_calls():
                 completed_count += 1
                 
                 # Determine classification status based on Twilio AMD / Audio response
-                if answered_by == "machine_end_beep" or answered_by == "machine_start":
+                if answered_by in ("machine_end_beep", "machine_start", "machine_end_silence", "machine_end_other"):
                     classified_status = "Classified_Voicemail"
                 elif answered_by == "human":
                     classified_status = "Classified_Receptionist"
-                elif status in ("no-answer", "busy", "failed", "canceled"):
-                    classified_status = "Classified_Disconnected"
+                elif status in ("no-answer", "busy", "canceled", "failed"):
+                    # Active line missed/busy, or rejected by Twilio concurrency limit (Error 10004)
+                    classified_status = "Unanswered_Retry"
                 else:
                     classified_status = "Classified_Voicemail"
 
                 # Update database
                 contacts = session.query(Contact).filter(Contact.phone == to_num).all()
                 for c in contacts:
-                    if c.lead_status in ("Pending_Classification", "Not Contacted"):
-                        c.lead_status = classified_status
+                    if c.lead_status in ("Pending_Classification", "Not Contacted", "Classified_Disconnected", "Unanswered_Retry"):
+                        if classified_status == "Unanswered_Retry":
+                            if (getattr(c, "call_attempts", 0) or 0) >= 3:
+                                c.lead_status = "Classified_Voicemail"
+                            else:
+                                c.lead_status = "Unanswered_Retry"
+                        else:
+                            c.lead_status = classified_status
             else:
                 in_progress_count += 1
 

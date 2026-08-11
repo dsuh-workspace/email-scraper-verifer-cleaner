@@ -763,6 +763,8 @@ def execute_scrape_and_ingest(
             logger.info(f"Found {len(leads_data)} raw leads. Ingesting into database...")
             raw_leads_to_insert = []
             for item in leads_data:
+                if not isinstance(item, dict):
+                    continue
                 # Standardize categories (can be a list or a string depending on scraper schema)
                 cats = item.get("categories", [])
                 category_str = ", ".join(cats) if isinstance(cats, list) else str(cats)

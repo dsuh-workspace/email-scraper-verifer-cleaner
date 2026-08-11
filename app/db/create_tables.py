@@ -142,6 +142,7 @@ class Contact(Base):
     email = Column(Text)
     lead_status = Column(Text, index=True)
     first_scrape_run_id = Column(Integer, ForeignKey("scrape_runs.id"), index=True)
+    call_attempts = Column(Integer, nullable=False, server_default=text("0"))
 
     __table_args__ = (
         # Composite unique — one (biz, email) pair max. NULL emails are
@@ -202,6 +203,7 @@ _ADDITIVE_COLUMNS = (
     ("businesses", "crawl_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("businesses", "first_scrape_run_id", "INTEGER"),
     ("contacts", "first_scrape_run_id", "INTEGER"),
+    ("contacts", "call_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("export_history", "exported_at", "TIMESTAMP"),
 )
 

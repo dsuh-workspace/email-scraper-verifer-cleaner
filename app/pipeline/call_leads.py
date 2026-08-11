@@ -8,6 +8,7 @@ the destination as IVR, Receptionist, Voicemail, or Disconnected line.
 from __future__ import annotations
 import logging
 import os
+import time
 import requests
 from dotenv import load_dotenv
 from sqlalchemy.orm import sessionmaker
@@ -44,11 +45,12 @@ def reconcile_stale_phone_classifications(session=None, timeout_hours: float = 2
 
         reconciled_count = 0
         for contact in pending_contacts:
-            # Check last_crawled_at / updated_at or fallback if older than cutoff
-            contact_time = contact.last_crawled_at
-            if contact_time is None or (contact_time.tzinfo is None and contact_time < cutoff.replace(tzinfo=None)) or (contact_time.tzinfo is not None and contact_time < cutoff):
-                contact.lead_status = "Voicemail"
-                reconciled_count += 1
+            contact_time = getattr(contact, "created_at", None)
+            # Only reconcile to fallback Voicemail if contact_time exists AND is older than cutoff threshold
+            if contact_time is not None:
+                if (contact_time.tzinfo is None and contact_time < cutoff.replace(tzinfo=None)) or (contact_time.tzinfo is not None and contact_time < cutoff):
+                    contact.lead_status = "Voicemail"
+                    reconciled_count += 1
 
         if own_session and reconciled_count > 0:
             session.commit()
@@ -154,43 +156,53 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
 
     session = Session()
     try:
-        # Find contacts with phone numbers that haven't been classified yet
-        unclassified_statuses = ("Not Contacted", "Verified")
+        # Find contacts with phone numbers that haven't been classified yet (or need retry)
+        unclassified_statuses = ("Not Contacted", "Verified", "Unknown", "Unanswered_Retry", None)
         target_contacts = (
             session.query(Contact, Business)
             .join(Business, Contact.business_id == Business.id)
-            .filter(Contact.phone.isnot(None))
-            .filter(Contact.phone != "")
-            .filter(Contact.lead_status.in_(unclassified_statuses))
+            .filter(Contact.email.isnot(None))
+            .filter(Contact.email != "")
+            .filter((Business.phone.isnot(None) & (Business.phone != "")) | (Contact.phone.isnot(None) & (Contact.phone != "")))
+            .filter(
+                (Contact.lead_status.in_(("Not Contacted", "Verified", "Unknown", "Unanswered_Retry"))) |
+                (Contact.lead_status.is_(None))
+            )
+            .filter((Contact.call_attempts.is_(None)) | (Contact.call_attempts < 3))
             .limit(limit)
             .all()
         )
 
         logger.info("Found %d contacts ready for phone number classification...", len(target_contacts))
         dispatched_count = 0
+        dispatched_businesses: set[int] = set()
         dispatched_phones: set[str] = set()
 
         twilio_api_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json"
 
         for contact, business in target_contacts:
-            phone_to_call = contact.phone.strip()
-
-            # Skip redundant calls if this phone number or business was already dispatched in this run
-            if phone_to_call in dispatched_phones:
+            phone_to_call = (business.phone or contact.phone or "").strip()
+            if not phone_to_call:
                 continue
 
+            # Skip redundant calls if this business or business phone number was already dispatched in this run
+            if business.id in dispatched_businesses or phone_to_call in dispatched_phones:
+                continue
+
+            dispatched_businesses.add(business.id)
             dispatched_phones.add(phone_to_call)
 
-            # Form parameters for Twilio Async AMD & Phone Classifier
+            # Form parameters for Twilio AMD & Phone Classifier (Tuned for Front Desk & Receptionist detection)
             data = {
                 "To": phone_to_call,
                 "From": TWILIO_FROM_NUMBER,
                 "Url": twiml_url,
-                # Enable Twilio Answering Machine & Call Classifier Detection
-                "MachineDetection": "Enable",
-                "AsyncAmd": "true",
-                "AsyncAmdStatusCallback": amd_callback_url,
-                "MachineDetectionTimeout": "5",
+                # Enable Advanced Twilio Answering Machine & Call Classifier Detection
+                "MachineDetection": "DetectMessageEnd",
+                "MachineDetectionTimeout": "10",
+                "MachineWordsThreshold": "12",
+                "SpeechThreshold": "4500",
+                "SilenceThreshold": "800",
             }
 
             try:
@@ -205,23 +217,23 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
                     call_data = response.json()
                     call_sid = call_data.get("sid")
                     
-                    # Update status for ALL contacts at this business / sharing this phone number to indicate call in progress
+                    # Update status & increment call attempts for ALL contacts at this business
                     sibling_query = session.query(Contact).filter(
+                        Contact.business_id == business.id,
                         Contact.lead_status.in_(unclassified_statuses)
                     )
-                    if contact.business_id:
-                        sibling_query = sibling_query.filter(Contact.business_id == contact.business_id)
-                    else:
-                        sibling_query = sibling_query.filter(Contact.phone == phone_to_call)
 
                     for sib in sibling_query.all():
                         sib.lead_status = "Pending_Classification"
+                        sib.call_attempts = (sib.call_attempts or 0) + 1
 
                     dispatched_count += 1
                     logger.info(
-                        "Dispatched single classification call to %s (%s) — Call SID: %s",
+                        "Dispatched main business classification call to %s (%s) — Call SID: %s",
                         phone_to_call, business.business_name, call_sid
                     )
+                    # Respect Twilio concurrency & CPS limits to avoid Error 10004
+                    time.sleep(1.2)
                 else:
                     logger.warning(
                         "Twilio classification call failed for %s (%s): HTTP %d — %s",

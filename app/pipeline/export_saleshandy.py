@@ -161,7 +161,7 @@ def classify_phone_type(contact) -> str:
     return "Voicemail"
 
 
-def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexported: bool = False) -> dict[str, list[dict]]:
+def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexported: bool = False, destination_prefix: str = "saleshandy", only_classified: bool = False) -> dict[str, list[dict]]:
     """Query contacts and sort into 12 permutation buckets.
     
     Enforces Persona Priority: If a business has an Owner contact, only the Owner
@@ -169,7 +169,9 @@ def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexporte
     
     :param session: SQLAlchemy session.
     :param min_score: Minimum verification score filter (0 means no gating).
-    :param exclude_unexported: If True, exclude contacts previously exported to Saleshandy via ExportHistory.
+    :param exclude_unexported: If True, exclude contacts previously exported via ExportHistory.
+    :param destination_prefix: Destination prefix string to filter in ExportHistory.
+    :param only_classified: If True, only include contacts with explicit phone classification (Classified_*).
     """
     from collections import defaultdict
     from datetime import datetime, timezone
@@ -198,7 +200,7 @@ def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexporte
         from sqlalchemy import select
         exported_ids_stmt = (
             select(ExportHistory.contact_id)
-            .where(ExportHistory.destination.like("saleshandy%"))
+            .where(ExportHistory.destination.like(f"{destination_prefix}%"))
         )
         query = query.filter(~Contact.id.in_(exported_ids_stmt))
 
@@ -222,7 +224,7 @@ def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexporte
             # Business has no Owner -> enroll NonOwner contact(s)
             prioritized_contacts.extend(contact_triples)
 
-    logger.info("Sorting %d prioritized contacts into 12 Saleshandy permutations (min_score=%d)...", len(prioritized_contacts), min_score)
+    logger.info("Sorting %d prioritized contacts into 12 Saleshandy permutations (min_score=%d, only_classified=%s)...", len(prioritized_contacts), min_score, only_classified)
 
     buckets: dict[str, list[dict]] = {
         f"{trade}_{persona}_{phone}": []
@@ -232,6 +234,9 @@ def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexporte
     }
 
     for contact, business, persona in prioritized_contacts:
+        if only_classified and not (contact.lead_status and "Classified" in contact.lead_status):
+            continue
+
         trade = classify_trade(business)
         phone_type = classify_phone_type(contact)
 
@@ -279,7 +284,12 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
         out_path = Path(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
-        buckets = sort_database_into_12_buckets(session, min_score=min_score, exclude_unexported=exclude_unexported)
+        buckets = sort_database_into_12_buckets(
+            session,
+            min_score=min_score,
+            exclude_unexported=exclude_unexported,
+            destination_prefix="saleshandy_csv"
+        )
         summary_counts: dict[str, int] = {}
 
         fieldnames = [
@@ -303,7 +313,7 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
                 if cid:
                     session.add(ExportHistory(
                         contact_id=cid,
-                        destination=f"saleshandy_{perm_tag.lower()}",
+                        destination=f"saleshandy_csv_{perm_tag.lower()}",
                         exported_at=datetime.now(timezone.utc)
                     ))
 
@@ -319,14 +329,12 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
         session.close()
 
 
-def push_to_saleshandy_api(min_score: int = 0, exclude_unexported: bool = True) -> dict[str, int]:
+def push_to_saleshandy_api(min_score: int = 0, exclude_unexported: bool = True, only_classified: bool = True) -> dict[str, int]:
     """
-    Automated API Push: Uploads prospects directly to Saleshandy sequence endpoints.
-    Uses persistent HTTP session, connection pooling, and exponential backoff retry logic.
-    Requires SALESHANDY_API_KEY and SH_SEQ_* sequence IDs in .env.
+    Push sorted lead buckets directly into live Saleshandy campaign sequences via API.
     """
     if not SALESHANDY_API_KEY:
-        logger.warning("Skipping Saleshandy API push: SALESHANDY_API_KEY is not set in .env")
+        logger.warning("SALESHANDY_API_KEY is not set in environment; skipping API push.")
         return {}
 
     from datetime import datetime, timezone
@@ -336,7 +344,13 @@ def push_to_saleshandy_api(min_score: int = 0, exclude_unexported: bool = True) 
 
     session_db = Session()
     try:
-        buckets = sort_database_into_12_buckets(session_db, min_score=min_score, exclude_unexported=exclude_unexported)
+        buckets = sort_database_into_12_buckets(
+            session_db,
+            min_score=min_score,
+            exclude_unexported=exclude_unexported,
+            destination_prefix="saleshandy_api",
+            only_classified=only_classified
+        )
         results: dict[str, int] = {}
 
         # Setup HTTP Session with retry adapter for resilience
@@ -356,6 +370,40 @@ def push_to_saleshandy_api(min_score: int = 0, exclude_unexported: bool = True) 
             "Content-Type": "application/json",
         }
 
+        # Step 1: Pre-fetch live sequence Step 1 IDs
+        seq_step_map = {}
+        try:
+            seq_resp = http_session.get("https://open-api.saleshandy.com/v1/sequences", headers=headers, timeout=15)
+            if seq_resp.status_code == 200:
+                payload = seq_resp.json().get("payload", [])
+                for s in payload:
+                    if s.get("id") and s.get("steps"):
+                        seq_step_map[s["id"]] = s["steps"][0]["id"]
+        except Exception as e:
+            logger.warning("Could not pre-fetch Saleshandy sequence steps: %s", e)
+
+        # Step 1b: Dynamic System Field Discovery with exact Saleshandy defaults
+        field_id_map = {
+            "email": "qPBRX3lBPD",
+            "firstName": "KwO0O59MP6",
+            "lastName": "VaDq03egzo",
+            "company": "gw4lvyOvwA",
+            "phoneNumber": "gw4lvyOLwA",
+            "jobTitle": "lwGMlr4Va6",
+            "website": "DPQGBN12zR",
+        }
+        try:
+            field_resp = http_session.get("https://open-api.saleshandy.com/v1/fields?systemFields=true", headers=headers, timeout=15)
+            if field_resp.status_code == 200:
+                fields_payload = field_resp.json().get("payload", [])
+                for f in fields_payload:
+                    mdf = f.get("mappingDefaultField")
+                    if mdf and f.get("id"):
+                        field_id_map[mdf] = f["id"]
+        except Exception as fe:
+            logger.warning("Could not dynamically fetch Saleshandy system fields (using defaults): %s", fe)
+
+        # Step 2: Import prospects into target sequences
         for perm_tag, records in buckets.items():
             seq_id = SEQUENCE_ID_MAP.get(perm_tag)
             if not seq_id:
@@ -363,42 +411,70 @@ def push_to_saleshandy_api(min_score: int = 0, exclude_unexported: bool = True) 
                 results[perm_tag] = 0
                 continue
 
-            push_url = f"{SALESHANDY_API_URL.rstrip('/')}/{seq_id}/prospects"
-            pushed_count = 0
+            step_id = seq_step_map.get(seq_id)
+            if not step_id:
+                logger.warning("No Step 1 ID found for Saleshandy sequence %s", seq_id)
+                results[perm_tag] = 0
+                continue
+
+            prospect_list = []
+            rec_map = {}
 
             for rec in records:
+                email = (rec.get("Email") or "").strip()
+                if not email:
+                    continue
+
+                first_name = (rec.get("First Name") or "Team").replace("/", " ").strip()
+                last_name = (rec.get("Last Name") or "Team").replace("/", " ").strip()
+                company = (rec.get("Company") or "Business").replace("$", "").replace("/", " ").strip()
+                phone = (rec.get("Phone") or "").strip()
+                job_title = (rec.get("Job Title") or "").strip()
+                website = (rec.get("Website") or "").strip()
+
+                prospect_fields = [
+                    {"id": field_id_map.get("email", "qPBRX3lBPD"), "value": email},
+                    {"id": field_id_map.get("firstName", "KwO0O59MP6"), "value": first_name if first_name else "Team"},
+                    {"id": field_id_map.get("lastName", "VaDq03egzo"), "value": last_name if last_name else "Team"},
+                    {"id": field_id_map.get("company", "gw4lvyOvwA"), "value": company if company else "Business"},
+                    {"id": field_id_map.get("phoneNumber", "gw4lvyOLwA"), "value": phone},
+                    {"id": field_id_map.get("jobTitle", "lwGMlr4Va6"), "value": job_title},
+                ]
+                if website and "website" in field_id_map:
+                    prospect_fields.append({"id": field_id_map["website"], "value": website})
+
+                prospect_list.append({"fields": prospect_fields})
+                rec_map[email] = rec
+
+            pushed_count = 0
+            if prospect_list:
+                import_url = "https://open-api.saleshandy.com/v1/prospects/import"
                 payload = {
-                    "email": rec["Email"],
-                    "first_name": rec["First Name"],
-                    "last_name": rec["Last Name"],
-                    "company_name": rec["Company"],
-                    "phone_number": rec["Phone"],
-                    "job_title": rec["Job Title"],
-                    "custom_fields": {
-                        "demo_phone": rec["Demo Phone"],
-                        "trade": rec["Trade"],
-                        "phone_classification": rec["Phone Classification"],
-                    }
+                    "prospectList": prospect_list,
+                    "stepId": step_id,
+                    "conflictAction": "overwrite",
+                    "verifyProspects": False
                 }
 
                 try:
-                    resp = http_session.post(push_url, json=payload, headers=headers, timeout=15)
+                    resp = http_session.post(import_url, json=payload, headers=headers, timeout=20)
                     if resp.status_code in (200, 201):
-                        pushed_count += 1
-                        cid = rec.get("Contact ID")
-                        if cid:
-                            session_db.add(ExportHistory(
-                                contact_id=cid,
-                                destination="saleshandy",
-                                exported_at=datetime.now(timezone.utc)
-                            ))
+                        pushed_count = len(prospect_list)
+                        for rec in records:
+                            cid = rec.get("Contact ID")
+                            if cid:
+                                session_db.add(ExportHistory(
+                                    contact_id=cid,
+                                    destination=f"saleshandy_api_{perm_tag.lower()}",
+                                    exported_at=datetime.now(timezone.utc)
+                                ))
                     else:
-                        logger.warning("Saleshandy API push failed for %s to seq %s: HTTP %d — %s", rec["Email"], seq_id, resp.status_code, resp.text[:200])
+                        logger.warning("Saleshandy API prospect import failed for seq %s (%s): HTTP %d — %s", seq_id, perm_tag, resp.status_code, resp.text[:200])
                 except Exception as e:
-                    logger.error("Error pushing %s to Saleshandy: %s", rec["Email"], e)
+                    logger.error("Error importing prospects into Saleshandy sequence %s: %s", seq_id, e)
 
             session_db.commit()
-            logger.info("Successfully pushed %d prospects to Saleshandy sequence %s (%s)", pushed_count, seq_id, perm_tag)
+            logger.info("Successfully imported %d prospects into Saleshandy sequence %s (%s)", pushed_count, seq_id, perm_tag)
             results[perm_tag] = pushed_count
 
         return results

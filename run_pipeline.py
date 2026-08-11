@@ -21,6 +21,7 @@ Only single-centroid loops, and only it reads min_contacts/max_depth.
 from __future__ import annotations
 import argparse
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -1350,7 +1351,9 @@ def run_end_to_end_pipeline(
             logger.info("--- Sorting and Exporting 12 Saleshandy Campaign Permutations ---")
             try:
                 export_12_saleshandy_permutations(min_score=min_score)
-                push_to_saleshandy_api(min_score=min_score)
+                if os.getenv("SALESHANDY_API_KEY"):
+                    logger.info("--- Automatically Pushing Leads to Live Saleshandy API Campaigns ---")
+                    push_to_saleshandy_api(min_score=min_score)
             except Exception as se:  # noqa: BLE001
                 logger.warning("Saleshandy campaign export/push failed: %s", se)
         logger.info("=" * 60)
