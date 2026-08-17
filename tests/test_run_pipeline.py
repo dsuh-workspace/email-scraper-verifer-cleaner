@@ -78,6 +78,14 @@ def modules():
     fake_scraper.execute_scrape_and_ingest = lambda *args, **kwargs: None
     fake_scraper.geocode_location = lambda location: (None, None, None)
 
+    fake_call_leads = types.ModuleType("app.pipeline.call_leads")
+    fake_call_leads.trigger_twilio_outbound_calls = lambda **_kw: None
+    fake_call_leads.poll_and_classify_completed_calls = lambda **_kw: None
+
+    fake_saleshandy = types.ModuleType("app.pipeline.export_saleshandy")
+    fake_saleshandy.export_12_saleshandy_permutations = lambda **_kw: None
+    fake_saleshandy.push_to_saleshandy_api = lambda **_kw: None
+
     original_modules = {}
     for name, module in {
         "sqlalchemy": fake_sqlalchemy,
@@ -85,6 +93,8 @@ def modules():
         "app.db.database": fake_database,
         "app.db.create_tables": fake_create_tables,
         "app.logging_config": fake_logging,
+        "app.pipeline.call_leads": fake_call_leads,
+        "app.pipeline.export_saleshandy": fake_saleshandy,
         "app.pipeline.export_sheets": fake_export,
         "app.pipeline.extract_emails": fake_extract,
         "app.pipeline.process_leads": fake_process,

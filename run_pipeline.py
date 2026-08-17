@@ -32,7 +32,10 @@ from sqlalchemy.orm import sessionmaker
 from app.db.create_tables import Contact, ExportHistory, init_db
 from app.db.database import engine
 from app.logging_config import setup_logging
-from app.pipeline.call_leads import trigger_twilio_outbound_calls
+from app.pipeline.call_leads import (
+    trigger_twilio_outbound_calls,
+    poll_and_classify_completed_calls,
+)
 from app.pipeline.export_saleshandy import export_12_saleshandy_permutations, push_to_saleshandy_api
 from app.pipeline.export_sheets import export_run_outputs
 from app.pipeline.extract_emails import harvest_emails_from_websites
@@ -1342,6 +1345,8 @@ def run_end_to_end_pipeline(
             logger.info("--- Triggering Twilio Outbound Calling Stage ---")
             try:
                 trigger_twilio_outbound_calls(min_score=min_score)
+                logger.info("--- Transcribing Audio & Performing Speech-to-Text Call Classification ---")
+                poll_and_classify_completed_calls(wait_for_completion=True)
             except Exception as ce:  # noqa: BLE001
                 logger.warning("Twilio outbound calling stage failed: %s", ce)
 

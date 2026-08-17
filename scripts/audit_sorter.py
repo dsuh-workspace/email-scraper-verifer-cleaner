@@ -70,7 +70,7 @@ def run_sorter_audit():
         # ---------------------------------------------------------
         print("\n--- TEST 3: Phone Classification Sample Check ---")
         for i, (c, b) in enumerate(sample_contacts, start=1):
-            phone_type = classify_phone_type(c)
+            phone_type = classify_phone_type(c, business=b)
             print(f"[{i:02d}] Phone: {c.phone or b.phone} | DB Status: {c.lead_status!r} -> Phone Bucket: {phone_type}")
 
         # ---------------------------------------------------------

@@ -256,7 +256,106 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
         session.close()
 
 
+def poll_and_classify_completed_calls(wait_for_completion: bool = True, max_wait_sec: int = 45) -> dict[str, int]:
+    """
+    Poll recent Twilio calls, download WAV recordings, transcribe audio via STT,
+    and update database contacts with accurate classification statuses:
+      - Classified_Receptionist
+      - Classified_IVR
+      - Classified_Voicemail
+      - Classified_Disconnected
+      - Unanswered_Retry
+    """
+    from app.pipeline.classify_call import fetch_and_classify_twilio_recording
+    from app.pipeline.call_recordings import download_call_recording
+    from app.db.create_tables import Contact, Business
+
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        logger.warning("Twilio credentials missing. Skipping call classification polling.")
+        return {}
+
+    start_time = time.time()
+    if wait_for_completion:
+        logger.info("Waiting %d seconds for in-flight calls to connect/record...", min(15, max_wait_sec))
+        time.sleep(min(15, max_wait_sec))
+
+    session = Session()
+    try:
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json?PageSize=100"
+        resp = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=15)
+        if resp.status_code != 200:
+            logger.error("Failed to query Twilio calls API: HTTP %d", resp.status_code)
+            return {}
+
+        calls = resp.json().get("calls", [])
+        classified_counts: dict[str, int] = {}
+
+        for call in calls:
+            to_num = call.get("to")
+            status = call.get("status")
+            call_sid = call.get("sid")
+            duration = float(call.get("duration") or 0.0)
+            error_code = call.get("error_code")
+
+            if status in ("completed", "no-answer", "busy", "failed", "canceled"):
+                classified_status = None
+                
+                if status == "completed":
+                    rec_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}/Recordings.json"
+                    try:
+                        r_resp = requests.get(rec_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=10)
+                        if r_resp.status_code == 200:
+                            recs = r_resp.json().get("recordings", [])
+                            if recs:
+                                rec_sid = recs[0].get("sid")
+                                classified_status, transcript = fetch_and_classify_twilio_recording(rec_sid, duration_sec=duration)
+                                logger.info("STT Classified Call %s (%s) -> %s [\"%s\"]", call_sid, to_num, classified_status, transcript[:60])
+                    except Exception as e:
+                        logger.warning("Error fetching recording for call %s: %s", call_sid, e)
+
+                if not classified_status:
+                    if status == "failed" and error_code in ("21211", "13223", "13224", "13225"):
+                        classified_status = "Classified_Disconnected"
+                    elif status in ("no-answer", "busy", "canceled"):
+                        classified_status = "Unanswered_Retry"
+                    elif status == "failed":
+                        classified_status = "Unanswered_Retry"
+                    else:
+                        classified_status = "Classified_Voicemail"
+
+                contact_pairs = session.query(Contact, Business).join(Business, Contact.business_id == Business.id).filter(Contact.phone == to_num).all()
+                biz_name = contact_pairs[0][1].business_name if contact_pairs else "unknown_business"
+
+                for c, b in contact_pairs:
+                    if classified_status == "Unanswered_Retry":
+                        if (getattr(c, "call_attempts", 0) or 0) >= 3:
+                            c.lead_status = "Classified_Voicemail"
+                        else:
+                            c.lead_status = "Unanswered_Retry"
+                    else:
+                        c.lead_status = classified_status
+
+                if call_sid:
+                    final_status = contact_pairs[0][0].lead_status if contact_pairs else classified_status
+                    download_call_recording(call_sid, biz_name, to_num, final_status)
+
+                classified_counts[classified_status] = classified_counts.get(classified_status, 0) + 1
+
+        session.commit()
+        sync_phone_classifications_across_business_contacts(session=session)
+        logger.info("Call polling & STT classification complete: %s", classified_counts)
+        return classified_counts
+    except Exception as e:
+        session.rollback()
+        logger.error("Error polling/classifying calls: %s", e)
+        return {}
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     from app.logging_config import setup_logging
     setup_logging()
     trigger_twilio_outbound_calls()
+    poll_and_classify_completed_calls(wait_for_completion=True)
+
