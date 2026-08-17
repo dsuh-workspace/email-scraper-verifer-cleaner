@@ -123,7 +123,7 @@ def sync_phone_classifications_across_business_contacts(session=None) -> int:
             session.close()
 
 
-def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_url: str | None = None) -> int:
+def trigger_twilio_outbound_calls(min_score: int = 80, limit: int | None = None, twiml_url: str | None = None) -> int:
     """
     Dispatch classification calls to determine if destination connects to:
       - IVR (Phone Tree)
@@ -133,8 +133,8 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
 
     Ensures EXACTLY ONE CALL PER BUSINESS / PHONE NUMBER.
 
-    :param min_score: Minimum verification score filter.
-    :param limit: Max number of calls to dispatch.
+    :param min_score: Minimum verification score filter (defaults to 80 for Safe Only).
+    :param limit: Max number of calls to dispatch (None for unlimited).
     :param twiml_url: URL that returns TwiML classification instructions for the call.
     :return: Count of successfully dispatched calls.
     """
@@ -145,20 +145,13 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
     reconcile_stale_phone_classifications(timeout_hours=2.0)
     sync_phone_classifications_across_business_contacts()
 
-    base_url_clean = PUBLIC_BASE_URL.rstrip('/') if PUBLIC_BASE_URL else "https://daniel-phone-classifier.autopilotlocal.com"
-    
-    if not twiml_url:
-        twiml_url = f"{base_url_clean}/outbound-call"
-
-    amd_callback_url = f"{base_url_clean}/amd-callback"
-
-    from app.db.create_tables import Contact, Business
+    from app.db.create_tables import Contact, Business, EmailVerification
 
     session = Session()
     try:
         # Find contacts with phone numbers that haven't been classified yet (or need retry)
         unclassified_statuses = ("Not Contacted", "Verified", "Unknown", "Unanswered_Retry", None)
-        target_contacts = (
+        query = (
             session.query(Contact, Business)
             .join(Business, Contact.business_id == Business.id)
             .filter(Contact.email.isnot(None))
@@ -169,9 +162,15 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
                 (Contact.lead_status.is_(None))
             )
             .filter((Contact.call_attempts.is_(None)) | (Contact.call_attempts < 3))
-            .limit(limit)
-            .all()
         )
+
+        if min_score > 0:
+            query = query.join(EmailVerification, EmailVerification.contact_id == Contact.id).filter(EmailVerification.score >= min_score)
+
+        if limit:
+            query = query.limit(limit)
+
+        target_contacts = query.all()
 
         logger.info("Found %d contacts ready for phone number classification...", len(target_contacts))
         dispatched_count = 0
@@ -196,7 +195,7 @@ def trigger_twilio_outbound_calls(min_score: int = 50, limit: int = 50, twiml_ur
             data = {
                 "To": phone_to_call,
                 "From": TWILIO_FROM_NUMBER,
-                "Url": twiml_url,
+                "Twiml": "<Response><Pause length=\"12\"/><Hangup/></Response>",
                 # Enable Advanced Twilio Answering Machine & Call Classifier Detection
                 "MachineDetection": "DetectMessageEnd",
                 "MachineDetectionTimeout": "10",
@@ -282,12 +281,20 @@ def poll_and_classify_completed_calls(wait_for_completion: bool = True, max_wait
     session = Session()
     try:
         url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json?PageSize=100"
-        resp = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=15)
-        if resp.status_code != 200:
-            logger.error("Failed to query Twilio calls API: HTTP %d", resp.status_code)
-            return {}
+        calls = []
+        while url:
+            resp = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=15)
+            if resp.status_code != 200:
+                logger.error("Failed to query Twilio calls API: HTTP %d", resp.status_code)
+                break
+            payload = resp.json()
+            calls.extend(payload.get("calls", []))
+            next_uri = payload.get("next_page_uri")
+            if next_uri and len(calls) < 400:
+                url = f"https://api.twilio.com{next_uri}"
+            else:
+                break
 
-        calls = resp.json().get("calls", [])
         classified_counts: dict[str, int] = {}
 
         for call in calls:
@@ -323,7 +330,7 @@ def poll_and_classify_completed_calls(wait_for_completion: bool = True, max_wait
                     else:
                         classified_status = "Classified_Voicemail"
 
-                contact_pairs = session.query(Contact, Business).join(Business, Contact.business_id == Business.id).filter(Contact.phone == to_num).all()
+                contact_pairs = session.query(Contact, Business).join(Business, Contact.business_id == Business.id).filter((Contact.phone == to_num) | (Business.phone == to_num)).all()
                 biz_name = contact_pairs[0][1].business_name if contact_pairs else "unknown_business"
 
                 for c, b in contact_pairs:
