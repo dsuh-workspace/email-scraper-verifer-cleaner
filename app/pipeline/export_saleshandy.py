@@ -306,7 +306,7 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
         first_name = name_parts[0] if name_parts else ("there" if persona == "Owner" else "Team")
         last_name = name_parts[1] if len(name_parts) > 1 else ""
 
-        demo_phone = "472-244-1040" if trade == "HVAC" else "472-244-1040"
+        demo_phone = "472-244-1040" if trade == "HVAC" else "661-605-3526"
         cleaned_company = clean_company_name(business.business_name)
 
         record = {

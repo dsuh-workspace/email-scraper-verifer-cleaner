@@ -198,6 +198,16 @@ class TestBucketingAndDataConservation:
         assert row["Permutation Tag"] == "HVAC_Owner_IVR"
         assert row["Demo Phone"] == "472-244-1040"
 
+        # Test Plumbing demo phone mapping
+        biz_plumb = Business(id=2, business_name="Leak Fixers", category="Plumber")
+        c_plumb = Contact(business_id=2, name="Mario Bros", title="Owner", email="mario@leakfix.com", lead_status="Classified_IVR")
+        session.add_all([biz_plumb, c_plumb])
+        session.commit()
+
+        buckets_plumb = sort_database_into_12_buckets(session, min_score=0)
+        row_plumb = buckets_plumb["Plumbing_Owner_IVR"][0]
+        assert row_plumb["Demo Phone"] == "661-605-3526"
+
     def test_disconnected_phone_excluded(self, in_memory_session):
         session = in_memory_session
         biz = Business(id=1, business_name="Dead Phone HVAC", category="HVAC contractor")
