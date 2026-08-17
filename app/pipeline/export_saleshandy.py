@@ -237,14 +237,14 @@ def classify_phone_type(contact, business=None) -> str:
         return "Voicemail"
 
 
-def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexported: bool = False, destination_prefix: str = "saleshandy", only_classified: bool = False) -> dict[str, list[dict]]:
+def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexported: bool = False, destination_prefix: str = "saleshandy", only_classified: bool = False) -> dict[str, list[dict]]:
     """Query contacts and sort into 12 permutation buckets.
     
     Enforces Persona Priority: If a business has an Owner contact, only the Owner
     contact is enrolled; NonOwner contacts for the same business are skipped.
     
     :param session: SQLAlchemy session.
-    :param min_score: Minimum verification score filter (0 means no gating).
+    :param min_score: Minimum verification score filter (defaults to 80 for 100% Safe Only).
     :param exclude_unexported: If True, exclude contacts previously exported via ExportHistory.
     :param destination_prefix: Destination prefix string to filter in ExportHistory.
     :param only_classified: If True, only include contacts with explicit phone classification (Classified_*).
@@ -369,7 +369,7 @@ def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexporte
     return buckets
 
 
-def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaigns", min_score: int = 0, exclude_unexported: bool = False) -> dict[str, int]:
+def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaigns", min_score: int = 80, exclude_unexported: bool = False) -> dict[str, int]:
     """Export 12 pre-sorted CSV files for manual/batch Saleshandy import."""
     from datetime import datetime, timezone
     from app.db.create_tables import ExportHistory
