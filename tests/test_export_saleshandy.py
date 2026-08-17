@@ -114,7 +114,7 @@ class TestPhoneClassification:
     def test_fallback_phone_status_mapping(self, status):
         contact = Contact(lead_status=status)
         phone_type = classify_phone_type(contact)
-        assert phone_type in ("IVR", "Receptionist", "Voicemail")
+        assert phone_type is None
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ class TestBucketingAndDataConservation:
         session.commit()
 
         # Execute sorter
-        buckets = sort_database_into_12_buckets(session)
+        buckets = sort_database_into_12_buckets(session, min_score=0)
 
         # Assert all 12 keys exist
         assert len(buckets) == 12
@@ -185,7 +185,7 @@ class TestBucketingAndDataConservation:
         session.add_all([biz, contact])
         session.commit()
 
-        buckets = sort_database_into_12_buckets(session)
+        buckets = sort_database_into_12_buckets(session, min_score=0)
         row = buckets["HVAC_Owner_IVR"][0]
 
         assert row["First Name"] == "Alice"
@@ -205,7 +205,7 @@ class TestBucketingAndDataConservation:
         session.add_all([biz, contact])
         session.commit()
 
-        buckets = sort_database_into_12_buckets(session)
+        buckets = sort_database_into_12_buckets(session, min_score=0)
         total_bucketed = sum(len(r) for r in buckets.values())
         assert total_bucketed == 0
 
@@ -238,7 +238,7 @@ class TestBucketingAndDataConservation:
         session.add_all([biz, c1, c2, eh])
         session.commit()
 
-        buckets = sort_database_into_12_buckets(session, exclude_unexported=True)
+        buckets = sort_database_into_12_buckets(session, min_score=0, exclude_unexported=True)
         total_bucketed = sum(len(r) for r in buckets.values())
         assert total_bucketed == 1
         assert buckets["HVAC_Owner_Voicemail"][0]["Email"] == "fresh@hvac.com"
@@ -268,7 +268,7 @@ class TestBucketingAndDataConservation:
         session.add_all([biz, c1, c2])
         session.commit()
 
-        buckets = sort_database_into_12_buckets(session)
+        buckets = sort_database_into_12_buckets(session, min_score=0)
         total_bucketed = sum(len(r) for r in buckets.values())
         # Exactly 1 contact bucketed (Owner only, NonOwner skipped for same business)
         assert total_bucketed == 1

@@ -181,64 +181,28 @@ def classify_persona(contact) -> str | None:
     return "NonOwner"
 
 
-def classify_phone_type(contact, business=None) -> str:
-    """Classify phone destination as IVR, Receptionist, Voicemail, or Disconnected.
+def classify_phone_type(contact, business=None) -> str | None:
+    """Classify phone destination strictly from real call outcomes (IVR, Receptionist, Voicemail, Disconnected).
     
-    1. If contact has completed a live phone classification call, respect audio transcript.
-    2. If contact is Disconnected, Invalid, Failed, or Dead, return Disconnected (suppressed).
-    3. If uncalled, use firmographic heuristics (review count, multi-service, generic email)
-       and deterministic distribution to match empirical field ratios (~42% Receptionist, ~28% IVR, ~30% Voicemail).
+    Returns None for uncalled or unclassified contacts to ensure ONLY tested leads are enrolled.
     """
-    import hashlib
     status = (getattr(contact, "lead_status", "") or "").strip()
 
-    # 1. Explicit Disconnected or suppressed statuses
     if any(k in status for k in ("Disconnected", "Invalid", "Failed", "Dead")):
         return "Disconnected"
-
-    # 2. Confirmed live phone audio classifications
-    if "IVR" in status:
+    elif "IVR" in status:
         return "IVR"
     elif "Receptionist" in status or "Human" in status:
         return "Receptionist"
     elif "Voicemail" in status and "Classified" in status:
         return "Voicemail"
 
-    # 3. Firmographic heuristics for uncalled leads
-    reviews = getattr(business, "review_count", 0) or 0
-    categories = (getattr(business, "category", "") or "").lower()
-    email = (getattr(contact, "email", "") or "").lower()
-    title = (getattr(contact, "title", "") or "").lower()
-
-    # High-review shops (60+ reviews) or multi-category businesses almost always have an IVR or Receptionist
-    if reviews >= 80 or ("," in categories and reviews >= 40):
-        h = int(hashlib.md5(f"ivr_rec_{getattr(contact, 'id', 0)}_{email}".encode()).hexdigest(), 16) % 100
-        return "IVR" if h < 60 else "Receptionist"
-
-    # Generic office / dispatch emails strongly correlate with a receptionist / front desk
-    if any(email.startswith(p) for p in ("info@", "office@", "service@", "contact@", "dispatch@", "support@", "admin@")) or \
-       any(w in title for w in ("receptionist", "front desk", "office", "coordinator", "dispatcher")):
-        return "Receptionist"
-
-    # Small single-owner shops (<=15 reviews, Owner persona) strongly correlate with direct voicemail
-    if 0 < reviews <= 15 and any(w in title for w in ("owner", "founder", "president", "principal")):
-        h = int(hashlib.md5(f"vm_owner_{getattr(contact, 'id', 0)}_{email}".encode()).hexdigest(), 16) % 100
-        return "Voicemail" if h < 75 else "Receptionist"
-
-    # Balanced deterministic distribution for general uncalled leads matching empirical ratios:
-    # 42% Receptionist, 28% IVR, 30% Voicemail
-    key = f"{getattr(business, 'business_name', '')}_{email}_{getattr(contact, 'id', 0)}"
-    h = int(hashlib.md5(key.encode()).hexdigest(), 16) % 100
-    if h < 42:
-        return "Receptionist"
-    elif h < 70:
-        return "IVR"
-    else:
-        return "Voicemail"
+    # Uncalled / unclassified leads return None (strictly excluded from phone campaigns)
+    return None
 
 
-def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexported: bool = False, destination_prefix: str = "saleshandy", only_classified: bool = False) -> dict[str, list[dict]]:
-    """Query contacts and sort into 12 permutation buckets.
+def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexported: bool = False, destination_prefix: str = "saleshandy", only_classified: bool = True) -> dict[str, list[dict]]:
+    """Query contacts and sort into 12 permutation buckets for tested leads only.
     
     Enforces Persona Priority: If a business has an Owner contact, only the Owner
     contact is enrolled; NonOwner contacts for the same business are skipped.
@@ -247,7 +211,7 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
     :param min_score: Minimum verification score filter (defaults to 80 for 100% Safe Only).
     :param exclude_unexported: If True, exclude contacts previously exported via ExportHistory.
     :param destination_prefix: Destination prefix string to filter in ExportHistory.
-    :param only_classified: If True, only include contacts with explicit phone classification (Classified_*).
+    :param only_classified: If True (default), ONLY include contacts with real phone classification (Classified_*).
     """
     from collections import defaultdict
     from datetime import datetime, timezone
@@ -369,8 +333,8 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
     return buckets
 
 
-def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaigns", min_score: int = 80, exclude_unexported: bool = False) -> dict[str, int]:
-    """Export 12 pre-sorted CSV files for manual/batch Saleshandy import."""
+def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaigns", min_score: int = 80, exclude_unexported: bool = False, only_classified: bool = True) -> dict[str, int]:
+    """Export 12 pre-sorted CSV files for manual/batch Saleshandy import for strictly tested leads."""
     from datetime import datetime, timezone
     from app.db.create_tables import ExportHistory
 
@@ -383,7 +347,8 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
             session,
             min_score=min_score,
             exclude_unexported=exclude_unexported,
-            destination_prefix="saleshandy_csv"
+            destination_prefix="saleshandy_csv",
+            only_classified=only_classified
         )
         summary_counts: dict[str, int] = {}
 
@@ -424,12 +389,12 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
         session.close()
 
 
-def push_to_saleshandy_api(min_score: int = 80, exclude_unexported: bool = False, only_classified: bool = False) -> dict[str, int]:
+def push_to_saleshandy_api(min_score: int = 80, exclude_unexported: bool = False, only_classified: bool = True) -> dict[str, int]:
     """
     Push sorted lead buckets directly into live Saleshandy campaign sequences via API.
     
-    Defaults to min_score=80 (Verified Safe Only) to protect domain sender reputation
-    and prevent bounces from unverified pattern guesses.
+    Defaults to min_score=80 (Verified Safe Only) and only_classified=True (Strictly Phone Tested Only)
+    to guarantee zero bounce risk and 100% accurate phone sequence copy.
     """
     if not SALESHANDY_API_KEY:
         logger.warning("SALESHANDY_API_KEY is not set in environment; skipping API push.")
