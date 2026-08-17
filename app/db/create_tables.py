@@ -92,6 +92,8 @@ class Business(Base):
     id = Column(Integer, primary_key=True)
     business_name = Column(Text, index=True)
     category = Column(Text)
+    primary_trade = Column(Text, index=True)
+    trade_override = Column(Text)
     website = Column(Text)
     # unique so dedupe is enforced at the DB layer, not just app layer.
     # Nullable — some raw leads have no website.
@@ -202,6 +204,8 @@ _ADDITIVE_COLUMNS = (
     ("businesses", "last_crawled_at", "TIMESTAMP"),
     ("businesses", "crawl_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("businesses", "first_scrape_run_id", "INTEGER"),
+    ("businesses", "primary_trade", "TEXT"),
+    ("businesses", "trade_override", "TEXT"),
     ("contacts", "first_scrape_run_id", "INTEGER"),
     ("contacts", "call_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("export_history", "exported_at", "TIMESTAMP"),

@@ -962,13 +962,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--verify",
-        action="store_true",
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        default=True,
         help=(
-            "After crawling, run Reacher (self-hosted check-if-email-exists) "
-            "against every unverified contact email. Requires REACHER_API_URL "
-            "to point at a live instance. Failures are logged but do not "
-            "abort the pipeline."
+            "Skip email deliverability verification (email verification runs locally by default "
+            "against every unverified contact email)."
         ),
     )
     parser.add_argument(
@@ -1155,7 +1155,7 @@ def run_end_to_end_pipeline(
     zip_csv: str | None = None,
     use_tomba: bool = False,
     tomba_fallback: bool = False,
-    verify: bool = False,
+    verify: bool = True,
     call: bool = False,
     saleshandy: bool = False,
     min_score: int = 0,
@@ -1327,12 +1327,10 @@ def run_end_to_end_pipeline(
                 logger.warning("Tomba enrichment pass failed: %s", te)
 
         if verify:
-            logger.info("--- Verifying harvested emails via Reacher ---")
+            logger.info("--- Verifying Harvested Emails (Local Engine) ---")
             try:
                 verify_contacts_emails()
             except Exception as ve:  # noqa: BLE001
-                # Verifier is best-effort — server can be down / port 25
-                # blocked. Log and keep going so we still get an export.
                 logger.warning("Verification pass failed: %s", ve)
 
         export_run_outputs(

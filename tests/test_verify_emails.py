@@ -84,3 +84,51 @@ class TestVerifyEmailViaReacher:
         r = verify_emails.verify_email_via_reacher("info@acme.com")
         assert r["is_reachable"] == "unknown"
         assert r["score"] == 25
+
+
+class TestCheckReacherHealth:
+    @patch.object(verify_emails.requests, "post")
+    def test_health_check_healthy(self, mock_post):
+        mock_post.return_value = _StubResponse(200, {"is_reachable": "safe"})
+        assert verify_emails.check_reacher_health() is True
+
+    @patch.object(verify_emails.requests, "post")
+    def test_health_check_unreachable(self, mock_post):
+        mock_post.side_effect = verify_emails.requests.exceptions.ConnectionError("offline")
+        assert verify_emails.check_reacher_health() is False
+
+    @patch("app.pipeline.verify_emails.check_reacher_health", return_value=False)
+    @patch("app.pipeline.verify_emails.TOMBA_API_KEY", None)
+    @patch("app.pipeline.verify_emails.TOMBA_SECRET_KEY", None)
+    @patch("sqlalchemy.orm.sessionmaker")
+    def test_verify_contacts_aborts_when_no_verifier_available(self, mock_sessionmaker, mock_health):
+        mock_session = MagicMock()
+        mock_session.query().filter().filter().all.return_value = [MagicMock(id=1, email="test@test.com")]
+        mock_sessionmaker.return_value = MagicMock(return_value=mock_session)
+
+        with pytest.raises(RuntimeError, match="No email verifier is reachable"):
+            verify_emails.verify_contacts_emails(raise_on_unreachable=True)
+
+
+class TestVerifyEmailViaTomba:
+    @patch.object(verify_emails.requests, "get")
+    def test_tomba_deliverable_mapped_to_safe(self, mock_get):
+        mock_get.return_value = _StubResponse(
+            200,
+            {"data": {"email": {"email": "john@doe.com", "result": "deliverable", "status": "valid", "score": 95, "accept_all": False}}}
+        )
+        res = verify_emails.verify_email_via_tomba("john@doe.com")
+        assert res["is_reachable"] == "safe"
+        assert res["score"] >= 90
+
+    @patch.object(verify_emails.requests, "get")
+    def test_tomba_undeliverable_mapped_to_invalid(self, mock_get):
+        mock_get.return_value = _StubResponse(
+            200,
+            {"data": {"email": {"email": "bad@fake.com", "result": "undeliverable", "status": "invalid", "score": 10}}}
+        )
+        res = verify_emails.verify_email_via_tomba("bad@fake.com")
+        assert res["is_reachable"] == "invalid"
+        assert res["score"] <= 15
+
+

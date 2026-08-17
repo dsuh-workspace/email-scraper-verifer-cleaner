@@ -55,28 +55,43 @@ SEQUENCE_ID_MAP = {
 
 
 def classify_trade(business) -> str:
-    """Classify business as HVAC or Plumbing."""
-    cat = (business.category or "").strip()
+    """Classify business as HVAC or Plumbing with database provenance and name priority."""
+    # 0. Check database explicit override or stored primary_trade
+    if hasattr(business, "trade_override") and business.trade_override:
+        return business.trade_override
+    if hasattr(business, "primary_trade") and business.primary_trade:
+        return business.primary_trade
+
     name = (business.business_name or "").strip()
+    cat = (business.category or "").strip()
     desc = (business.description or "").strip()
 
-    # Primary check on category first
-    if cat:
-        if HVAC_RE.search(cat) and not PLUMBING_RE.search(cat):
-            return "HVAC"
-        if PLUMBING_RE.search(cat) and not HVAC_RE.search(cat):
-            return "Plumbing"
+    name_hvac = bool(HVAC_RE.search(name))
+    name_plumb = bool(PLUMBING_RE.search(name))
 
-    # Secondary check on combined text
-    text = f"{cat} {name} {desc}"
+    # 1. High-confidence explicit business name check (e.g. "Bueno Plumbing and Rooter")
+    if name_plumb and not name_hvac:
+        return "Plumbing"
+    if name_hvac and not name_plumb:
+        return "HVAC"
+
+    # 2. Check GMB categories when name is neutral or dual-trade
+    cat_hvac = bool(HVAC_RE.search(cat))
+    cat_plumb = bool(PLUMBING_RE.search(cat))
+    if cat_plumb and not cat_hvac:
+        return "Plumbing"
+    if cat_hvac and not cat_plumb:
+        return "HVAC"
+
+    # 3. Combined text fallback
+    text = f"{name} {cat} {desc}"
     if HVAC_RE.search(text) and not PLUMBING_RE.search(text):
         return "HVAC"
-    if PLUMBING_RE.search(text):
+    if PLUMBING_RE.search(text) and not HVAC_RE.search(text):
         return "Plumbing"
-    if HVAC_RE.search(text):
-        return "HVAC"
 
-    return "Plumbing"
+    # 4. Final tiebreaker: default to Plumbing
+    return "HVAC" if HVAC_RE.search(text) and not PLUMBING_RE.search(text) else "Plumbing"
 
 
 # Role email prefixes that must be suppressed to protect domain sender reputation
@@ -92,27 +107,49 @@ LEGAL_SUFFIXES_RE = re.compile(
     re.IGNORECASE,
 )
 SEPARATORS_RE = re.compile(r"\s*[\|-].*$", re.IGNORECASE)
+EMOJI_SYMBOLS_RE = re.compile(r"[\U00010000-\U0010ffff\u2600-\u27ff\u2b50\u2714\u2716\u2728★✓•–—]+", re.UNICODE)
+KNOWN_ACRONYMS = {"HVAC", "AC", "USA", "AAA", "CPI", "SWAGS", "24/7", "EJ", "JDD", "RCV", "UA", "OTP"}
 
 
 def clean_company_name(name: str | None) -> str:
-    """Clean company name by removing legal suffixes and keyword stuffing."""
+    """Clean company name by removing legal suffixes, promo/geo tags, emojis, and normalizing casing."""
     if not name:
         return "your business"
 
     cleaned = name.strip()
-    # Strip pipe or hyphen separator keyword stuffing (e.g. "Apex Plumbing - 24/7 Service" -> "Apex Plumbing")
+
+    # 1. Remove emojis and decorative symbols
+    cleaned = EMOJI_SYMBOLS_RE.sub("", cleaned).strip()
+
+    # 2. Strip pipe or hyphen separator keyword stuffing (e.g. "Apex Plumbing - 24/7 Service" -> "Apex Plumbing")
     cleaned = SEPARATORS_RE.sub("", cleaned).strip()
-    
-    # Strip trailing legal suffixes (Inc, LLC, Corp, etc.)
+
+    # 3. Strip trailing legal suffixes (Inc, LLC, Corp, etc.)
     cand = LEGAL_SUFFIXES_RE.sub("", cleaned).strip(" ,.-")
-    
-    # Keep candidate if it leaves at least 2 words, or if original had more than 2 words
     if cand and len(cand.split()) >= 2:
-        return cand
+        cleaned = cand
     elif cand and len(cleaned.split()) > 2:
-        return cand
+        cleaned = cand
+
+    # 4. Handle ALL-CAPS names (e.g. "ECO HVAC CONTRACTING" -> "Eco HVAC Contracting")
+    words = cleaned.split()
+    if words and (cleaned.isupper() or sum(1 for w in words if w.isupper() and len(w) > 2) >= len(words) // 2 + 1):
+        normalized_words = []
+        for w in words:
+            upper_w = w.upper().rstrip(".,")
+            if upper_w in KNOWN_ACRONYMS:
+                normalized_words.append(upper_w)
+            elif w.lower() in {"and", "&", "of", "the", "for", "in"}:
+                normalized_words.append(w.lower())
+            else:
+                normalized_words.append(w.capitalize())
+        cleaned = " ".join(normalized_words)
+
+    # 5. Clean extra whitespace
+    cleaned = " ".join(cleaned.split()).strip(" ,.-")
 
     return cleaned if cleaned else (name.strip() or "your business")
+
 
 
 def classify_persona(contact) -> str | None:
@@ -240,6 +277,25 @@ def sort_database_into_12_buckets(session, min_score: int = 0, exclude_unexporte
         trade = classify_trade(business)
         phone_type = classify_phone_type(contact)
 
+        # --- Pre-Export Trade Sanity Auditor & Auto-Healer ---
+        comp_raw_name = (business.business_name or "").strip()
+        comp_hvac = bool(HVAC_RE.search(comp_raw_name))
+        comp_plumb = bool(PLUMBING_RE.search(comp_raw_name))
+
+        # Check for trade contradiction against explicit business name
+        if trade == "HVAC" and comp_plumb and not comp_hvac:
+            logger.warning(
+                "Trade Sanity Guardrail: Auto-corrected trade from HVAC to Plumbing for '%s' (Contact ID: %d, Email: %s)",
+                comp_raw_name, contact.id, contact.email
+            )
+            trade = "Plumbing"
+        elif trade == "Plumbing" and comp_hvac and not comp_plumb:
+            logger.warning(
+                "Trade Sanity Guardrail: Auto-corrected trade from Plumbing to HVAC for '%s' (Contact ID: %d, Email: %s)",
+                comp_raw_name, contact.id, contact.email
+            )
+            trade = "HVAC"
+
         # Disconnected lines won't match the 12 active sequence buckets and get excluded automatically
         permutation_tag = f"{trade}_{persona}_{phone_type}"
 
@@ -329,13 +385,23 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
         session.close()
 
 
-def push_to_saleshandy_api(min_score: int = 0, exclude_unexported: bool = True, only_classified: bool = True) -> dict[str, int]:
+def push_to_saleshandy_api(min_score: int = 80, exclude_unexported: bool = True, only_classified: bool = True) -> dict[str, int]:
     """
     Push sorted lead buckets directly into live Saleshandy campaign sequences via API.
+    
+    Defaults to min_score=80 (Verified Safe Only) to protect domain sender reputation
+    and prevent bounces from unverified pattern guesses.
     """
     if not SALESHANDY_API_KEY:
         logger.warning("SALESHANDY_API_KEY is not set in environment; skipping API push.")
         return {}
+
+    if min_score < 50:
+        logger.warning(
+            "SAFETY WARNING: push_to_saleshandy_api invoked with min_score=%d (<50). "
+            "Unverified/unknown email addresses may bounce and hurt sender reputation.",
+            min_score
+        )
 
     from datetime import datetime, timezone
     from requests.adapters import HTTPAdapter

@@ -379,7 +379,7 @@ class TestMain:
             "zip_csv": None,
             "use_tomba": False,
             "tomba_fallback": False,
-            "verify": False,
+            "verify": True,
             "call": False,
             "saleshandy": False,
             "min_score": 0,

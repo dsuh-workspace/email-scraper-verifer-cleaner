@@ -38,6 +38,61 @@ logger = logging.getLogger(__name__)
 # Raw scraper output separates emails with any of these — treat them all.
 _EMAIL_SPLIT_RE = re.compile(r'[,;\s]+')
 
+_HVAC_RE = re.compile(r"hvac|heating|cooling|furnace|air condition|heat pump|boiler|ductwork|\ba/?c\b", re.IGNORECASE)
+_PLUMBING_RE = re.compile(r"plumb|drain|sewer|septic|water heater|rooter|repipe", re.IGNORECASE)
+
+
+def _determine_primary_trade(name: str | None, cat: str | None, desc: str | None) -> str:
+    """Determine HVAC vs Plumbing trade based on name and category signals."""
+    name_str = (name or "").strip()
+    cat_str = (cat or "").strip()
+    desc_str = (desc or "").strip()
+
+    name_hvac = bool(_HVAC_RE.search(name_str))
+    name_plumb = bool(_PLUMBING_RE.search(name_str))
+
+    # 1. High-confidence explicit business name check
+    if name_plumb and not name_hvac:
+        return "Plumbing"
+    if name_hvac and not name_plumb:
+        return "HVAC"
+
+    # 2. Category check
+    cat_hvac = bool(_HVAC_RE.search(cat_str))
+    cat_plumb = bool(_PLUMBING_RE.search(cat_str))
+    if cat_plumb and not cat_hvac:
+        return "Plumbing"
+    if cat_hvac and not cat_plumb:
+        return "HVAC"
+
+    # 3. Combined text fallback
+    text = f"{name_str} {cat_str} {desc_str}"
+    if _HVAC_RE.search(text) and not _PLUMBING_RE.search(text):
+        return "HVAC"
+    if _PLUMBING_RE.search(text) and not _HVAC_RE.search(text):
+        return "Plumbing"
+
+    return "HVAC" if _HVAC_RE.search(text) and not _PLUMBING_RE.search(text) else "Plumbing"
+
+
+def _merge_categories(existing: str | None, incoming: str | None) -> str | None:
+    """Merge and deduplicate comma-separated GMB category lists non-destructively."""
+    if not existing:
+        return incoming.strip() if incoming else None
+    if not incoming:
+        return existing.strip()
+
+    parts_existing = [p.strip() for p in existing.split(",") if p.strip()]
+    parts_incoming = [p.strip() for p in incoming.split(",") if p.strip()]
+
+    seen_lower = {p.lower() for p in parts_existing}
+    merged = list(parts_existing)
+    for p in parts_incoming:
+        if p.lower() not in seen_lower:
+            merged.append(p)
+            seen_lower.add(p.lower())
+    return ", ".join(merged)
+
 
 def extract_domain(url_str):
     """
@@ -197,10 +252,21 @@ def process_and_deduplicate_leads() -> None:
                     existing_business.domain = domain
                     if domain:
                         existing_by_domain[domain] = existing_business
+                # Non-destructive category enrichment
+                if raw.category:
+                    existing_business.category = _merge_categories(existing_business.category, raw.category)
+                if not existing_business.primary_trade:
+                    existing_business.primary_trade = _determine_primary_trade(
+                        existing_business.business_name,
+                        existing_business.category,
+                        existing_business.description
+                    )
             else:
+                trade = _determine_primary_trade(cleaned_name, raw.category, raw.description)
                 new_business = Business(
                     business_name=cleaned_name,
                     category=raw.category,
+                    primary_trade=trade,
                     website=cleaned_website,
                     domain=domain,
                     phone=cleaned_phone,

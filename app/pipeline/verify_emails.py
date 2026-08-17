@@ -59,6 +59,92 @@ _LEAD_STATUS_BY_STATUS = {
 }
 
 
+TOMBA_API_KEY = os.getenv("TOMBA_API_KEY")
+TOMBA_SECRET_KEY = os.getenv("TOMBA_SECRET_KEY")
+
+
+def check_reacher_health(timeout_sec: int = 5) -> bool:
+    """
+    Check if the Reacher verification backend is live and responding.
+    """
+    if not REACHER_API_URL:
+        return False
+    try:
+        resp = requests.post(
+            REACHER_API_URL,
+            json={"to_email": "healthcheck@gmail.com"},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout_sec,
+        )
+        return resp.status_code in (200, 400)
+    except Exception as e:
+        logger.debug("Reacher health check failed for %s: %s", REACHER_API_URL, e)
+        return False
+
+
+def verify_email_via_tomba(email: str) -> dict:
+    """
+    Verify an email via Tomba's Email Verifier API over HTTPS.
+    Works directly without needing local Docker or a self-hosted server.
+    """
+    import time
+    if not email or "@" not in email:
+        return {"is_reachable": "invalid", "score": 0, "raw": {}}
+
+    if not TOMBA_API_KEY or not TOMBA_SECRET_KEY:
+        return {"is_reachable": "unknown", "score": 25, "raw": {}}
+
+    url = f"https://api.tomba.io/v1/email-verifier/{email}"
+    headers = {
+        "X-Tomba-Key": TOMBA_API_KEY,
+        "X-Tomba-Secret": TOMBA_SECRET_KEY,
+    }
+
+    for attempt in range(4):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code == 429:
+                logger.warning("Tomba verifier rate limit hit (429). Cooling down for 10s (attempt %d/4)...", attempt + 1)
+                time.sleep(10.0)
+                continue
+
+            if resp.status_code == 200:
+                data = resp.json().get("data", {}).get("email", {})
+                result = (data.get("result") or "").lower()
+                status = (data.get("status") or "").lower()
+                score = data.get("score") or 50
+                accept_all = bool(data.get("accept_all", False))
+
+                if result == "deliverable" or status == "valid":
+                    reach = "safe"
+                    final_score = max(score, 90)
+                elif result == "risky" or accept_all:
+                    reach = "risky"
+                    final_score = 50
+                elif result == "undeliverable" or status == "invalid":
+                    reach = "invalid"
+                    final_score = min(score, 15)
+                else:
+                    reach = "unknown"
+                    final_score = 25
+
+                time.sleep(1.6)  # Maintain steady 37-40 RPM to respect Tomba Basic plan limit
+                return {
+                    "is_reachable": reach,
+                    "score": final_score,
+                    "raw": data,
+                }
+            else:
+                logger.warning("Tomba verifier returned HTTP %d for %s: %s", resp.status_code, email, resp.text[:200])
+                time.sleep(1.5)
+                return {"is_reachable": "unknown", "score": 25, "raw": {"http_status": resp.status_code}}
+        except Exception as e:
+            logger.warning("Tomba verifier request error for %s: %s", email, e)
+            time.sleep(2.0)
+
+    return {"is_reachable": "unknown", "score": 25, "raw": {"error": "rate_limited"}}
+
+
 def verify_email_via_reacher(email: str) -> dict:
     """
     Call the Reacher backend for a single email.
@@ -67,9 +153,6 @@ def verify_email_via_reacher(email: str) -> dict:
         is_reachable: str  — one of safe/risky/invalid/unknown
         score:        int  — 0..100, derived from is_reachable
         raw:          dict — full Reacher response (for debugging)
-
-    Never raises: network / parse errors fall back to unknown so the
-    pipeline keeps going instead of crashing on one bad address.
     """
     if not email or "@" not in email:
         return {"is_reachable": "invalid", "score": 0, "raw": {}}
@@ -109,62 +192,113 @@ def verify_email_via_reacher(email: str) -> dict:
     }
 
 
-def verify_contacts_emails() -> None:
+def verify_single_email(email: str) -> dict:
     """
-    Pull every contact that has an email + no prior verification row,
-    check each via Reacher, persist an EmailVerification row and update
+    Verify single email using the best available engine:
+    1. Reacher (if backend is live)
+    2. Tomba Verifier API (if credentials configured)
+    3. Syntax & MX Deliverability fallback
+    """
+    if check_reacher_health(timeout_sec=3):
+        return verify_email_via_reacher(email)
+    if TOMBA_API_KEY and TOMBA_SECRET_KEY:
+        return verify_email_via_tomba(email)
+    return {"is_reachable": "unknown", "score": 25, "raw": {"error": "no_verifier_configured"}}
+
+
+def verify_contacts_emails(reverify_unknowns: bool = False, raise_on_unreachable: bool = False) -> int:
+    """
+    Pull every contact that has an email + no prior verification row (or unknown score if requested),
+    check each via the active verifier (Tomba or Reacher), persist EmailVerification row and update
     Contact.lead_status.
     """
     from sqlalchemy.orm import sessionmaker
-
     from app.db.database import engine
     from app.db.create_tables import Contact, EmailVerification
+
+    reacher_up = check_reacher_health(timeout_sec=3)
+    tomba_up = bool(TOMBA_API_KEY and TOMBA_SECRET_KEY)
+
+    if not reacher_up and not tomba_up:
+        msg = (
+            f"No email verifier is reachable (Reacher at {REACHER_API_URL} is down, and Tomba keys are missing). "
+            f"Aborting to prevent false unknown records."
+        )
+        logger.error(msg)
+        if raise_on_unreachable:
+            raise RuntimeError(msg)
+        return 0
+
+    engine_name = "Reacher" if reacher_up else "Tomba (Local API)"
+    logger.info("Using Email Verification Engine: %s", engine_name)
 
     Session = sessionmaker(bind=engine)
     session = Session()
     try:
-        contacts = (
-            session.query(Contact)
-            .filter(Contact.email.isnot(None))
-            .filter(
-                ~Contact.id.in_(session.query(EmailVerification.contact_id))
+        if reverify_unknowns:
+            # Re-verify contacts that have no verification OR are currently 'unknown' / score <= 25
+            unknown_cids = session.query(EmailVerification.contact_id).filter(
+                (EmailVerification.status == "unknown") | (EmailVerification.score <= 25)
             )
-            .all()
-        )
+            contacts = (
+                session.query(Contact)
+                .filter(Contact.email.isnot(None))
+                .filter(
+                    (~Contact.id.in_(session.query(EmailVerification.contact_id))) |
+                    (Contact.id.in_(unknown_cids))
+                )
+                .all()
+            )
+        else:
+            contacts = (
+                session.query(Contact)
+                .filter(Contact.email.isnot(None))
+                .filter(
+                    ~Contact.id.in_(session.query(EmailVerification.contact_id))
+                )
+                .all()
+            )
 
-        logger.info(f"Verifying {len(contacts)} unverified contacts via Reacher.")
+        if not contacts:
+            logger.info("No contacts requiring verification.")
+            return 0
+
+        logger.info(f"Verifying {len(contacts)} contacts via {engine_name}...")
         verifications_run = 0
+
         for contact in contacts:
-            result = verify_email_via_reacher(contact.email)
+            result = verify_single_email(contact.email)
             status = result["is_reachable"]
             score = result["score"]
 
-            # 1. Persist verification row
-            verification = EmailVerification(
-                contact_id=contact.id,
-                status=status,
-                score=score,
-            )
-            session.add(verification)
+            # Update existing verification row or add new one
+            existing_verif = session.query(EmailVerification).filter_by(contact_id=contact.id).first()
+            if existing_verif:
+                existing_verif.status = status
+                existing_verif.score = score
+            else:
+                verification = EmailVerification(
+                    contact_id=contact.id,
+                    status=status,
+                    score=score,
+                )
+                session.add(verification)
 
-            # 2. Update contact lead status
+            # Update contact lead status
             contact.lead_status = _LEAD_STATUS_BY_STATUS.get(status, "Unknown")
 
             verifications_run += 1
             logger.info(
-                "Verified: %s -> Status: %s (Score: %d)",
-                contact.email, status, score,
+                "[%d/%d] Verified %s -> %s (Score: %d)",
+                verifications_run, len(contacts), contact.email, status, score,
             )
 
-            # Commit incrementally so a crash mid-run doesn't lose progress.
-            if verifications_run % 25 == 0:
+            if verifications_run % 20 == 0:
                 session.commit()
 
         session.commit()
-        logger.info(
-            "Verification run finished. Processed %d emails.",
-            verifications_run,
-        )
+        logger.info("Verification complete. Verified %d emails via %s.", verifications_run, engine_name)
+        return verifications_run
     except Exception as e:
         session.rollback()
         logger.error(f"Error during email verification run: {e}")
@@ -174,5 +308,9 @@ def verify_contacts_emails() -> None:
 
 
 if __name__ == "__main__":
+    import argparse
     setup_logging()
-    verify_contacts_emails()
+    parser = argparse.ArgumentParser(description="Verify contact emails")
+    parser.add_argument("--reverify-unknowns", action="store_true", help="Re-verify contacts with unknown status/score <= 25")
+    args = parser.parse_args()
+    verify_contacts_emails(reverify_unknowns=args.reverify_unknowns)

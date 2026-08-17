@@ -188,16 +188,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pass upstream -disable-page-reuse for this run.",
     )
     parser.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        default=True,
+        help="Skip email deliverability verification (email verification runs locally by default).",
+    )
+    parser.add_argument(
         "--min-score",
         type=int,
         default=0,
         help=(
             "Only include contacts with verifier score >= N in the _verified "
-            "CSV. The _deduped export and export_history are not gated. NOTE: "
-            "this runner has no --verify flag, so unless a previous run "
-            "verified these contacts they all score 0 and any N > 0 yields an "
-            "empty _verified file. Verify separately with "
-            "'python -m app.pipeline.verify_emails', then re-run the export."
+            "CSV. The _deduped export and export_history are not gated."
         ),
     )
     parser.add_argument(
@@ -367,6 +370,14 @@ def main() -> None:
             metrics.new_exportable_contacts,
             metrics.total_contacts,
         )
+
+    if args.verify:
+        logger.info("--- Verifying Harvested Emails (Local Engine) ---")
+        try:
+            from app.pipeline.verify_emails import verify_contacts_emails
+            verify_contacts_emails()
+        except Exception as ve:
+            logger.warning("Verification pass failed: %s", ve)
 
     export_run_outputs(
         min_score=args.min_score,

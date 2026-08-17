@@ -8,71 +8,78 @@ all 12 Saleshandy campaign files.
 
 import sys
 from pathlib import Path
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.db.database import engine
-from app.db.create_tables import Contact, Business
-from app.pipeline.export_saleshandy import export_12_saleshandy_permutations
-
-Session = sessionmaker(bind=engine)
+from app.db.create_tables import Base, Contact, Business
+from app.pipeline.export_saleshandy import sort_database_into_12_buckets
 
 
 def run_simulation():
-    session = Session()
+    print("=" * 70)
+    print("RUNNING ISOLATED IN-MEMORY SIMULATION TEST")
+    print("=" * 70)
+
+    # Use isolated in-memory engine to never corrupt the live database
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(test_engine)
+    TestSession = sessionmaker(bind=test_engine)
+    session = TestSession()
+
     try:
-        print("=" * 70)
-        print("SIMULATING PHONE CLASSIFICATIONS & RECREATING 12 CAMPAIGNS")
-        print("=" * 70)
+        # Create sample test businesses and contacts
+        b_hvac = Business(
+            id=1,
+            business_name="Apex Heating & Air Conditioning",
+            category="HVAC contractor",
+            domain="apexheating.com",
+            phone="+14085550101"
+        )
+        b_plumb = Business(
+            id=2,
+            business_name="Bueno Plumbing & Rooter",
+            category="Plumber, Drainage service",
+            domain="buenoplumbing.com",
+            phone="+14085550102"
+        )
+        session.add_all([b_hvac, b_plumb])
+        session.flush()
 
-        contacts = session.query(Contact).filter(Contact.email.isnot(None), Contact.email != "").all()
-        businesses = session.query(Business).all()
-
-        if not contacts:
-            print("No contacts found in database to simulate.")
-            return
-
-        print(f"Loaded {len(contacts)} contacts from database/hvac_leads.db.")
-
-        # 1. Simulate phone classification statuses across contacts
-        for i, c in enumerate(contacts):
-            mod = i % 3
-            if mod == 0:
-                c.lead_status = "Classified_IVR"
-            elif mod == 1:
-                c.lead_status = "Classified_Receptionist"
-            else:
-                c.lead_status = "Classified_Voicemail"
-
-        # 2. Assign half businesses to HVAC and half to Plumbing for complete trade distribution
-        for i, b in enumerate(businesses):
-            if i % 2 == 0:
-                b.category = "HVAC contractor, Air conditioning repair service, Heating contractor"
-            else:
-                b.category = "Plumber, Drainage service, Water heater repair"
-
+        contacts = [
+            Contact(business_id=1, name="John Doe", email="john@apexheating.com", title="Owner", lead_status="Classified_Voicemail"),
+            Contact(business_id=1, name="Info/Office", email="info@apexheating.com", title="General Contact", lead_status="Classified_IVR"),
+            Contact(business_id=2, name="Info/Office", email="kbuenoplumbing@gmail.com", title="General Contact", lead_status="Classified_Voicemail"),
+            Contact(business_id=2, name="Jane Smith", email="jane@buenoplumbing.com", title="Owner", lead_status="Classified_Receptionist"),
+        ]
+        session.add_all(contacts)
         session.commit()
-        print("Successfully updated sample database records with simulated IVR, Receptionist, and Voicemail statuses.")
-        print("-" * 70)
 
-        # 3. Export 12 Saleshandy campaign files
-        counts = export_12_saleshandy_permutations("data/saleshandy_campaigns")
+        print(f"Created isolated sample businesses and {len(contacts)} contacts in-memory.")
 
-        print("\nRecreated 12 Campaign Permutations Summary:")
+        # Test sorting logic directly
+        buckets = sort_database_into_12_buckets(session)
+
+        print("\nSimulation Bucket Verification:")
         print("-" * 70)
-        total_bucketed = 0
-        for perm_tag, count in counts.items():
-            total_bucketed += count
-            status_indicator = "[POPULATED]" if count > 0 else "[EMPTY]"
-            print(f"  {status_indicator:12s} {perm_tag:35s}: {count:3d} leads")
+        total = 0
+        for tag, items in buckets.items():
+            count = len(items)
+            total += count
+            if count > 0:
+                print(f"  [POPULATED]  {tag:35s}: {count} leads")
+                for lead in items:
+                    print(f"               -> {lead['Company']} ({lead['Email']}) | Trade: {lead['Trade']}")
 
         print("-" * 70)
-        print(f"Total Contacts Bucketed across 12 Campaign Permutations: {total_bucketed}")
+        print(f"Total leads bucketed: {total}")
         print("=" * 70)
+        print("Isolated test simulation completed successfully without touching live DB.")
 
     finally:
         session.close()
+
 
 
 if __name__ == "__main__":
