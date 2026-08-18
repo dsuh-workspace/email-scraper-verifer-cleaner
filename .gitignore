@@ -50,3 +50,4 @@ logs/
 data/proxy_health.json
 .claude/worktrees/experiment-google_maps_scraper/
 /.claude/worktrees
+scratch/

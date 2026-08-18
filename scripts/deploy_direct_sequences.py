@@ -44,7 +44,7 @@ We built a 24/7 AI voice agent specifically for HVAC contractors that answers in
 
 **You can test the live demo line right now at 472-244-1040 to hear how natural it sounds.**
 
-If you like how it handles calls, would you be open to a quick 10-minute chat about setting up a custom prototype for {{company}}?
+If you'd like to see how it works for {{company}}, just let me know a good day/time and what number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -61,8 +61,7 @@ Our AI voice agent answers every call 24/7, handles scheduling, answers common p
 
 **Give the demo line a quick 30-second call to test it: 472-244-1040**
 
-Or if you'd prefer to see a live walkthrough, you can grab a time on my calendar here:
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+If you'd like to see how it works for {{company}}, just let me know a good day/time and what number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -81,8 +80,7 @@ By Monday morning, you have confirmed jobs on the schedule instead of missed cal
 
 **Give our demo line a test call at 472-244-1040 to hear it in action.**
 
-If you think this could work for {{company}}, here's my calendar link:
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+If you'd like to see how it could work for {{company}}, just let me know what day/time works best and what number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -102,8 +100,9 @@ Before anything goes live, we map out your exact intake process—your service a
 
 We don't do long-term contracts; we build a prototype so you can test it risk-free before deciding.
 
-**If you'd like to hear what it actually sounds like, give our demo line a test call at 472-244-1040 or grab a time on my calendar:**
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+**You can test what it actually sounds like on our demo line at 472-244-1040**
+
+If you'd like us to set up a custom prototype for {{company}}, just reply with a good day/time and number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -116,8 +115,9 @@ I won’t keep filling your inbox after this. I know you’re busy running {{com
 
 I reached out because after-hours missed calls quietly leak thousands in high-ticket HVAC jobs over the course of a season.
 
-**If you ever want a 24/7 backup assistant to capture those calls, you can test our demo line anytime at 472-244-1040** or grab a time here:
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+**If you ever want a 24/7 backup assistant to capture those calls, you can test our demo line anytime at 472-244-1040**
+
+If you'd ever like to see how it works for {{company}}, feel free to reply with a good time and number and I'll give you a call.
 
 Wishing you and the {{company}} team a great season!
 
@@ -189,7 +189,7 @@ We built a 24/7 AI voice assistant for plumbing companies that answers instantly
 
 **Give our demo line a quick call at 661-605-3526 to hear how it sounds.**
 
-If you like how it handles intake, would you be open to a quick 10-minute chat about a custom setup for {{company}}?
+If you'd like to see how it works for {{company}}, just let me know a good day/time and what number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -206,8 +206,7 @@ Our AI receptionist answers every call 24/7, qualifies the emergency, and books 
 
 **Test it right now on our demo line: 661-605-3526**
 
-Or grab a time on my calendar for a quick walkthrough:
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+If you'd like to see how it works for {{company}}, just let me know a good day/time and what number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -222,8 +221,7 @@ Our AI voice agent acts as your 24/7 frontline: it answers immediately, screens 
 
 **Test the live demo line: 661-605-3526**
 
-If you want to see how we’d customize it for {{company}}'s service area:
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+If you'd like to see how it could work for {{company}}, just let me know what day/time works best and what number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -241,8 +239,9 @@ That's why we build your system around your specific business rules:
 
 We don't lock you into long contracts—we build a working prototype so you can test it risk-free.
 
-**If you'd like to hear it in action, give our demo line a quick call at 661-605-3526 or grab 10 minutes on my calendar:**
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+**You can test what it actually sounds like on our demo line at 661-605-3526**
+
+If you'd like us to set up a custom prototype for {{company}}, just reply with a good day/time and number to reach you at, and I'll give you a call.
 
 Best,"""
             },
@@ -253,8 +252,9 @@ Best,"""
 
 I won’t keep following up after this—I know you’re busy managing jobs and running {{company}}.
 
-**If capturing after-hours emergency plumbing calls ever becomes a priority, you can test our demo line anytime at 661-605-3526** or schedule a chat here:
-https://autopilotlocal.neetocal.com/ai-agent-consultation
+**If capturing after-hours emergency plumbing calls ever becomes a priority, you can test our demo line anytime at 661-605-3526**
+
+If you'd ever like to see how it works for {{company}}, feel free to reply with a good time and number and I'll give you a call.
 
 All the best with {{company}} this year!
 

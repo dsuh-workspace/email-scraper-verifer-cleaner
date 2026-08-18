@@ -1,3 +1,13 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "saleshandy": {
+      "command": "python",
+      "args": [
+        "C:\\Users\\Daniel\\.gemini\\config\\mcp_servers\\saleshandy_mcp.py"
+      ],
+      "env": {
+        "SALESHANDY_API_KEY": "${SALESHANDY_API_KEY}"
+      }
+    }
+  }
 }
