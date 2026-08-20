@@ -293,15 +293,25 @@ def process_and_deduplicate_leads() -> None:
             emails = _parse_and_validate_emails(raw.email)
 
             if emails:
+                from app.pipeline.export_saleshandy import extract_name_and_persona
                 for email in emails:
                     key = (business_id, email)
                     if key in existing_emails:
                         continue
+
+                    fn, ln, persona = extract_name_and_persona(type("TempContact", (), {"name": "", "title": "", "email": email}))
+                    if persona == "Owner" and fn and fn != "there":
+                        contact_name = f"{fn} {ln}".strip()
+                        contact_title = "Owner / Decision Maker"
+                    else:
+                        contact_name = "Info/Office"
+                        contact_title = "General Contact"
+
                     session.add(Contact(
                         business_id=business_id,
-                        name="Info/Office",
+                        name=contact_name,
                         phone=cleaned_phone,
-                        title="General Contact",
+                        title=contact_title,
                         email=email,
                         lead_status="Not Contacted",
                         first_scrape_run_id=raw.scrape_run_id,

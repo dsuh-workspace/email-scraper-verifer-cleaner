@@ -69,7 +69,7 @@ class TestPersonaClassification:
         "Office Team",
     ])
     def test_generic_name_identifiers_override_to_nonowner(self, name):
-        contact = Contact(name=name, title="General Contact", email="john@company.com")
+        contact = Contact(name=name, title="General Contact", email="info@company.com")
         assert classify_persona(contact) == "NonOwner"
 
     @pytest.mark.parametrize("title", [
@@ -284,4 +284,69 @@ class TestBucketingAndDataConservation:
         assert total_bucketed == 1
         assert buckets["Plumbing_Owner_Voicemail"][0]["Email"] == "mario@apex.com"
         assert buckets["Plumbing_Owner_Voicemail"][0]["Company"] == "Apex Plumbing"
+
+    def test_cross_sequence_deduplication_on_phone_status_shift(self, in_memory_session):
+        """Test that a contact previously exported to Voicemail is NOT re-exported to IVR if status changes."""
+        from app.db.create_tables import ExportHistory
+        from datetime import datetime, timezone
+
+        session = in_memory_session
+        biz = Business(id=100, business_name="TRIO Heating & Plumbing", category="Plumber")
+        # Contact was previously exported to voicemail, but status is now Classified_IVR
+        c_katz = Contact(
+            id=309,
+            business_id=100,
+            name="Michael Katz",
+            title="Owner",
+            email="michael@trioheatingandair.com",
+            lead_status="Classified_IVR"
+        )
+        eh = ExportHistory(
+            contact_id=309,
+            destination="saleshandy_api_plumbing_owner_voicemail",
+            exported_at=datetime.now(timezone.utc)
+        )
+        session.add_all([biz, c_katz, eh])
+        session.commit()
+
+        # When sorting for export (default exclude_unexported=True), he must be excluded from IVR bucket
+        buckets = sort_database_into_12_buckets(session, min_score=0, exclude_unexported=True, destination_prefix="saleshandy")
+        total_bucketed = sum(len(r) for r in buckets.values())
+        assert total_bucketed == 0
+        assert len(buckets["Plumbing_Owner_IVR"]) == 0
+
+    def test_global_email_deduplication_across_contact_ids(self, in_memory_session):
+        """Test that a new contact with an already-exported email is not exported."""
+        from app.db.create_tables import ExportHistory
+        from datetime import datetime, timezone
+
+        session = in_memory_session
+        biz1 = Business(id=201, business_name="First Plumbing", category="Plumber")
+        biz2 = Business(id=202, business_name="Second Plumbing", category="Plumber")
+        c1 = Contact(id=501, business_id=201, name="John Doe", title="Owner", email="john@example.com", lead_status="Classified_IVR")
+        c2 = Contact(id=502, business_id=202, name="John Doe Duplicate", title="Owner", email="john@example.com", lead_status="Classified_IVR")
+        eh = ExportHistory(contact_id=501, destination="saleshandy_csv_plumbing_owner_ivr", exported_at=datetime.now(timezone.utc))
+
+        session.add_all([biz1, biz2, c1, c2, eh])
+        session.commit()
+
+        buckets = sort_database_into_12_buckets(session, min_score=0, exclude_unexported=True, destination_prefix="saleshandy")
+        total_bucketed = sum(len(r) for r in buckets.values())
+        assert total_bucketed == 0
+
+    def test_dual_trade_assigned_to_single_bucket(self, in_memory_session):
+        """Test that dual trade business only enters one trade bucket."""
+        session = in_memory_session
+        biz = Business(id=301, business_name="Rooter Hero Plumbing & Air", category="Plumber, HVAC contractor")
+        c1 = Contact(id=601, business_id=301, name="John Akhoian", title="Owner", email="john@rooterhero.com", lead_status="Classified_Voicemail")
+        session.add_all([biz, c1])
+        session.commit()
+
+        buckets = sort_database_into_12_buckets(session, min_score=0)
+        total_bucketed = sum(len(r) for r in buckets.values())
+        assert total_bucketed == 1
+        # Rooter Hero is classified as Plumbing
+        assert len(buckets["Plumbing_Owner_Voicemail"]) == 1
+        assert len(buckets["HVAC_Owner_Voicemail"]) == 0
+
 

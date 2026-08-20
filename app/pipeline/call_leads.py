@@ -123,7 +123,12 @@ def sync_phone_classifications_across_business_contacts(session=None) -> int:
             session.close()
 
 
-def trigger_twilio_outbound_calls(min_score: int = 80, limit: int | None = None, twiml_url: str | None = None) -> int:
+def trigger_twilio_outbound_calls(
+    min_score: int = 80,
+    limit: int | None = None,
+    twiml_url: str | None = None,
+    exclude_already_exported: bool = True,
+) -> int:
     """
     Dispatch classification calls to determine if destination connects to:
       - IVR (Phone Tree)
@@ -131,11 +136,14 @@ def trigger_twilio_outbound_calls(min_score: int = 80, limit: int | None = None,
       - Voicemail (Answering Machine)
       - Disconnected / Invalid Line
 
-    Ensures EXACTLY ONE CALL PER BUSINESS / PHONE NUMBER.
+    Ensures:
+      1. EXACTLY ONE CALL PER BUSINESS / PHONE NUMBER.
+      2. Strictly SKIPS calling any business or contact already exported to Saleshandy (Early Deduplication).
 
     :param min_score: Minimum verification score filter (defaults to 80 for Safe Only).
     :param limit: Max number of calls to dispatch (None for unlimited).
     :param twiml_url: URL that returns TwiML classification instructions for the call.
+    :param exclude_already_exported: If True (default), strictly excludes already-exported leads from being dialed.
     :return: Count of successfully dispatched calls.
     """
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
@@ -145,12 +153,11 @@ def trigger_twilio_outbound_calls(min_score: int = 80, limit: int | None = None,
     reconcile_stale_phone_classifications(timeout_hours=2.0)
     sync_phone_classifications_across_business_contacts()
 
-    from app.db.create_tables import Contact, Business, EmailVerification
+    from app.db.create_tables import Contact, Business, EmailVerification, ExportHistory
 
     session = Session()
     try:
         # Find contacts with phone numbers that haven't been classified yet (or need retry)
-        unclassified_statuses = ("Not Contacted", "Verified", "Unknown", "Unanswered_Retry", None)
         query = (
             session.query(Contact, Business)
             .join(Business, Contact.business_id == Business.id)
@@ -164,6 +171,22 @@ def trigger_twilio_outbound_calls(min_score: int = 80, limit: int | None = None,
             .filter((Contact.call_attempts.is_(None)) | (Contact.call_attempts < 3))
         )
 
+        if exclude_already_exported:
+            # Strictly exclude contacts and businesses already exported to live Saleshandy campaigns
+            exported_contact_ids = (
+                session.query(ExportHistory.contact_id)
+                .filter(ExportHistory.destination.like("saleshandy_api%"))
+            )
+            query = query.filter(~Contact.id.in_(exported_contact_ids))
+
+            exported_biz_ids = (
+                session.query(Contact.business_id)
+                .join(ExportHistory, ExportHistory.contact_id == Contact.id)
+                .filter(ExportHistory.destination.like("saleshandy_api%"))
+                .distinct()
+            )
+            query = query.filter(~Contact.business_id.in_(exported_biz_ids))
+
         if min_score > 0:
             query = query.join(EmailVerification, EmailVerification.contact_id == Contact.id).filter(EmailVerification.score >= min_score)
 
@@ -172,7 +195,9 @@ def trigger_twilio_outbound_calls(min_score: int = 80, limit: int | None = None,
 
         target_contacts = query.all()
 
-        logger.info("Found %d contacts ready for phone number classification...", len(target_contacts))
+        unclassified_statuses = ("Not Contacted", "Verified", "Unknown", "Unanswered_Retry", None)
+
+        logger.info("Found %d net-new uncontacted leads ready for phone classification...", len(target_contacts))
         dispatched_count = 0
         dispatched_businesses: set[int] = set()
         dispatched_phones: set[str] = set()

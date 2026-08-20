@@ -18,6 +18,19 @@ status, description, place ID).
 | `RUNBOOK_SQL_OVERLAP_ANALYSIS.md` | Cohort/lift/overlap analysis queries |
 | `MAINTENANCE_SQL.md` | Hand-run backfills, legacy schema catch-up, hygiene |
 
+## Outscraper Lead Pipeline
+
+Whenever an Outscraper export file (`.xlsx` or `.csv`) is provided:
+Run the complete 7-stage pipeline via `python scripts/run_outscraper_pipeline.py <path-to-file>`.
+This executes:
+1. Ingest & Provenance Tracking (`ScrapeRun` + `RawLead`)
+2. Deduplication & Email Filtering (`process_and_deduplicate_leads()`)
+3. Tomba Decision-Maker Enrichment (`enrich_businesses_with_tomba()`)
+4. Email Verification (`verify_contacts_emails()`)
+5. Twilio Outbound Phone Classification (`trigger_twilio_outbound_calls()` + STT transcription)
+6. 12-Permutation Bucketing with Global Deduplication (`export_12_saleshandy_permutations(exclude_unexported=True)`)
+7. Live Saleshandy API Push (`push_to_saleshandy_api(exclude_unexported=True)`)
+
 ## Strategies
 
 Three strategies via `--strategy {single-centroid, grid, full-harvest}` on

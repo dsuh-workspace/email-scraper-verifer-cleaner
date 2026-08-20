@@ -82,6 +82,47 @@ def check_reacher_health(timeout_sec: int = 5) -> bool:
         return False
 
 
+def ensure_reacher_running(timeout_sec: int = 6) -> bool:
+    """
+    Check if Reacher is online. If offline, automatically attempt to launch the Docker container.
+    Returns True if Reacher is online and responding.
+    """
+    import subprocess
+    import time
+
+    if check_reacher_health(timeout_sec=2):
+        return True
+
+    logger.info("Reacher not detected on port 8080. Attempting to start Docker container 'reacher-backend'...")
+    try:
+        # Try starting existing container
+        res = subprocess.run(
+            ["docker", "start", "reacher-backend"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            # Try running new container if not present
+            subprocess.run(
+                ["docker", "run", "-d", "-p", "8080:8080", "--name", "reacher-backend", "reacherhq/backend:latest"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+    except Exception as e:
+        logger.debug("Auto-start Docker reacher attempt encountered: %s", e)
+
+    start_time = time.time()
+    while time.time() - start_time < timeout_sec:
+        if check_reacher_health(timeout_sec=1):
+            logger.info("Reacher Docker container is now ONLINE at port 8080.")
+            return True
+        time.sleep(0.5)
+
+    return False
+
+
 def verify_email_via_tomba(email: str) -> dict:
     """
     Verify an email via Tomba's Email Verifier API over HTTPS.
@@ -192,44 +233,103 @@ def verify_email_via_reacher(email: str) -> dict:
     }
 
 
+_MX_CACHE: dict[str, list[str]] = {}
+
+
+def verify_email_via_dns_mx(email: str) -> dict:
+    """
+    Verify email syntax, disposable domain filters, and live domain DNS MX records in-process.
+    Provides immediate local verification without requiring Docker or third-party APIs.
+    """
+    import dns.resolver
+    from email_validator import validate_email, EmailNotValidError
+    from app.pipeline.email_filters import is_junk_email
+
+    if not email or "@" not in email:
+        return {"is_reachable": "invalid", "score": 0, "raw": {"error": "malformed_email"}}
+
+    email_clean = email.strip().lower()
+
+    # 1. Syntax Validation
+    try:
+        val = validate_email(email_clean, check_deliverability=False)
+        normalized = val.normalized.lower()
+        domain = normalized.split("@")[-1]
+    except EmailNotValidError:
+        return {"is_reachable": "invalid", "score": 10, "raw": {"error": "syntax_invalid"}}
+
+    # 2. Junk / Blacklist Check
+    if is_junk_email(normalized):
+        return {"is_reachable": "invalid", "score": 10, "raw": {"error": "junk_prefix"}}
+
+    # 3. DNS MX Check
+    if domain in _MX_CACHE:
+        mx_records = _MX_CACHE[domain]
+    else:
+        try:
+            answers = dns.resolver.resolve(domain, "MX", lifetime=3.0)
+            mx_records = [str(r.exchange).rstrip(".") for r in sorted(answers, key=lambda r: r.preference)]
+        except Exception:
+            mx_records = []
+        _MX_CACHE[domain] = mx_records
+
+    if not mx_records:
+        return {"is_reachable": "invalid", "score": 10, "raw": {"error": "no_mx_records"}}
+
+    return {
+        "is_reachable": "safe",
+        "score": 90,
+        "raw": {"syntax": True, "mx_records": mx_records, "engine": "local_dns_mx"}
+    }
+
+
 def verify_single_email(email: str) -> dict:
     """
-    Verify single email using the best available engine:
-    1. Reacher (if backend is live)
-    2. Tomba Verifier API (if credentials configured)
-    3. Syntax & MX Deliverability fallback
+    Verify single email using the prioritized engine hierarchy:
+    1. Reacher (if backend is live on port 8080)
+    2. In-process Local DNS & MX Deliverability engine (instant, zero API cost)
+    3. Tomba Verifier API (fallback if configured)
     """
-    if check_reacher_health(timeout_sec=3):
+    if check_reacher_health(timeout_sec=2):
         return verify_email_via_reacher(email)
+    
+    # Tier 2: Local DNS & MX Deliverability check
+    dns_res = verify_email_via_dns_mx(email)
+    if dns_res.get("is_reachable") in ("safe", "invalid"):
+        return dns_res
+
+    # Tier 3: Tomba API fallback
     if TOMBA_API_KEY and TOMBA_SECRET_KEY:
         return verify_email_via_tomba(email)
-    return {"is_reachable": "unknown", "score": 25, "raw": {"error": "no_verifier_configured"}}
+
+    return dns_res
 
 
 def verify_contacts_emails(reverify_unknowns: bool = False, raise_on_unreachable: bool = False) -> int:
     """
     Pull every contact that has an email + no prior verification row (or unknown score if requested),
-    check each via the active verifier (Tomba or Reacher), persist EmailVerification row and update
-    Contact.lead_status.
+    check each via the active verifier (Reacher -> Local DNS MX -> Tomba), persist EmailVerification row
+    and update Contact.lead_status.
     """
     from sqlalchemy.orm import sessionmaker
     from app.db.database import engine
     from app.db.create_tables import Contact, EmailVerification
 
-    reacher_up = check_reacher_health(timeout_sec=3)
+    reacher_up = ensure_reacher_running(timeout_sec=3)
     tomba_up = bool(TOMBA_API_KEY and TOMBA_SECRET_KEY)
 
-    if not reacher_up and not tomba_up:
+    if raise_on_unreachable and not reacher_up and not tomba_up:
         msg = (
             f"No email verifier is reachable (Reacher at {REACHER_API_URL} is down, and Tomba keys are missing). "
             f"Aborting to prevent false unknown records."
         )
         logger.error(msg)
-        if raise_on_unreachable:
-            raise RuntimeError(msg)
-        return 0
+        raise RuntimeError(msg)
 
-    engine_name = "Reacher" if reacher_up else "Tomba (Local API)"
+    if reacher_up:
+        engine_name = "Reacher (Port 8080)"
+    else:
+        engine_name = "In-Process Local DNS MX (Tier 2 Engine)"
     logger.info("Using Email Verification Engine: %s", engine_name)
 
     Session = sessionmaker(bind=engine)

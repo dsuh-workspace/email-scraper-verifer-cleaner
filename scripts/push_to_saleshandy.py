@@ -12,35 +12,35 @@ load_dotenv()
 setup_logging()
 
 def main():
-    print("=" * 75)
-    print("PUSHING VERIFIED & CLASSIFIED LEADS TO LIVE SALESHANDY SEQUENCES")
-    print("=" * 75)
+    print("=" * 80)
+    print("DEPLOYING VERIFIED & CLASSIFIED LEADS TO LIVE SALESHANDY SEQUENCES")
+    print("=" * 80)
     
     print("\nTarget Sequences:")
     for perm, seq_id in SEQUENCE_ID_MAP.items():
-        print(f"  • {perm:<30} -> {seq_id} (https://app.saleshandy.com/sequences/{seq_id})")
+        print(f"  * {perm:<32} -> {seq_id} (https://app.saleshandy.com/sequences/{seq_id})")
         
-    print("\nStarting live API import (min_score=80, strictly phone-classified only)...")
+    print("\nStarting live API deployment (min_score=80, exclude_unexported=True, only_classified=False)...")
     
     results = push_to_saleshandy_api(
         min_score=80,
         exclude_unexported=True,
-        only_classified=True
+        only_classified=False
     )
     
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 80)
     print("SALESHANDY IMPORT SUMMARY REPORT")
-    print("=" * 75)
+    print("=" * 80)
     total_imported = 0
     for perm, count in results.items():
         if count > 0:
             seq_id = SEQUENCE_ID_MAP.get(perm, "N/A")
-            print(f"  [+] {perm:<30} : {count:>3} prospects -> https://app.saleshandy.com/sequences/{seq_id}")
+            print(f"  [+] {perm:<32} : {count:>3} prospects -> https://app.saleshandy.com/sequences/{seq_id}")
             total_imported += count
             
-    print("-" * 75)
+    print("-" * 80)
     print(f"Total Prospects Successfully Enrolled into Saleshandy: {total_imported}")
-    print("=" * 75)
+    print("=" * 80)
 
 if __name__ == "__main__":
     main()

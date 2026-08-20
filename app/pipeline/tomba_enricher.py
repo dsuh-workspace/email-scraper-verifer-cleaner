@@ -90,7 +90,10 @@ def fetch_domain_emails_from_tomba(domain: str, limit: int = 10) -> List[Dict]:
             "Tomba API returned HTTP %d for %s: %s",
             response.status_code, domain, response.text[:200],
         )
+        time.sleep(1.0)
         return []
+
+    time.sleep(1.5)  # Steady pacing to respect Tomba rate limits (40 RPM)
 
     try:
         data = response.json()
@@ -128,13 +131,26 @@ def fetch_domain_emails_from_tomba(domain: str, limit: int = 10) -> List[Dict]:
     return results
 
 
-def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
+def enrich_businesses_with_tomba(
+    fallback_only: bool = True,
+    scrape_run_id: Optional[int] = None,
+    exclude_already_exported: bool = True,
+) -> int:
     """
-    Enrich businesses in DB using Tomba Domain Search.
+    Enrich businesses in DB using Tomba Domain Search with 2-Gate Early Deduplication.
+
+    Gate 1 (Pre-Tomba):
+      - Skips businesses whose domain or ID is already in ExportHistory (saves API credits).
+      - Skips businesses that already have an Owner contact with an email.
+
+    Gate 2 (Post-Tomba Ingest):
+      - Checks returned emails against global ExportHistory (never re-ingest previously exported emails).
+      - Deduplicates against global DB contacts and applies Persona Priority (Owner > Non-Owner).
 
     :param fallback_only: If True, only query Tomba for businesses that have a domain
-                          BUT NO email in Contact yet (saves API credits).
-                          If False, query Tomba for all businesses with domains.
+                          BUT NO email in Contact yet.
+    :param scrape_run_id: Optional scrape run ID to restrict enrichment strictly to the current run cohort.
+    :param exclude_already_exported: If True (default), skip businesses already exported to Saleshandy.
     :return: Number of new contacts added via Tomba.
     """
     if not TOMBA_API_KEY or not TOMBA_SECRET_KEY:
@@ -143,7 +159,7 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
         )
         return 0
 
-    from sqlalchemy import func
+    from sqlalchemy import func, select
     from sqlalchemy.orm import sessionmaker
 
     from app.db.create_tables import Business, Contact, ExportHistory, ScrapeRun
@@ -153,7 +169,24 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
     session = Session()
 
     try:
-        run_id = session.query(func.max(ScrapeRun.id)).scalar()
+        run_id = scrape_run_id or session.query(func.max(ScrapeRun.id)).scalar()
+
+        # Gate 1: Build base target businesses query
+        biz_query = session.query(Business).filter(Business.domain.isnot(None))
+        if scrape_run_id is not None:
+            biz_query = biz_query.filter(Business.first_scrape_run_id == scrape_run_id)
+
+        # Exclude businesses already exported to Saleshandy if requested
+        if exclude_already_exported:
+            exported_biz_ids = {
+                row[0]
+                for row in session.query(Contact.business_id)
+                .join(ExportHistory, ExportHistory.contact_id == Contact.id)
+                .where(ExportHistory.destination.like("saleshandy_api%"))
+                .distinct()
+            }
+        else:
+            exported_biz_ids = set()
 
         if fallback_only:
             # Query businesses with domain BUT no email in Contact
@@ -161,24 +194,50 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
                 row[0]
                 for row in session.query(Contact.business_id)
                 .filter(Contact.email.isnot(None))
+                .filter(Contact.email != "")
                 .distinct()
             }
             target_businesses = [
-                b for b in session.query(Business).filter(Business.domain.isnot(None)).all()
-                if b.id not in already_contacted
+                b for b in biz_query.all()
+                if b.id not in already_contacted and b.id not in exported_biz_ids
             ]
         else:
-            target_businesses = (
-                session.query(Business)
-                .filter(Business.domain.isnot(None))
-                .all()
-            )
+            target_businesses = [
+                b for b in biz_query.all()
+                if b.id not in exported_biz_ids
+            ]
 
         logger.info(
-            "Running Tomba enrichment for %d businesses (fallback_only=%s)...",
+            "Running Tomba enrichment for %d businesses (run_id=%s, fallback_only=%s, excluded_exported_biz=%d)...",
             len(target_businesses),
+            run_id,
             fallback_only,
+            len(exported_biz_ids),
         )
+
+        if not target_businesses:
+            return 0
+
+        # Gate 2 Setup: Global email blacklists across entire database & export history
+        global_exported_emails = {
+            row[0].strip().lower()
+            for row in session.query(func.lower(Contact.email))
+            .join(ExportHistory, ExportHistory.contact_id == Contact.id)
+            .filter(ExportHistory.destination.like("saleshandy_api%"))
+            .filter(Contact.email.isnot(None))
+            .filter(Contact.email != "")
+            .distinct()
+            if row[0]
+        }
+
+        global_existing_emails = {
+            row[0].strip().lower()
+            for row in session.query(func.lower(Contact.email))
+            .filter(Contact.email.isnot(None))
+            .filter(Contact.email != "")
+            .distinct()
+            if row[0]
+        }
 
         added_total = 0
         for i, biz in enumerate(target_businesses, start=1):
@@ -189,18 +248,39 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
             if not records:
                 continue
 
+            # Prioritize records: Owner/President/Founder first
+            owner_keywords = ("owner", "president", "founder", "principal", "ceo", "partner")
+            records.sort(
+                key=lambda r: (
+                    any(kw in (r.get("title") or "").lower() for kw in owner_keywords),
+                    r.get("score") or 0,
+                ),
+                reverse=True,
+            )
+
             existing_contacts = (
                 session.query(Contact)
                 .filter(Contact.business_id == biz.id)
                 .all()
             )
-            existing_emails = {c.email for c in existing_contacts if c.email}
-            placeholders = [c for c in existing_contacts if c.email is None]
+            existing_biz_emails = {c.email.strip().lower() for c in existing_contacts if c.email}
+            placeholders = [c for c in existing_contacts if not c.email]
 
             added_for_biz = 0
             for rec in records:
-                email = rec["email"]
-                if email in existing_emails:
+                raw_email = (rec.get("email") or "").strip()
+                email_lower = raw_email.lower()
+                if not raw_email or "@" not in raw_email:
+                    continue
+
+                # Gate 2 Checks:
+                # 1. Has this email already been exported to Saleshandy previously?
+                if email_lower in global_exported_emails:
+                    logger.debug("Gate 2 Dedupe: Skipping Tomba email %s (already exported to Saleshandy)", raw_email)
+                    continue
+
+                # 2. Is this email already in this business or anywhere in the DB?
+                if email_lower in existing_biz_emails or email_lower in global_existing_emails:
                     continue
 
                 new_contact = Contact(
@@ -208,13 +288,18 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
                     name=rec["name"],
                     phone=rec["phone"] or biz.phone,
                     title=rec["title"],
-                    email=email,
+                    email=raw_email,
                     lead_status="Not Contacted",
                     first_scrape_run_id=run_id,
                 )
                 session.add(new_contact)
-                existing_emails.add(email)
+                existing_biz_emails.add(email_lower)
+                global_existing_emails.add(email_lower)
                 added_for_biz += 1
+
+                # If we found an explicit Owner/Executive, don't spam 5 extra generic inboxes for the same contractor
+                if any(kw in (rec.get("title") or "").lower() for kw in owner_keywords):
+                    break
 
             if added_for_biz > 0:
                 for ph in placeholders:
@@ -223,7 +308,7 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
                     ).delete(synchronize_session=False)
                     session.delete(ph)
                 logger.info(
-                    "[%d/%d] Tomba found %d emails for %s",
+                    "[%d/%d] Tomba found %d new decision-maker emails for %s",
                     i, len(target_businesses), added_for_biz, biz.domain,
                 )
 
@@ -234,7 +319,7 @@ def enrich_businesses_with_tomba(fallback_only: bool = True) -> int:
 
         session.commit()
         logger.info(
-            "Tomba enrichment complete. Added %d new decision-maker contacts.",
+            "Tomba enrichment complete. Added %d new decision-maker contacts (Gate 2 deduplicated).",
             added_total,
         )
         return added_total

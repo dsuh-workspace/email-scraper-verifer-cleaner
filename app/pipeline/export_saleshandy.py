@@ -39,18 +39,53 @@ SALESHANDY_API_KEY = os.getenv("SALESHANDY_API_KEY")
 SALESHANDY_API_URL = os.getenv("SALESHANDY_API_URL", "https://open-api.saleshandy.com/v1/sequences")
 
 SEQUENCE_ID_MAP = {
-    "HVAC_Owner_IVR": os.getenv("SH_SEQ_HVAC_OWNER_IVR"),
-    "HVAC_Owner_Receptionist": os.getenv("SH_SEQ_HVAC_OWNER_RECEPTIONIST"),
-    "HVAC_Owner_Voicemail": os.getenv("SH_SEQ_HVAC_OWNER_VOICEMAIL"),
-    "HVAC_NonOwner_IVR": os.getenv("SH_SEQ_HVAC_NONOWNER_IVR"),
-    "HVAC_NonOwner_Receptionist": os.getenv("SH_SEQ_HVAC_NONOWNER_RECEPTIONIST"),
-    "HVAC_NonOwner_Voicemail": os.getenv("SH_SEQ_HVAC_NONOWNER_VOICEMAIL"),
-    "Plumbing_Owner_IVR": os.getenv("SH_SEQ_PLUMBING_OWNER_IVR"),
-    "Plumbing_Owner_Receptionist": os.getenv("SH_SEQ_PLUMBING_OWNER_RECEPTIONIST"),
-    "Plumbing_Owner_Voicemail": os.getenv("SH_SEQ_PLUMBING_OWNER_VOICEMAIL"),
-    "Plumbing_NonOwner_IVR": os.getenv("SH_SEQ_PLUMBING_NONOWNER_IVR"),
-    "Plumbing_NonOwner_Receptionist": os.getenv("SH_SEQ_PLUMBING_NONOWNER_RECEPTIONIST"),
-    "Plumbing_NonOwner_Voicemail": os.getenv("SH_SEQ_PLUMBING_NONOWNER_VOICEMAIL"),
+    # 12 Phone-tested Permutations
+    "HVAC_Owner_IVR": os.getenv("SH_SEQ_HVAC_OWNER_IVR", "M2zJ4W8vP3"),
+    "HVAC_Owner_Receptionist": os.getenv("SH_SEQ_HVAC_OWNER_RECEPTIONIST", "Oqwm5Zd0wj"),
+    "HVAC_Owner_Voicemail": os.getenv("SH_SEQ_HVAC_OWNER_VOICEMAIL", "dlPyO2kWzL"),
+    "HVAC_NonOwner_IVR": os.getenv("SH_SEQ_HVAC_NONOWNER_IVR", "XdPdojQ6wV"),
+    "HVAC_NonOwner_Receptionist": os.getenv("SH_SEQ_HVAC_NONOWNER_RECEPTIONIST", "6vaKGW8xaW"),
+    "HVAC_NonOwner_Voicemail": os.getenv("SH_SEQ_HVAC_NONOWNER_VOICEMAIL", "dlPyOkQLzL"),
+    "Plumbing_Owner_IVR": os.getenv("SH_SEQ_PLUMBING_OWNER_IVR", "8JwooQ2RwO"),
+    "Plumbing_Owner_Receptionist": os.getenv("SH_SEQ_PLUMBING_OWNER_RECEPTIONIST", "Z6zxQdjRwA"),
+    "Plumbing_Owner_Voicemail": os.getenv("SH_SEQ_PLUMBING_OWNER_VOICEMAIL", "9pa87W9OPy"),
+    "Plumbing_NonOwner_IVR": os.getenv("SH_SEQ_PLUMBING_NONOWNER_IVR", "k4Pe8omkwn"),
+    "Plumbing_NonOwner_Receptionist": os.getenv("SH_SEQ_PLUMBING_NONOWNER_RECEPTIONIST", "klw67WryP1"),
+    "Plumbing_NonOwner_Voicemail": os.getenv("SH_SEQ_PLUMBING_NONOWNER_VOICEMAIL", "WjzRRD7pzA"),
+    # 4 Direct Outreach Campaigns (for Uncalled / Non-Connected Leads)
+    "HVAC_Owner_Direct": os.getenv("SH_SEQ_HVAC_OWNER_DIRECT", "MAwgoNknwN"),
+    "HVAC_NonOwner_Direct": os.getenv("SH_SEQ_HVAC_NONOWNER_DIRECT", "rVz1025ZaG"),
+    "Plumbing_Owner_Direct": os.getenv("SH_SEQ_PLUMBING_OWNER_DIRECT", "3RPnNvV7Pr"),
+    "Plumbing_NonOwner_Direct": os.getenv("SH_SEQ_PLUMBING_NONOWNER_DIRECT", "KAPqJOjLaB"),
+}
+
+
+COMMON_FIRST_NAMES = {
+    "john", "david", "michael", "chris", "cris", "brian", "frank", "renee", "bill",
+    "william", "robert", "james", "richard", "joseph", "thomas", "charles", "dan",
+    "daniel", "matthew", "anthony", "mark", "paul", "steve", "steven", "andrew",
+    "ken", "kenneth", "josh", "joshua", "kevin", "george", "edward", "ronald", "tim",
+    "timothy", "jason", "jeff", "jeffrey", "ryan", "jacob", "gary", "nicholas", "eric",
+    "jonathan", "stephen", "larry", "justin", "scott", "brandon", "ben", "benjamin",
+    "sam", "samuel", "greg", "gregory", "alex", "alexander", "patrick", "jack", "dennis",
+    "jerry", "tyler", "aaron", "jose", "adam", "henry", "nathan", "douglas", "zachary",
+    "peter", "kyle", "walter", "ethan", "jeremy", "harold", "keith", "christian",
+    "roger", "noah", "gerald", "carl", "terry", "sean", "austin", "arthur", "lawrence",
+    "jesse", "dylan", "bryan", "joe", "jordan", "billy", "bruce", "albert", "willie",
+    "gabriel", "logan", "alan", "juan", "wayne", "roy", "ralph", "randy", "eugene",
+    "vincent", "russell", "louis", "philip", "bobby", "johnny", "bradley", "ali",
+    "tony", "edu", "lub", "dominique", "ed", "heidi", "brent", "ted", "tasos", "nick",
+    "raymond", "walter", "burt", "al", "carl", "fred", "ted", "stan", "art", "mitch",
+}
+
+GENERIC_TERMS = {
+    "info", "support", "contact", "admin", "service", "services", "office", "sales",
+    "team", "help", "mail", "billing", "hvac", "repipe", "plumb", "plumbing",
+    "heating", "cooling", "repair", "repairs", "dispatch", "customercare", "inquiry",
+    "inquiries", "estimates", "quote", "quotes", "accounting", "careers", "jobs",
+    "privacy", "rooter", "drain", "air", "tech", "general", "lead", "marketing",
+    "feedback", "orders", "reception", "desk", "frontdesk", "customer", "corp",
+    "mechanical", "commercial", "residential", "supply", "handyman", "cleaning",
 }
 
 
@@ -151,45 +186,85 @@ def clean_company_name(name: str | None) -> str:
     return cleaned if cleaned else (name.strip() or "your business")
 
 
+def extract_name_and_persona(contact) -> tuple[str, str, str | None]:
+    """
+    Extract first_name, last_name, and persona ('Owner' | 'NonOwner') with smart email prefix parsing.
+    Returns:
+        (first_name, last_name, persona) or ('', '', None) if suppressed prefix.
+    """
+    name = (getattr(contact, "name", "") or "").strip()
+    title = (getattr(contact, "title", "") or "").strip()
+    email = (getattr(contact, "email", "") or "").strip().lower()
+
+    # 1. Suppress complaint-prone role-based email prefixes
+    if any(email.startswith(prefix) for prefix in SUPPRESSED_EMAIL_PREFIXES):
+        return ("", "", None)
+
+    # 2. Generic email prefix check for NonOwner team/info inboxes
+    if any(email.startswith(prefix) for prefix in ("info@", "office@", "contact@", "admin@", "support@", "service@", "privacy@", "sales@", "team@", "help@", "billing@", "repipe@", "dispatch@", "customercare@")):
+        return ("there", "", "NonOwner")
+
+    # 3. Check if real first + last name exists in database
+    if name and len(name.split()) >= 2 and not GENERIC_NAME_RE.search(name):
+        name_parts = name.split(maxsplit=1)
+        fn = name_parts[0].capitalize()
+        ln = name_parts[1].capitalize() if len(name_parts) > 1 else ""
+        return (fn, ln, "Owner")
+
+    # 4. Check owner title
+    if OWNER_TITLE_RE.search(title) or title == "Executive / Decision Maker":
+        fn = name.split()[0].capitalize() if (name and not GENERIC_NAME_RE.search(name)) else "there"
+        return (fn, "", "Owner")
+
+    # 5. Analyze Email Prefix for Personal Name
+    if "@" in email:
+        prefix = email.split("@")[0].strip().lower()
+        prefix_clean = re.sub(r"\d+$", "", prefix).strip("._-")
+
+        if prefix_clean and prefix_clean not in GENERIC_TERMS and not prefix_clean.endswith(("service", "services", "hvac", "plumbing", "repair", "repipe", "supply", "handyman", "cleaning")):
+            for sep in (".", "_", "-"):
+                if sep in prefix_clean:
+                    subparts = [p for p in prefix_clean.split(sep) if p and p not in GENERIC_TERMS]
+                    if len(subparts) >= 2:
+                        fn = subparts[0].capitalize()
+                        ln = subparts[1].capitalize()
+                        if len(fn) > 1 and len(ln) > 1:
+                            return (fn, ln, "Owner")
+                    elif len(subparts) == 1 and len(subparts[0]) > 1:
+                        return (subparts[0].capitalize(), "", "Owner")
+
+            if prefix_clean in COMMON_FIRST_NAMES:
+                return (prefix_clean.capitalize(), "", "Owner")
+
+            for fname in COMMON_FIRST_NAMES:
+                if len(fname) >= 3 and prefix_clean.startswith(fname) and len(prefix_clean) > len(fname):
+                    lname = prefix_clean[len(fname):].capitalize()
+                    if len(lname) >= 2:
+                        return (fname.capitalize(), lname, "Owner")
+
+            if prefix_clean.isalpha() and 3 <= len(prefix_clean) <= 12:
+                return (prefix_clean.capitalize(), "", "Owner")
+
+    # 6. Default to NonOwner Team inbox
+    return ("there", "", "NonOwner")
+
 
 def classify_persona(contact) -> str | None:
     """Classify contact as Owner vs NonOwner. Returns None if email prefix is suppressed."""
-    name = (contact.name or "").strip()
-    title = (contact.title or "").strip()
-    email = (contact.email or "").strip().lower()
-
-    # Suppress complaint-prone role-based email prefixes
-    if any(email.startswith(prefix) for prefix in SUPPRESSED_EMAIL_PREFIXES):
-        return None
-
-    # Generic email prefix check for NonOwner team/info inboxes
-    if any(email.startswith(prefix) for prefix in ("info@", "office@", "contact@", "admin@", "support@", "service@", "privacy@", "sales@", "team@", "help@")):
-        return "NonOwner"
-
-    # Generic name check
-    if GENERIC_NAME_RE.search(name):
-        return "NonOwner"
-
-    # Owner title check
-    if OWNER_TITLE_RE.search(title) or title == "Executive / Decision Maker":
-        return "Owner"
-
-    # Real first + last name present
-    if len(name.split()) >= 2 and name not in ("Info/Office", "Decision Maker"):
-        return "Owner"
-
-    return "NonOwner"
+    _, _, persona = extract_name_and_persona(contact)
+    return persona
 
 
-def classify_phone_type(contact, business=None) -> str | None:
-    """Classify phone destination strictly from real call outcomes (IVR, Receptionist, Voicemail, Disconnected).
+def classify_phone_type(contact, business=None, allow_direct_fallback: bool = False) -> str | None:
+    """Classify phone destination (IVR, Receptionist, Voicemail, Disconnected, Direct).
     
-    Returns None for uncalled or unclassified contacts to ensure ONLY tested leads are enrolled.
+    If allow_direct_fallback is True, uncalled, unanswered, or disconnected lines return 'Direct'
+    so they are routed to Direct Outreach campaigns without false voicemail mentions.
     """
     status = (getattr(contact, "lead_status", "") or "").strip()
 
     if any(k in status for k in ("Disconnected", "Invalid", "Failed", "Dead")):
-        return "Disconnected"
+        return "Direct" if allow_direct_fallback else "Disconnected"
     elif "IVR" in status:
         return "IVR"
     elif "Receptionist" in status or "Human" in status:
@@ -197,21 +272,39 @@ def classify_phone_type(contact, business=None) -> str | None:
     elif "Voicemail" in status and "Classified" in status:
         return "Voicemail"
 
-    # Uncalled / unclassified leads return None (strictly excluded from phone campaigns)
+    # Route uncalled or unanswered test calls to Direct Outreach
+    if allow_direct_fallback:
+        return "Direct"
+
     return None
 
 
-def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexported: bool = False, destination_prefix: str = "saleshandy", only_classified: bool = True) -> dict[str, list[dict]]:
+def sort_database_into_12_buckets(
+    session,
+    min_score: int = 80,
+    exclude_unexported: bool = True,
+    destination_prefix: str = "saleshandy_api",
+    only_classified: bool = True,
+    global_dedupe_emails: bool = True,
+) -> dict[str, list[dict]]:
     """Query contacts and sort into 12 permutation buckets for tested leads only.
     
-    Enforces Persona Priority: If a business has an Owner contact, only the Owner
-    contact is enrolled; NonOwner contacts for the same business are skipped.
+    Enforces Strict Campaign Deduplication and Persona Priority:
+      1. Global Deduplication: If exclude_unexported is True, strictly excludes any
+         contact ID OR email address that was already exported to any destination matching
+         f"{destination_prefix}%". This guarantees leads are NEVER re-enrolled into a second
+         sequence if their phone status changes or across separate trade runs.
+      2. Persona Priority: If a business has an Owner contact, only the Owner
+         contact is enrolled; NonOwner contacts for the same business are skipped.
+      3. Trade & Email Deduplication: Each business and email address is assigned to at most
+         ONE permutation bucket per export run.
     
     :param session: SQLAlchemy session.
     :param min_score: Minimum verification score filter (defaults to 80 for 100% Safe Only).
-    :param exclude_unexported: If True, exclude contacts previously exported via ExportHistory.
-    :param destination_prefix: Destination prefix string to filter in ExportHistory.
+    :param exclude_unexported: If True (default), exclude contacts/emails previously exported via ExportHistory.
+    :param destination_prefix: Destination prefix string to filter in ExportHistory (default 'saleshandy').
     :param only_classified: If True (default), ONLY include contacts with real phone classification (Classified_*).
+    :param global_dedupe_emails: If True (default), deduplicate by email across the entire database.
     """
     from collections import defaultdict
     from datetime import datetime, timezone
@@ -237,18 +330,37 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
         )
 
     if exclude_unexported:
-        from sqlalchemy import select
+        from sqlalchemy import select, func
+        # 1. Exclude contacts whose ID was already exported to destination_prefix
         exported_ids_stmt = (
             select(ExportHistory.contact_id)
             .where(ExportHistory.destination.like(f"{destination_prefix}%"))
         )
         query = query.filter(~Contact.id.in_(exported_ids_stmt))
 
+        # 2. Exclude contacts whose email (case-insensitive) was already exported to destination_prefix
+        if global_dedupe_emails:
+            exported_emails_stmt = (
+                select(func.lower(func.trim(Contact.email)))
+                .join(ExportHistory, ExportHistory.contact_id == Contact.id)
+                .where(ExportHistory.destination.like(f"{destination_prefix}%"))
+                .where(Contact.email.isnot(None))
+                .where(Contact.email != "")
+            )
+            query = query.filter(~func.lower(func.trim(Contact.email)).in_(exported_emails_stmt))
+
     contacts_query = query.all()
 
     # Step 3: Group contacts by business and apply Persona Priority Rule (Owner > NonOwner)
     biz_map = defaultdict(list)
     for contact, business in contacts_query:
+        # Check for non-contractor categories (supply stores, trade schools, postal codes)
+        comp_cat = (business.category or "").strip().lower()
+        if comp_cat and any(k in comp_cat for k in ("trade school", "postal code", "supply store", "pipe supplier", "union local")):
+            if not any(k in comp_cat for k in ("contractor", "repair", "plumber", "heating", "cooling", "drain")):
+                logger.info("Skipping non-contractor listing '%s' (category: %s)", business.business_name, business.category)
+                continue
+
         persona = classify_persona(contact)
         if persona is None:  # Suppressed email prefix
             continue
@@ -264,21 +376,31 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
             # Business has no Owner -> enroll NonOwner contact(s)
             prioritized_contacts.extend(contact_triples)
 
-    logger.info("Sorting %d prioritized contacts into 12 Saleshandy permutations (min_score=%d, only_classified=%s)...", len(prioritized_contacts), min_score, only_classified)
+    logger.info(
+        "Sorting %d prioritized contacts into Saleshandy campaign sequences (min_score=%d, exclude_unexported=%s, only_classified=%s)...",
+        len(prioritized_contacts), min_score, exclude_unexported, only_classified
+    )
 
+    phone_types = ("IVR", "Receptionist", "Voicemail") if only_classified else ("IVR", "Receptionist", "Voicemail", "Direct")
     buckets: dict[str, list[dict]] = {
         f"{trade}_{persona}_{phone}": []
         for trade in ("HVAC", "Plumbing")
         for persona in ("Owner", "NonOwner")
-        for phone in ("IVR", "Receptionist", "Voicemail")
+        for phone in phone_types
     }
+
+    seen_emails: set[str] = set()
 
     for contact, business, persona in prioritized_contacts:
         if only_classified and not (contact.lead_status and "Classified" in contact.lead_status):
             continue
 
+        contact_email = (contact.email or "").strip().lower()
+        if not contact_email or contact_email in seen_emails:
+            continue
+
         trade = classify_trade(business)
-        phone_type = classify_phone_type(contact, business=business)
+        phone_type = classify_phone_type(contact, business=business, allow_direct_fallback=not only_classified)
 
         # --- Pre-Export Trade Sanity Auditor & Auto-Healer ---
         comp_raw_name = (business.business_name or "").strip()
@@ -299,12 +421,18 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
             )
             trade = "HVAC"
 
-        # Disconnected lines won't match the 12 active sequence buckets and get excluded automatically
-        permutation_tag = f"{trade}_{persona}_{phone_type}"
+        # Extract name and persona from contact and email prefix
+        fn, ln, detected_persona = extract_name_and_persona(contact)
+        final_persona = persona if persona in ("Owner", "NonOwner") else (detected_persona or "NonOwner")
 
-        name_parts = (contact.name or "").strip().split(maxsplit=1)
-        first_name = name_parts[0] if name_parts else ("there" if persona == "Owner" else "Team")
-        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        if fn and fn != "there":
+            first_name = fn
+        else:
+            first_name = "there" if final_persona == "Owner" else "Team"
+        last_name = ln
+
+        # Disconnected lines won't match the active sequence buckets and get excluded automatically
+        permutation_tag = f"{trade}_{final_persona}_{phone_type}"
 
         demo_phone = "472-244-1040" if trade == "HVAC" else "661-605-3526"
         cleaned_company = clean_company_name(business.business_name)
@@ -318,7 +446,7 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
             "Company": cleaned_company,
             "Job Title": contact.title or "",
             "Trade": trade,
-            "Persona": persona,
+            "Persona": final_persona,
             "Phone Classification": phone_type,
             "Permutation Tag": permutation_tag,
             "Demo Phone": demo_phone,
@@ -329,11 +457,18 @@ def sort_database_into_12_buckets(session, min_score: int = 80, exclude_unexport
 
         if permutation_tag in buckets:
             buckets[permutation_tag].append(record)
+            seen_emails.add(contact_email)
 
     return buckets
 
 
-def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaigns", min_score: int = 80, exclude_unexported: bool = False, only_classified: bool = True) -> dict[str, int]:
+def export_12_saleshandy_permutations(
+    output_dir: str = "data/saleshandy_campaigns",
+    min_score: int = 80,
+    exclude_unexported: bool = True,
+    only_classified: bool = True,
+    destination_prefix: str = "saleshandy_api",
+) -> dict[str, int]:
     """Export 12 pre-sorted CSV files for manual/batch Saleshandy import for strictly tested leads."""
     from datetime import datetime, timezone
     from app.db.create_tables import ExportHistory
@@ -347,8 +482,8 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
             session,
             min_score=min_score,
             exclude_unexported=exclude_unexported,
-            destination_prefix="saleshandy_csv",
-            only_classified=only_classified
+            destination_prefix=destination_prefix,
+            only_classified=only_classified,
         )
         summary_counts: dict[str, int] = {}
 
@@ -389,12 +524,17 @@ def export_12_saleshandy_permutations(output_dir: str = "data/saleshandy_campaig
         session.close()
 
 
-def push_to_saleshandy_api(min_score: int = 80, exclude_unexported: bool = False, only_classified: bool = True) -> dict[str, int]:
+def push_to_saleshandy_api(
+    min_score: int = 80,
+    exclude_unexported: bool = True,
+    only_classified: bool = False,
+    destination_prefix: str = "saleshandy_api",
+) -> dict[str, int]:
     """
     Push sorted lead buckets directly into live Saleshandy campaign sequences via API.
     
-    Defaults to min_score=80 (Verified Safe Only) and only_classified=True (Strictly Phone Tested Only)
-    to guarantee zero bounce risk and 100% accurate phone sequence copy.
+    Defaults to min_score=80 (Verified Safe Only), exclude_unexported=True (Global Saleshandy Deduplication),
+    and only_classified=True (Strictly Phone Tested Only) to guarantee zero bounce risk and 100% accurate sequence copy.
     """
     if not SALESHANDY_API_KEY:
         logger.warning("SALESHANDY_API_KEY is not set in environment; skipping API push.")
@@ -418,8 +558,8 @@ def push_to_saleshandy_api(min_score: int = 80, exclude_unexported: bool = False
             session_db,
             min_score=min_score,
             exclude_unexported=exclude_unexported,
-            destination_prefix="saleshandy_api",
-            only_classified=only_classified
+            destination_prefix=destination_prefix,
+            only_classified=only_classified,
         )
         results: dict[str, int] = {}
 
@@ -504,12 +644,16 @@ def push_to_saleshandy_api(min_score: int = 80, exclude_unexported: bool = False
 
                 prospect_fields = [
                     {"id": field_id_map.get("email", "qPBRX3lBPD"), "value": email},
-                    {"id": field_id_map.get("firstName", "KwO0O59MP6"), "value": first_name if first_name else "Team"},
-                    {"id": field_id_map.get("lastName", "VaDq03egzo"), "value": last_name if last_name else "Team"},
                     {"id": field_id_map.get("company", "gw4lvyOvwA"), "value": company if company else "Business"},
-                    {"id": field_id_map.get("phoneNumber", "gw4lvyOLwA"), "value": phone},
-                    {"id": field_id_map.get("jobTitle", "lwGMlr4Va6"), "value": job_title},
                 ]
+                if first_name:
+                    prospect_fields.append({"id": field_id_map.get("firstName", "KwO0O59MP6"), "value": first_name})
+                if last_name:
+                    prospect_fields.append({"id": field_id_map.get("lastName", "VaDq03egzo"), "value": last_name})
+                if phone:
+                    prospect_fields.append({"id": field_id_map.get("phoneNumber", "gw4lvyOLwA"), "value": phone})
+                if job_title:
+                    prospect_fields.append({"id": field_id_map.get("jobTitle", "lwGMlr4Va6"), "value": job_title})
                 if website and "website" in field_id_map:
                     prospect_fields.append({"id": field_id_map["website"], "value": website})
 
